@@ -9,10 +9,10 @@ use windows::core::{s, Interface, Result, PCSTR};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11PixelShader, ID3D11RenderTargetView,
-    ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_COMPARISON_NEVER,
-    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_RENDER_TARGET_VIEW_DESC,
+    ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11PixelShader,
+    ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D,
+    ID3D11VertexShader, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+    D3D11_COMPARISON_NEVER, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_RENDER_TARGET_VIEW_DESC,
     D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SAMPLER_DESC,
     D3D11_TEX2D_RTV, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT,
     D3D11_VIEWPORT,
@@ -21,6 +21,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_NV12, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_SAMPLE_DESC,
 };
 
+use crate::convert::align16;
 use crate::device::Gpu;
 
 const HLSL: &str = r#"
@@ -73,7 +74,10 @@ fn compile(entry: PCSTR, target: PCSTR) -> Result<ID3DBlob> {
     if let Err(e) = r {
         let msg = errors
             .map(|b| unsafe {
-                let bytes = std::slice::from_raw_parts(b.GetBufferPointer() as *const u8, b.GetBufferSize());
+                let bytes = std::slice::from_raw_parts(
+                    b.GetBufferPointer() as *const u8,
+                    b.GetBufferSize(),
+                );
                 String::from_utf8_lossy(bytes).into_owned()
             })
             .unwrap_or_default();
@@ -83,7 +87,9 @@ fn compile(entry: PCSTR, target: PCSTR) -> Result<ID3DBlob> {
 }
 
 fn bytecode(blob: &ID3DBlob) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize()) }
+    unsafe {
+        std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize())
+    }
 }
 
 struct Target {
@@ -130,12 +136,15 @@ impl ShaderConverter {
         }
 
         let tex_desc = D3D11_TEXTURE2D_DESC {
-            Width: out_size.0,
-            Height: out_size.1,
+            Width: align16(out_size.0),
+            Height: align16(out_size.1),
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_NV12,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
             CPUAccessFlags: 0,
@@ -205,7 +214,10 @@ impl ShaderConverter {
             return Ok(v.clone());
         }
         let mut view = None;
-        unsafe { self.device.CreateShaderResourceView(src, None, Some(&mut view))? };
+        unsafe {
+            self.device
+                .CreateShaderResourceView(src, None, Some(&mut view))?
+        };
         let view = view.expect("CreateShaderResourceView returned no view");
         if self.sources.len() >= 4 {
             self.sources.remove(0);
@@ -215,11 +227,17 @@ impl ShaderConverter {
     }
 }
 
-fn plane_view(device: &ID3D11Device, tex: &ID3D11Texture2D, format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT) -> Result<ID3D11RenderTargetView> {
+fn plane_view(
+    device: &ID3D11Device,
+    tex: &ID3D11Texture2D,
+    format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
+) -> Result<ID3D11RenderTargetView> {
     let desc = D3D11_RENDER_TARGET_VIEW_DESC {
         Format: format,
         ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2D,
-        Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_RTV { MipSlice: 0 } },
+        Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 {
+            Texture2D: D3D11_TEX2D_RTV { MipSlice: 0 },
+        },
     };
     let mut view = None;
     unsafe { device.CreateRenderTargetView(tex, Some(&desc), Some(&mut view))? };
@@ -227,5 +245,12 @@ fn plane_view(device: &ID3D11Device, tex: &ID3D11Texture2D, format: windows::Win
 }
 
 fn viewport(w: f32, h: f32) -> D3D11_VIEWPORT {
-    D3D11_VIEWPORT { TopLeftX: 0.0, TopLeftY: 0.0, Width: w, Height: h, MinDepth: 0.0, MaxDepth: 1.0 }
+    D3D11_VIEWPORT {
+        TopLeftX: 0.0,
+        TopLeftY: 0.0,
+        Width: w,
+        Height: h,
+        MinDepth: 0.0,
+        MaxDepth: 1.0,
+    }
 }

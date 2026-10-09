@@ -58,7 +58,10 @@ pub fn find_window(needle: &str) -> Option<(HWND, String)> {
         }
         true.into()
     }
-    let mut search = Search { needle: needle.to_lowercase(), found: None };
+    let mut search = Search {
+        needle: needle.to_lowercase(),
+        found: None,
+    };
     unsafe {
         // Returns an "error" when the callback stops early; that is the found case.
         let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize));
@@ -142,7 +145,10 @@ impl Capture {
         let Some(frame) = newest else { return Ok(None) };
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
         let texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
-        Ok(Some(Frame { _frame: frame, texture }))
+        Ok(Some(Frame {
+            _frame: frame,
+            texture,
+        }))
     }
 }
 

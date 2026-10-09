@@ -26,7 +26,11 @@ fn print_adapter(a: &Adapter) {
         a.index,
         a.name,
         a.vendor(),
-        if a.integrated { "integrated" } else { "dedicated" }
+        if a.integrated {
+            "integrated"
+        } else {
+            "dedicated"
+        }
     );
     println!(
         "    VRAM {} MB dedicated, {} MB shared",
