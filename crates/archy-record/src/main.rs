@@ -44,6 +44,8 @@ struct Args {
     height: u32,
     codec: Option<Codec>,
     mbps: u32,
+    /// Average bitrate to aim for (Mbps); `None` = constant quality.
+    target_mbps: Option<f32>,
     quality: u32,
     out: PathBuf,
     /// Profiling: run capture + convert but never hand frames to the encoder.
@@ -64,6 +66,7 @@ fn parse_args() -> std::result::Result<Args, String> {
         height: 1080,
         codec: None,
         mbps: 40,
+        target_mbps: None,
         quality: 70,
         out: PathBuf::from("archy-test.mp4"),
         convert_only: false,
@@ -86,6 +89,24 @@ fn parse_args() -> std::result::Result<Args, String> {
             "--mbps" => a.mbps = num(val()?)?,
             "--quality" => a.quality = num(val()?)?.min(100),
             "--out" => a.out = PathBuf::from(val()?),
+            // Resolution + bitrate presets: predictable size, ~MB per 30 s in comments.
+            "--preset" => {
+                let (height, mbps) = match val()?.to_lowercase().as_str() {
+                    "360p" => (360, 1.5),    // ~6 MB
+                    "480p" => (480, 2.5),    // ~9 MB, fits Discord's 10 MB
+                    "720p" => (720, 5.0),    // ~19 MB
+                    "1080p" => (1080, 10.0), // ~38 MB
+                    "1440p" => (1440, 18.0), // ~68 MB
+                    other => return Err(format!("unknown preset {other}")),
+                };
+                a.height = height;
+                a.target_mbps = Some(mbps);
+                a.mbps = (mbps * 1.5).ceil() as u32;
+            }
+            "--target-mbps" => {
+                let v = val()?;
+                a.target_mbps = Some(v.parse().map_err(|_| format!("bad number: {v}"))?);
+            }
             "--convert-only" => a.convert_only = true,
             "--discard" => a.discard = true,
             "--eco" => a.eco = true,
@@ -132,7 +153,7 @@ fn main() {
             if !msg.is_empty() {
                 eprintln!("{msg}");
             }
-            eprintln!("usage: archy-record [--window TITLE | --monitor] [--seconds N] [--fps 24-90] [--height PX] [--codec av1|hevc|h264] [--mbps N] [--quality 0-100] [--out FILE] [--convert video|shader] [--convert-only] [--discard] [--eco] [--gpu-priority -7..7] [--encoder vpl|mf]");
+            eprintln!("usage: archy-record [--window TITLE | --monitor] [--seconds N] [--fps 24-90] [--height PX] [--codec av1|hevc|h264] [--mbps N] [--quality 0-100] [--out FILE] [--preset 360p|480p|720p|1080p|1440p] [--target-mbps N] [--convert video|shader] [--convert-only] [--discard] [--eco] [--gpu-priority -7..7] [--encoder vpl|mf]");
             std::process::exit(2);
         }
     };
@@ -254,6 +275,7 @@ fn run(args: Args) -> Result<()> {
                 fps: args.fps,
                 max_bitrate: args.mbps * 1_000_000,
                 quality: args.quality,
+                target_bitrate: args.target_mbps.map(|m| (m * 1_000_000.0) as u32),
                 gop: args.fps,
             };
             match Encoder::new(backend, &gpu, &cfg) {

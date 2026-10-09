@@ -282,10 +282,12 @@ fn configure_codec_api(transform: &IMFTransform, cfg: &Config) -> &'static str {
     set(&CODECAPI_AVEncMPVDefaultBPictureCount, var_u32(0u32));
     set(&CODECAPI_AVEncCommonMaxBitRate, var_u32(cfg.max_bitrate));
 
-    if set(
-        &CODECAPI_AVEncCommonRateControlMode,
-        var_u32(eAVEncCommonRateControlMode_Quality.0 as u32),
-    ) {
+    if cfg.target_bitrate.is_none()
+        && set(
+            &CODECAPI_AVEncCommonRateControlMode,
+            var_u32(eAVEncCommonRateControlMode_Quality.0 as u32),
+        )
+    {
         set(&CODECAPI_AVEncCommonQuality, var_u32(cfg.quality));
         return "constant quality";
     }
@@ -295,7 +297,11 @@ fn configure_codec_api(transform: &IMFTransform, cfg: &Config) -> &'static str {
     ) {
         set(
             &CODECAPI_AVEncCommonMeanBitRate,
-            var_u32(cfg.max_bitrate / 10 * 7),
+            var_u32(
+                cfg.target_bitrate
+                    .unwrap_or(cfg.max_bitrate / 10 * 7)
+                    .min(cfg.max_bitrate),
+            ),
         );
         return "peak-constrained VBR";
     }

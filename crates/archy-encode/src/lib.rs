@@ -30,6 +30,9 @@ pub struct Config {
     pub max_bitrate: u32,
     /// 0–100, used when the encoder supports quality-based rate control.
     pub quality: u32,
+    /// `Some(bps)`: aim for this average bitrate (VBR, capped at `max_bitrate`) so
+    /// file size is predictable. `None`: constant quality, size varies with the scene.
+    pub target_bitrate: Option<u32>,
     /// Frames between keyframes. One second keeps clip starts and trims precise.
     pub gop: u32,
 }
