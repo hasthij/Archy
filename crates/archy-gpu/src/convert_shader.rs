@@ -34,15 +34,29 @@ V vs(uint id : SV_VertexID) {
     return o;
 }
 
+// Downscaling more than ~1.5x with one bilinear tap skips source pixels and makes
+// edges shimmer. When shrinking, average four taps spread over the output pixel's
+// footprint (each tap already blends 2x2), so 1080p->360p stays smooth. 1:1 stays one tap.
+float3 fetch(float2 uv) {
+    float sw, sh;
+    src.GetDimensions(sw, sh);
+    float2 step = float2(ddx(uv).x, ddy(uv).y);
+    if (step.x * sw < 1.5 && step.y * sh < 1.5)
+        return src.Sample(samp, uv).rgb;
+    float2 o = step * 0.25;
+    return 0.25 * (src.Sample(samp, uv + float2(-o.x, -o.y)).rgb + src.Sample(samp, uv + float2(o.x, -o.y)).rgb
+                 + src.Sample(samp, uv + float2(-o.x, o.y)).rgb + src.Sample(samp, uv + float2(o.x, o.y)).rgb);
+}
+
 // BT.709, limited (studio) range, applied to the sRGB-encoded values as video expects.
 float ps_y(V i) : SV_Target {
-    float3 c = src.Sample(samp, i.uv).rgb;
+    float3 c = fetch(i.uv);
     return dot(c, float3(0.2126, 0.7152, 0.0722)) * (219.0 / 255.0) + (16.0 / 255.0);
 }
 
 // Rendered at half size: bilinear sampling at the 2x2 block centre averages it.
 float2 ps_uv(V i) : SV_Target {
-    float3 c = src.Sample(samp, i.uv).rgb;
+    float3 c = fetch(i.uv);
     float cb = dot(c, float3(-0.1146, -0.3854, 0.5));
     float cr = dot(c, float3(0.5, -0.4542, -0.0458));
     return float2(cb, cr) * (224.0 / 255.0) + (128.0 / 255.0);

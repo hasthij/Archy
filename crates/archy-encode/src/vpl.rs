@@ -381,7 +381,12 @@ fn video_param(cfg: &Config, low_power: bool, icq: bool) -> mfxVideoParam {
         mfx.MaxKbps = 0;
     } else {
         mfx.RateControlMethod = MFX_RATECONTROL_VBR;
-        mfx.TargetKbps = (max_kbps * 7 / 10 / mult) as u16;
+        let target_kbps = cfg
+            .target_bitrate
+            .map(|b| b / 1000)
+            .unwrap_or(max_kbps * 7 / 10)
+            .min(max_kbps);
+        mfx.TargetKbps = (target_kbps / mult) as u16;
         mfx.MaxKbps = (max_kbps / mult) as u16;
     }
     mfxVideoParam {
@@ -481,12 +486,17 @@ impl VplEncoder {
     /// Tries the cheapest configuration first: fixed-function low-power encode with
     /// constant quality, then falls back step by step.
     fn init(&mut self, cfg: &Config) -> Result<()> {
-        let attempts = [
+        let all = [
             (true, true, "constant quality, low-power"),
             (true, false, "VBR, low-power"),
             (false, true, "constant quality"),
             (false, false, "VBR"),
         ];
+        // A bitrate target means VBR only; constant quality is the fallback-free default otherwise.
+        let attempts: Vec<_> = all
+            .into_iter()
+            .filter(|(_, icq, _)| cfg.target_bitrate.is_none() || !icq)
+            .collect();
         let mut last = MFX_ERR_NONE;
         for (low_power, icq, label) in attempts {
             let mut par = video_param(cfg, low_power, icq);
