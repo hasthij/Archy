@@ -9,7 +9,7 @@ use std::mem::ManuallyDrop;
 use windows::core::{Interface, Result};
 use windows::Win32::Foundation::{RECT, TRUE};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice,
+    ID3D11Device, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice,
     ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
     ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
     D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -85,6 +85,33 @@ pub fn align16(v: u32) -> u32 {
     (v + 15) & !15
 }
 
+/// An NV12 target the converters draw into and the encoder reads from,
+/// allocated at the 16-aligned size.
+pub(crate) fn create_nv12(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+) -> Result<ID3D11Texture2D> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: align16(width),
+        Height: align16(height),
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_NV12,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut tex = None;
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut tex))? };
+    Ok(tex.expect("CreateTexture2D returned no texture"))
+}
+
 pub struct Converter {
     video_device: ID3D11VideoDevice,
     video_context: ID3D11VideoContext,
@@ -152,21 +179,6 @@ impl Converter {
             }
         }
 
-        let tex_desc = D3D11_TEXTURE2D_DESC {
-            Width: align16(out_size.0),
-            Height: align16(out_size.1),
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: DXGI_FORMAT_NV12,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
         let view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
             ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
             Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
@@ -175,12 +187,7 @@ impl Converter {
         };
         let mut outputs = Vec::with_capacity(pool_len);
         for _ in 0..pool_len {
-            let mut tex = None;
-            unsafe {
-                gpu.device
-                    .CreateTexture2D(&tex_desc, None, Some(&mut tex))?
-            };
-            let tex = tex.expect("CreateTexture2D returned no texture");
+            let tex = create_nv12(&gpu.device, out_size.0, out_size.1)?;
             let mut view = None;
             unsafe {
                 video_device.CreateVideoProcessorOutputView(

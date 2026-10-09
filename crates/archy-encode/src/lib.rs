@@ -75,7 +75,7 @@ pub enum Backend {
 }
 
 pub enum Encoder {
-    Vpl(vpl::VplEncoder),
+    Vpl(Box<vpl::VplEncoder>),
     Mf(mf::MfEncoder),
 }
 
@@ -86,7 +86,7 @@ unsafe impl Send for Encoder {}
 impl Encoder {
     pub fn new(backend: Backend, gpu: &archy_gpu::device::Gpu, cfg: &Config) -> Result<Self> {
         Ok(match backend {
-            Backend::Vpl => Self::Vpl(vpl::VplEncoder::new(gpu, cfg)?),
+            Backend::Vpl => Self::Vpl(Box::new(vpl::VplEncoder::new(gpu, cfg)?)),
             Backend::MediaFoundation => Self::Mf(mf::MfEncoder::new(gpu, cfg)?),
         })
     }

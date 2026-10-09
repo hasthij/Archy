@@ -11,17 +11,13 @@ use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIA
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11PixelShader,
     ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D,
-    ID3D11VertexShader, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
-    D3D11_COMPARISON_NEVER, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_RENDER_TARGET_VIEW_DESC,
-    D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SAMPLER_DESC,
-    D3D11_TEX2D_RTV, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT,
-    D3D11_VIEWPORT,
+    ID3D11VertexShader, D3D11_COMPARISON_NEVER, D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+    D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D,
+    D3D11_SAMPLER_DESC, D3D11_TEX2D_RTV, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_VIEWPORT,
 };
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_NV12, DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_SAMPLE_DESC,
-};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM};
 
-use crate::convert::align16;
+use crate::convert::create_nv12;
 use crate::device::Gpu;
 
 const HLSL: &str = r#"
@@ -135,26 +131,9 @@ impl ShaderConverter {
             device.CreateSamplerState(&desc, Some(&mut sampler))?;
         }
 
-        let tex_desc = D3D11_TEXTURE2D_DESC {
-            Width: align16(out_size.0),
-            Height: align16(out_size.1),
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: DXGI_FORMAT_NV12,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
         let mut outputs = Vec::with_capacity(pool_len);
         for _ in 0..pool_len {
-            let mut tex = None;
-            unsafe { device.CreateTexture2D(&tex_desc, None, Some(&mut tex))? };
-            let texture = tex.expect("CreateTexture2D returned no texture");
+            let texture = create_nv12(device, out_size.0, out_size.1)?;
             // On NV12, an R8 view addresses the Y plane and an R8G8 view the UV plane.
             let y = plane_view(device, &texture, DXGI_FORMAT_R8_UNORM)?;
             let uv = plane_view(device, &texture, DXGI_FORMAT_R8G8_UNORM)?;

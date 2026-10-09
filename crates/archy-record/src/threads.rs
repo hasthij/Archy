@@ -118,7 +118,7 @@ pub fn report(
         .into_iter()
         .filter(|(_, (d, _))| !d.is_zero())
         .collect();
-    rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1 .0));
     println!("  Threads by module (CPU % of one core):");
     for (module, (cpu, count)) in rows {
         println!(

@@ -1,25 +1,27 @@
 //! Windows.Graphics.Capture of a game window or a whole monitor.
 //!
 //! Anti-cheat safe: nothing is injected into the game. Frames arrive as GPU
-//! textures; the recorder pulls only the newest one at its own pace, so a game
-//! running at 240 fps costs the same as one at 60.
+//! textures with the compositor's timestamp; the recorder wakes on each one and
+//! keeps only as many as its target frame rate, so a game running at 240 fps
+//! costs the same as one at 60.
 
 use std::time::Duration;
 
 use windows::core::{factory, Interface, Result, BOOL};
-use windows::Foundation::TimeSpan;
+use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
-use windows::Win32::Foundation::{HWND, LPARAM, POINT};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{
     MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITOR_DEFAULTTONEAREST,
     MONITOR_DEFAULTTOPRIMARY,
 };
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
@@ -81,6 +83,8 @@ pub struct Capture {
     _item: GraphicsCaptureItem,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
+    event: HANDLE,
+    token: i64,
     pub width: u32,
     pub height: u32,
 }
@@ -90,6 +94,9 @@ pub struct Capture {
 pub struct Frame {
     _frame: Direct3D11CaptureFrame,
     pub texture: ID3D11Texture2D,
+    /// When the compositor produced the frame, in 100 ns QPC units. Using this
+    /// (not the time we picked it up) keeps clip motion exactly as it was shown.
+    pub time: i64,
 }
 
 impl Capture {
@@ -124,15 +131,38 @@ impl Capture {
         let _ = session.SetMinUpdateInterval(TimeSpan {
             Duration: (min_interval.as_nanos() / 100) as i64,
         });
+
+        // The compositor signals each new frame; the recorder sleeps on this
+        // instead of polling, so it never misses or double-reads a frame.
+        let event = unsafe { CreateEventW(None, false, false, None)? };
+        let signal = event.0 as usize;
+        let token = pool.FrameArrived(&TypedEventHandler::new(move |_, _| {
+            unsafe {
+                let _ = SetEvent(HANDLE(signal as *mut _));
+            }
+            Ok(())
+        }))?;
         session.StartCapture()?;
 
         Ok(Self {
             _item: item,
             pool,
             session,
+            event,
+            token,
             width: size.Width as u32,
             height: size.Height as u32,
         })
+    }
+
+    /// Waits up to `timeout` for the compositor to deliver a frame, then returns
+    /// the newest one. `None` means the window showed nothing new in that time.
+    pub fn next(&self, timeout: Duration) -> Result<Option<Frame>> {
+        let ms = timeout.as_millis().min(u32::MAX as u128) as u32;
+        if unsafe { WaitForSingleObject(self.event, ms) } != WAIT_OBJECT_0 {
+            return Ok(None);
+        }
+        self.latest()
     }
 
     /// Newest frame since the last call, discarding any older ones; `None` if nothing new.
@@ -145,16 +175,22 @@ impl Capture {
         let Some(frame) = newest else { return Ok(None) };
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
         let texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
+        let time = frame.SystemRelativeTime()?.Duration;
         Ok(Some(Frame {
             _frame: frame,
             texture,
+            time,
         }))
     }
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
+        let _ = self.pool.RemoveFrameArrived(self.token);
         let _ = self.session.Close();
         let _ = self.pool.Close();
+        unsafe {
+            let _ = CloseHandle(self.event);
+        }
     }
 }
