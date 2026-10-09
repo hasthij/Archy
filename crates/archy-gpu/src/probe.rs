@@ -34,7 +34,7 @@ pub enum Codec {
 impl Codec {
     pub const ALL: [Codec; 3] = [Codec::Av1, Codec::Hevc, Codec::H264];
 
-    fn subtype(self) -> GUID {
+    pub fn subtype(self) -> GUID {
         match self {
             Codec::H264 => MFVideoFormat_H264,
             Codec::Hevc => MFVideoFormat_HEVC,
@@ -167,6 +167,22 @@ fn displays(adapter: &IDXGIAdapter1) -> Result<Vec<Display>> {
 
 /// Hardware encoder MFTs bound to one adapter, for every codec Archy can record in.
 fn encoders(luid: LUID) -> Result<Vec<Encoder>> {
+    let mut found: Vec<Encoder> = Vec::new();
+    for codec in Codec::ALL {
+        for activate in encoder_activates(luid, codec)? {
+            let name = friendly_name(&activate);
+            // Drivers can register the same MFT more than once.
+            if !found.iter().any(|e| e.codec == codec && e.name == name) {
+                found.push(Encoder { codec, name });
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Hardware encoder MFTs on the adapter with `luid` that output `codec`, best first.
+/// Media Foundation must be started.
+pub fn encoder_activates(luid: LUID, codec: Codec) -> Result<Vec<IMFActivate>> {
     let mut attrs: Option<IMFAttributes> = None;
     unsafe { MFCreateAttributes(&mut attrs, 1)? };
     let attrs = attrs.expect("MFCreateAttributes succeeded without attributes");
@@ -175,44 +191,37 @@ fn encoders(luid: LUID) -> Result<Vec<Encoder>> {
     };
     unsafe { attrs.SetBlob(&MFT_ENUM_ADAPTER_LUID, luid_bytes)? };
 
-    let mut found = Vec::new();
-    for codec in Codec::ALL {
-        let output = MFT_REGISTER_TYPE_INFO {
-            guidMajorType: MFMediaType_Video,
-            guidSubtype: codec.subtype(),
-        };
-        let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
-        let mut count = 0u32;
-        unsafe {
-            MFTEnum2(
-                MFT_CATEGORY_VIDEO_ENCODER,
-                MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-                None,
-                Some(&output),
-                &attrs,
-                &mut list,
-                &mut count,
-            )?;
-        }
-        for i in 0..count as usize {
-            // Take ownership so each activate is released when dropped.
-            let activate = unsafe { std::ptr::read(list.add(i)) };
-            if let Some(activate) = activate {
-                let name = friendly_name(&activate);
-                // Drivers can register the same MFT more than once.
-                if !found.iter().any(|e: &Encoder| e.codec == codec && e.name == name) {
-                    found.push(Encoder { codec, name });
-                }
-            }
-        }
-        if !list.is_null() {
-            unsafe { CoTaskMemFree(Some(list as *const _)) };
+    let output = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: codec.subtype(),
+    };
+    let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
+    let mut count = 0u32;
+    unsafe {
+        MFTEnum2(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+            None,
+            Some(&output),
+            &attrs,
+            &mut list,
+            &mut count,
+        )?;
+    }
+    let mut out = Vec::with_capacity(count as usize);
+    for i in 0..count as usize {
+        // Take ownership so each activate is released when dropped.
+        if let Some(a) = unsafe { std::ptr::read(list.add(i)) } {
+            out.push(a);
         }
     }
-    Ok(found)
+    if !list.is_null() {
+        unsafe { CoTaskMemFree(Some(list as *const _)) };
+    }
+    Ok(out)
 }
 
-fn friendly_name(activate: &IMFActivate) -> String {
+pub fn friendly_name(activate: &IMFActivate) -> String {
     let mut name = PWSTR::null();
     let mut len = 0u32;
     unsafe {

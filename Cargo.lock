@@ -3,9 +3,42 @@
 version = 4
 
 [[package]]
+name = "archy-capture"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "archy-encode"
+version = "0.1.0"
+dependencies = [
+ "archy-gpu",
+ "windows",
+]
+
+[[package]]
 name = "archy-gpu"
 version = "0.1.0"
 dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "archy-mux"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "archy-record"
+version = "0.1.0"
+dependencies = [
+ "archy-capture",
+ "archy-encode",
+ "archy-gpu",
+ "archy-mux",
  "windows",
 ]
 
