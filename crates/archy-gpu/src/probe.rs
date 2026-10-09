@@ -8,9 +8,9 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFAttributes, MFCreateAttributes, MFMediaType_Video, MFShutdown, MFStartup,
-    MFTEnum2, MFVideoFormat_AV1, MFVideoFormat_H264, MFVideoFormat_HEVC,
-    MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG_HARDWARE,
-    MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute, MFT_REGISTER_TYPE_INFO, MF_VERSION,
+    MFTEnum2, MFT_FRIENDLY_NAME_Attribute, MFVideoFormat_AV1, MFVideoFormat_H264,
+    MFVideoFormat_HEVC, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_REGISTER_TYPE_INFO, MF_VERSION,
 };
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 use windows::Win32::UI::HiDpi::{
@@ -187,7 +187,10 @@ pub fn encoder_activates(luid: LUID, codec: Codec) -> Result<Vec<IMFActivate>> {
     unsafe { MFCreateAttributes(&mut attrs, 1)? };
     let attrs = attrs.expect("MFCreateAttributes succeeded without attributes");
     let luid_bytes = unsafe {
-        std::slice::from_raw_parts(&luid as *const LUID as *const u8, std::mem::size_of::<LUID>())
+        std::slice::from_raw_parts(
+            &luid as *const LUID as *const u8,
+            std::mem::size_of::<LUID>(),
+        )
     };
     unsafe { attrs.SetBlob(&MFT_ENUM_ADAPTER_LUID, luid_bytes)? };
 

@@ -5,13 +5,15 @@
 //!   archy-record --window Roblox --seconds 20 --fps 60 --codec av1 --out test.mp4
 //!   archy-record --monitor --seconds 10
 
+mod threads;
+
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use archy_capture::{find_window, primary_monitor, Capture, Target};
-use archy_encode::{Config, Encoder, Input};
+use archy_encode::{Backend, Config, Encoder, Input};
 use archy_gpu::convert::{fit_size, AnyConverter, ConvertMode};
 use archy_gpu::device::Gpu;
 use archy_gpu::probe::Codec;
@@ -51,6 +53,7 @@ struct Args {
     discard: bool,
     gpu_priority: i32,
     eco: bool,
+    backend: Option<Backend>,
 }
 
 fn parse_args() -> std::result::Result<Args, String> {
@@ -68,6 +71,7 @@ fn parse_args() -> std::result::Result<Args, String> {
         discard: false,
         gpu_priority: archy_gpu::device::RECORDER_GPU_PRIORITY,
         eco: false,
+        backend: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -85,9 +89,19 @@ fn parse_args() -> std::result::Result<Args, String> {
             "--convert-only" => a.convert_only = true,
             "--discard" => a.discard = true,
             "--eco" => a.eco = true,
+            "--encoder" => {
+                a.backend = Some(match val()?.to_lowercase().as_str() {
+                    "vpl" | "qsv" => Backend::Vpl,
+                    "mf" => Backend::MediaFoundation,
+                    other => return Err(format!("unknown encoder {other}")),
+                })
+            }
             "--gpu-priority" => {
                 let v = val()?;
-                a.gpu_priority = v.parse::<i32>().map_err(|_| format!("bad number: {v}"))?.clamp(-7, 7)
+                a.gpu_priority = v
+                    .parse::<i32>()
+                    .map_err(|_| format!("bad number: {v}"))?
+                    .clamp(-7, 7)
             }
             "--convert" => {
                 a.convert = match val()?.to_lowercase().as_str() {
@@ -118,7 +132,7 @@ fn main() {
             if !msg.is_empty() {
                 eprintln!("{msg}");
             }
-            eprintln!("usage: archy-record [--window TITLE | --monitor] [--seconds N] [--fps 24-90] [--height PX] [--codec av1|hevc|h264] [--mbps N] [--quality 0-100] [--out FILE] [--convert video|shader] [--convert-only] [--discard] [--eco] [--gpu-priority -7..7]");
+            eprintln!("usage: archy-record [--window TITLE | --monitor] [--seconds N] [--fps 24-90] [--height PX] [--codec av1|hevc|h264] [--mbps N] [--quality 0-100] [--out FILE] [--convert video|shader] [--convert-only] [--discard] [--eco] [--gpu-priority -7..7] [--encoder vpl|mf]");
             std::process::exit(2);
         }
     };
@@ -202,41 +216,63 @@ fn run(args: Args) -> Result<()> {
         efficiency_mode();
     }
     let interval = Duration::from_secs_f64(1.0 / args.fps as f64);
-    let capture = step("start capture", Capture::start(&gpu.device, target, interval))?;
+    let capture = step(
+        "start capture",
+        Capture::start(&gpu.device, target, interval),
+    )?;
     let (out_w, out_h) = fit_size(capture.width, capture.height, args.height);
     let mut converter = step(
         "create video processor",
-        AnyConverter::new(&gpu, args.convert, (capture.width, capture.height), (out_w, out_h), args.fps, NV12_POOL),
+        AnyConverter::new(
+            &gpu,
+            args.convert,
+            (capture.width, capture.height),
+            (out_w, out_h),
+            args.fps,
+            NV12_POOL,
+        ),
     )?;
 
     let codecs: Vec<Codec> = match args.codec {
         Some(c) => vec![c],
         None => Codec::ALL.to_vec(),
     };
+    // oneVPL first (Intel, far less CPU), Media Foundation for everything else.
+    let backends: Vec<Backend> = match args.backend {
+        Some(b) => vec![b],
+        None => vec![Backend::Vpl, Backend::MediaFoundation],
+    };
     let mut encoder = None;
-    for codec in codecs {
-        let cfg = Config {
-            codec,
-            width: out_w,
-            height: out_h,
-            fps: args.fps,
-            max_bitrate: args.mbps * 1_000_000,
-            quality: args.quality,
-            gop: args.fps,
-        };
-        match Encoder::new(&gpu, &cfg) {
-            Ok(e) => {
-                println!(
-                    "Encoder: {} ({codec}, {}), {}x{} @ {} fps, convert: {:?}",
-                    e.name, e.rate_control, out_w, out_h, args.fps, args.convert
-                );
-                encoder = Some(e);
-                break;
+    'search: for codec in codecs {
+        for &backend in &backends {
+            let cfg = Config {
+                codec,
+                width: out_w,
+                height: out_h,
+                fps: args.fps,
+                max_bitrate: args.mbps * 1_000_000,
+                quality: args.quality,
+                gop: args.fps,
+            };
+            match Encoder::new(backend, &gpu, &cfg) {
+                Ok(e) => {
+                    println!(
+                        "Encoder: {} ({codec}, {}), {}x{} @ {} fps, convert: {:?}",
+                        e.name(),
+                        e.rate_control(),
+                        out_w,
+                        out_h,
+                        args.fps,
+                        args.convert
+                    );
+                    encoder = Some((e, codec));
+                    break 'search;
+                }
+                Err(e) => println!("  {codec} via {backend:?} unavailable: {}", e.message()),
             }
-            Err(e) => println!("  {codec} unavailable: {e}"),
         }
     }
-    let Some(encoder) = encoder else {
+    let Some((encoder, codec)) = encoder else {
         eprintln!("No hardware encoder could be started.");
         std::process::exit(1);
     };
@@ -244,6 +280,7 @@ fn run(args: Args) -> Result<()> {
     let (tx, rx) = sync_channel::<SendPtr<Input>>(QUEUE_DEPTH);
     let out_path = args.out.clone();
     let discard = args.discard;
+    let fps = args.fps;
     let eco = args.eco;
     let enc_thread = thread::spawn(move || -> Result<(archy_encode::Stats, Duration)> {
         unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
@@ -251,17 +288,27 @@ fn run(args: Args) -> Result<()> {
             efficiency_mode();
         }
         let cpu0 = thread_cpu_time();
-        let encoder = encoder;
+        let mut encoder = encoder;
         let mut writer: Option<Mp4Writer> = None;
-        let stats = step("encode", encoder.run(rx, |sample, _key| {
-            if discard {
-                return Ok(());
-            }
-            if writer.is_none() {
-                writer = Some(step("create mp4", Mp4Writer::create(&out_path, &encoder.output_type()?))?);
-            }
-            step("write mp4", writer.as_mut().expect("writer just created").write(sample))
-        }))?;
+        let stats = step(
+            "encode",
+            encoder.run(rx, |p| {
+                if discard {
+                    return Ok(());
+                }
+                if writer.is_none() {
+                    if !p.keyframe {
+                        return Ok(()); // a file must start on a keyframe
+                    }
+                    writer = Some(step(
+                        "create mp4",
+                        Mp4Writer::create(&out_path, codec, out_w, out_h, fps, p.data),
+                    )?);
+                }
+                let w = writer.as_mut().expect("writer just created");
+                step("write mp4", w.write(p.data, p.time, p.duration, p.keyframe))
+            }),
+        )?;
         if let Some(w) = writer {
             step("finish mp4", w.finish())?;
         }
@@ -273,6 +320,7 @@ fn run(args: Args) -> Result<()> {
     let (mut first_drop, mut last_drop) = (None, 0u32);
     let (mut get_time, mut convert_time) = (Duration::ZERO, Duration::ZERO);
     let cpu_start = cpu_time();
+    let threads_before = threads::snapshot();
     let main_cpu_start = thread_cpu_time();
     let start = Instant::now();
     println!("Recording {} s...", args.seconds);
@@ -299,7 +347,10 @@ fn run(args: Args) -> Result<()> {
         if args.convert_only {
             continue;
         }
-        let input = Input { texture, time: n as i64 * 10_000_000 / args.fps as i64 };
+        let input = Input {
+            texture,
+            time: n as i64 * 10_000_000 / args.fps as i64,
+        };
         match tx.try_send(SendPtr(input)) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
@@ -312,6 +363,8 @@ fn run(args: Args) -> Result<()> {
     }
     let wall = start.elapsed();
     let main_cpu = thread_cpu_time() - main_cpu_start;
+    // Before the encoder thread exits, so its time is still attributable.
+    let threads_after = threads::snapshot();
     drop(tx);
     let (stats, enc_cpu) = enc_thread.join().expect("encoder thread panicked")?;
     let cpu = cpu_time() - cpu_start;
@@ -327,8 +380,15 @@ fn run(args: Args) -> Result<()> {
     if let Some(first) = first_drop {
         println!("    drops between frame {first} and {last_drop}");
     }
-    println!("  Encoded: {} frames -> {} packets, {} keyframes", stats.frames_in, stats.packets, stats.keyframes);
-    println!("  Size: {:.1} MB, avg {:.1} Mbps", stats.bytes as f64 / 1e6, stats.bytes as f64 * 8.0 / secs / 1e6);
+    println!(
+        "  Encoded: {} frames -> {} packets, {} keyframes",
+        stats.frames_in, stats.packets, stats.keyframes
+    );
+    println!(
+        "  Size: {:.1} MB, avg {:.1} Mbps",
+        stats.bytes as f64 / 1e6,
+        stats.bytes as f64 * 8.0 / secs / 1e6
+    );
     println!(
         "  Recorder CPU: {:.1}% of one core  (per frame: get {:.2} ms, convert submit {:.2} ms)",
         cpu.as_secs_f64() / secs * 100.0,
@@ -342,5 +402,6 @@ fn run(args: Args) -> Result<()> {
         pct(enc_cpu),
         pct(cpu.saturating_sub(main_cpu + enc_cpu))
     );
+    threads::report(&threads_before, &threads_after, wall);
     Ok(())
 }

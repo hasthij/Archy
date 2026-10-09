@@ -7,7 +7,7 @@
 use std::mem::ManuallyDrop;
 
 use windows::core::{Interface, Result};
-use windows::Win32::Foundation::TRUE;
+use windows::Win32::Foundation::{RECT, TRUE};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice,
     ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
@@ -55,9 +55,18 @@ pub enum AnyConverter {
 }
 
 impl AnyConverter {
-    pub fn new(gpu: &Gpu, mode: ConvertMode, in_size: (u32, u32), out_size: (u32, u32), fps: u32, pool_len: usize) -> Result<Self> {
+    pub fn new(
+        gpu: &Gpu,
+        mode: ConvertMode,
+        in_size: (u32, u32),
+        out_size: (u32, u32),
+        fps: u32,
+        pool_len: usize,
+    ) -> Result<Self> {
         Ok(match mode {
-            ConvertMode::VideoEngine => Self::VideoEngine(Converter::new(gpu, in_size, out_size, fps, pool_len)?),
+            ConvertMode::VideoEngine => {
+                Self::VideoEngine(Converter::new(gpu, in_size, out_size, fps, pool_len)?)
+            }
             ConvertMode::Shader => Self::Shader(ShaderConverter::new(gpu, out_size, pool_len)?),
         })
     }
@@ -68,6 +77,12 @@ impl AnyConverter {
             Self::Shader(c) => c.convert(src),
         }
     }
+}
+
+/// Hardware encoders work on 16-pixel macroblocks/CTUs; NV12 targets are
+/// allocated at the aligned size and the encoder crops to the visible size.
+pub fn align16(v: u32) -> u32 {
+    (v + 15) & !15
 }
 
 pub struct Converter {
@@ -95,7 +110,10 @@ impl Converter {
     ) -> Result<Self> {
         let video_device: ID3D11VideoDevice = gpu.device.cast()?;
         let video_context: ID3D11VideoContext = gpu.context.cast()?;
-        let rate = DXGI_RATIONAL { Numerator: fps, Denominator: 1 };
+        let rate = DXGI_RATIONAL {
+            Numerator: fps,
+            Denominator: 1,
+        };
         let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
             InputFrameRate: rate,
@@ -112,20 +130,38 @@ impl Converter {
         unsafe {
             // No driver "enhancements" (denoise, edge, skin tone...): pure scale + convert.
             video_context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
+            // Only the visible area; alignment padding below/right is cropped by the encoder.
+            let visible = RECT {
+                left: 0,
+                top: 0,
+                right: out_size.0 as i32,
+                bottom: out_size.1 as i32,
+            };
+            video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&visible));
             // Correct color metadata is free quality: sRGB in, BT.709 limited range out.
             if let Ok(vc1) = video_context.cast::<ID3D11VideoContext1>() {
-                vc1.VideoProcessorSetStreamColorSpace1(&processor, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
-                vc1.VideoProcessorSetOutputColorSpace1(&processor, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
+                vc1.VideoProcessorSetStreamColorSpace1(
+                    &processor,
+                    0,
+                    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+                );
+                vc1.VideoProcessorSetOutputColorSpace1(
+                    &processor,
+                    DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+                );
             }
         }
 
         let tex_desc = D3D11_TEXTURE2D_DESC {
-            Width: out_size.0,
-            Height: out_size.1,
+            Width: align16(out_size.0),
+            Height: align16(out_size.1),
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_NV12,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
             CPUAccessFlags: 0,
@@ -140,11 +176,19 @@ impl Converter {
         let mut outputs = Vec::with_capacity(pool_len);
         for _ in 0..pool_len {
             let mut tex = None;
-            unsafe { gpu.device.CreateTexture2D(&tex_desc, None, Some(&mut tex))? };
+            unsafe {
+                gpu.device
+                    .CreateTexture2D(&tex_desc, None, Some(&mut tex))?
+            };
             let tex = tex.expect("CreateTexture2D returned no texture");
             let mut view = None;
             unsafe {
-                video_device.CreateVideoProcessorOutputView(&tex, &enumerator, &view_desc, Some(&mut view))?
+                video_device.CreateVideoProcessorOutputView(
+                    &tex,
+                    &enumerator,
+                    &view_desc,
+                    Some(&mut view),
+                )?
             };
             outputs.push((tex, view.expect("no output view")));
         }
@@ -174,8 +218,12 @@ impl Converter {
             ..Default::default()
         };
         let result = unsafe {
-            self.video_context
-                .VideoProcessorBlt(&self.processor, view, 0, std::slice::from_ref(&stream))
+            self.video_context.VideoProcessorBlt(
+                &self.processor,
+                view,
+                0,
+                std::slice::from_ref(&stream),
+            )
         };
         unsafe { ManuallyDrop::drop(&mut stream.pInputSurface) };
         result?;
@@ -190,13 +238,20 @@ impl Converter {
             FourCC: 0,
             ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
             Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 },
+                Texture2D: D3D11_TEX2D_VPIV {
+                    MipSlice: 0,
+                    ArraySlice: 0,
+                },
             },
         };
         let mut view = None;
         unsafe {
-            self.video_device
-                .CreateVideoProcessorInputView(src, &self.enumerator, &desc, Some(&mut view))?
+            self.video_device.CreateVideoProcessorInputView(
+                src,
+                &self.enumerator,
+                &desc,
+                Some(&mut view),
+            )?
         };
         let view = view.expect("CreateVideoProcessorInputView returned no view");
         // Bounded: if the capture source is recreated, old textures age out.

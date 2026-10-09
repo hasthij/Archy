@@ -1,7 +1,8 @@
 use windows::core::{Interface, Result};
 use windows::Win32::Foundation::{HMODULE, LUID};
 use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0,
+    D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
@@ -39,7 +40,11 @@ impl Gpu {
             D3D11CreateDevice(
                 adapter.as_ref(),
                 // An explicit adapter requires UNKNOWN; no adapter means "default hardware".
-                if adapter.is_some() { D3D_DRIVER_TYPE_UNKNOWN } else { D3D_DRIVER_TYPE_HARDWARE },
+                if adapter.is_some() {
+                    D3D_DRIVER_TYPE_UNKNOWN
+                } else {
+                    D3D_DRIVER_TYPE_HARDWARE
+                },
                 HMODULE::default(),
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                 Some(&levels),
@@ -54,7 +59,9 @@ impl Gpu {
 
         // Media Foundation's encoder uses this device from its own threads.
         unsafe {
-            let _ = device.cast::<ID3D11Multithread>()?.SetMultithreadProtected(true);
+            let _ = device
+                .cast::<ID3D11Multithread>()?
+                .SetMultithreadProtected(true);
         }
 
         let dxgi: IDXGIDevice = device.cast()?;
@@ -63,6 +70,10 @@ impl Gpu {
             let _ = dxgi.SetGPUThreadPriority(priority);
         }
         let luid = unsafe { dxgi.GetAdapter()?.GetDesc()?.AdapterLuid };
-        Ok(Self { device, context, luid })
+        Ok(Self {
+            device,
+            context,
+            luid,
+        })
     }
 }

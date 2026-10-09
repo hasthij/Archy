@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "archy-bench"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "archy-capture"
 version = "0.1.0"
 dependencies = [
@@ -28,6 +35,7 @@ dependencies = [
 name = "archy-mux"
 version = "0.1.0"
 dependencies = [
+ "archy-gpu",
  "windows",
 ]
 
