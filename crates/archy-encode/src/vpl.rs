@@ -2,9 +2,11 @@
 //!
 //! The dispatcher `libvpl.dll` ships with Intel's graphics driver (System32) and
 //! is loaded at runtime, so non-Intel PCs simply don't offer this backend.
-//! The recorder's NV12 textures are imported zero-copy with
-//! `mfxMemoryInterface::ImportFrameSurface`, and the encoder runs on the
-//! fixed-function low-power path (VDEnc) when the GPU has one.
+//! Each frame is copied GPU-side into one of the runtime's own input surfaces
+//! (one CopySubresourceRegion: microseconds of CPU), which works on every Intel
+//! driver; texture import (`ImportFrameSurface`) was refused by current drivers
+//! and cost ~1.5 ms of CPU per frame in its copy fallback. The encoder runs on
+//! the fixed-function low-power path (VDEnc) when the GPU has one.
 
 use std::ffi::c_void;
 use std::ptr::null_mut;
@@ -16,7 +18,9 @@ use archy_gpu::probe::Codec;
 use archy_gpu::SendPtr;
 use windows::core::{s, w, Error, Interface, Result};
 use windows::Win32::Foundation::{FreeLibrary, E_FAIL, HMODULE};
-use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11DeviceContext, ID3D11Texture2D, D3D11_BOX, D3D11_TEXTURE2D_DESC,
+};
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
@@ -45,7 +49,6 @@ mod ffi {
     pub const MFX_IMPL_TYPE_HARDWARE: u32 = 0x0002;
     pub const MFX_ACCEL_MODE_VIA_D3D11: u32 = 0x0300;
     pub const MFX_HANDLE_D3D11_DEVICE: u32 = 3;
-    pub const MFX_HANDLE_MEMORY_INTERFACE: u32 = 1001;
 
     pub const MFX_IOPATTERN_IN_VIDEO_MEMORY: u16 = 0x01;
     pub const MFX_PICSTRUCT_PROGRESSIVE: u16 = 0x01;
@@ -57,11 +60,6 @@ mod ffi {
     pub const MFX_CODINGOPTION_ON: u16 = 0x10;
     pub const MFX_FRAMETYPE_I: u16 = 0x0001;
     pub const MFX_FRAMETYPE_IDR: u16 = 0x0080;
-
-    pub const MFX_SURFACE_TYPE_D3D11_TEX2D: u32 = 2;
-    pub const MFX_SURFACE_FLAG_IMPORT_SHARED: u32 = 0x0010;
-    pub const MFX_SURFACE_FLAG_IMPORT_COPY: u32 = 0x0020;
-    pub const MFX_SURFACE_COMPONENT_ENCODE: u32 = 1;
 
     pub const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
         (a as u32) | (b as u32) << 8 | (c as u32) << 16 | (d as u32) << 24
@@ -198,52 +196,14 @@ mod ffi {
         pub reserved1: [u16; 3],
         pub AddRef: unsafe extern "C" fn(*mut mfxFrameSurface1) -> mfxStatus,
         pub Release: unsafe extern "C" fn(*mut mfxFrameSurface1) -> mfxStatus,
-        // GetRefCounter, Map, Unmap, GetNativeHandle, GetDeviceHandle,
-        // Synchronize, OnComplete, QueryInterface, reserved2[2]: unused.
-        pub _rest: [*mut c_void; 10],
-    }
-
-    #[repr(C)]
-    pub struct mfxSurfaceHeader {
-        pub SurfaceType: u32,
-        pub SurfaceFlags: u32,
-        pub StructSize: u32,
-        pub NumExtParam: u16,
-        pub ExtParam: *mut c_void,
-        pub reserved: [u32; 6],
-    }
-
-    #[repr(C)]
-    pub struct mfxSurfaceInterface {
-        pub Header: mfxSurfaceHeader,
-        pub Version: u16,
-        pub Context: mfxHDL,
-        pub AddRef: *mut c_void,
-        pub Release: *mut c_void,
         pub GetRefCounter: *mut c_void,
-        pub Synchronize: *mut c_void,
-        pub reserved: [*mut c_void; 11],
-    }
-
-    #[repr(C)]
-    pub struct mfxSurfaceD3D11Tex2D {
-        pub SurfaceInterface: mfxSurfaceInterface,
-        pub texture2D: mfxHDL,
-        pub reserved: [mfxHDL; 7],
-    }
-
-    #[repr(C)]
-    pub struct mfxMemoryInterface {
-        pub Context: mfxHDL,
-        pub Version: u16,
-        pub ImportFrameSurface: unsafe extern "C" fn(
-            *mut mfxMemoryInterface,
-            u32,
-            *mut mfxSurfaceHeader,
-            *mut *mut mfxFrameSurface1,
-        ) -> mfxStatus,
-        pub GetBitstreamBuffer: *mut c_void,
-        pub reserved: [mfxHDL; 15],
+        pub Map: *mut c_void,
+        pub Unmap: *mut c_void,
+        /// D3D11: `resource` is the surface's `ID3D11Texture2D*`.
+        pub GetNativeHandle:
+            unsafe extern "C" fn(*mut mfxFrameSurface1, *mut mfxHDL, *mut u32) -> mfxStatus,
+        // GetDeviceHandle, Synchronize, OnComplete, QueryInterface, reserved2[2]: unused.
+        pub _rest: [*mut c_void; 6],
     }
 
     // Layouts verified against MSVC + oneVPL 2.17 headers (x64).
@@ -278,18 +238,7 @@ mod ffi {
         assert!(size_of::<mfxFrameSurface1>() == 184 && offset_of!(mfxFrameSurface1, Data) == 88);
         assert!(size_of::<mfxFrameSurfaceInterface>() == 112);
         assert!(offset_of!(mfxFrameSurfaceInterface, Release) == 24);
-        assert!(
-            size_of::<mfxSurfaceHeader>() == 48 && offset_of!(mfxSurfaceHeader, ExtParam) == 16
-        );
-        assert!(
-            size_of::<mfxSurfaceInterface>() == 184
-                && offset_of!(mfxSurfaceInterface, Context) == 56
-        );
-        assert!(
-            size_of::<mfxSurfaceD3D11Tex2D>() == 248
-                && offset_of!(mfxSurfaceD3D11Tex2D, texture2D) == 184
-        );
-        assert!(offset_of!(mfxMemoryInterface, ImportFrameSurface) == 16);
+        assert!(offset_of!(mfxFrameSurfaceInterface, GetNativeHandle) == 56);
     };
 }
 
@@ -302,7 +251,7 @@ type FnSetFilter = unsafe extern "C" fn(mfxConfig, *const u8, mfxVariant) -> mfx
 type FnCreateSession = unsafe extern "C" fn(mfxLoader, u32, *mut mfxSession) -> mfxStatus;
 type FnClose = unsafe extern "C" fn(mfxSession) -> mfxStatus;
 type FnSetHandle = unsafe extern "C" fn(mfxSession, u32, mfxHDL) -> mfxStatus;
-type FnGetHandle = unsafe extern "C" fn(mfxSession, u32, *mut mfxHDL) -> mfxStatus;
+type FnGetSurface = unsafe extern "C" fn(mfxSession, *mut *mut mfxFrameSurface1) -> mfxStatus;
 type FnParam = unsafe extern "C" fn(mfxSession, *mut mfxVideoParam) -> mfxStatus;
 type FnEncode = unsafe extern "C" fn(
     mfxSession,
@@ -312,6 +261,7 @@ type FnEncode = unsafe extern "C" fn(
     *mut mfxSyncPoint,
 ) -> mfxStatus;
 type FnEncodeClose = unsafe extern "C" fn(mfxSession) -> mfxStatus;
+type FnQueryVersion = unsafe extern "C" fn(mfxSession, *mut u32) -> mfxStatus;
 type FnSync = unsafe extern "C" fn(mfxSession, mfxSyncPoint, u32) -> mfxStatus;
 
 struct Api {
@@ -323,12 +273,13 @@ struct Api {
     create_session: FnCreateSession,
     close: FnClose,
     set_handle: FnSetHandle,
-    get_handle: FnGetHandle,
+    get_surface: FnGetSurface,
     init: FnParam,
     get_video_param: FnParam,
     encode: FnEncode,
     encode_close: FnEncodeClose,
     sync: FnSync,
+    query_version: FnQueryVersion,
 }
 
 impl Api {
@@ -359,12 +310,13 @@ impl Api {
             create_session: sym!("MFXCreateSession"),
             close: sym!("MFXClose"),
             set_handle: sym!("MFXVideoCORE_SetHandle"),
-            get_handle: sym!("MFXVideoCORE_GetHandle"),
+            get_surface: sym!("MFXMemory_GetSurfaceForEncode"),
             init: sym!("MFXVideoENCODE_Init"),
             get_video_param: sym!("MFXVideoENCODE_GetVideoParam"),
             encode: sym!("MFXVideoENCODE_EncodeFrameAsync"),
             encode_close: sym!("MFXVideoENCODE_Close"),
             sync: sym!("MFXVideoCORE_SyncOperation"),
+            query_version: sym!("MFXQueryVersion"),
         })
     }
 }
@@ -453,10 +405,10 @@ pub struct VplEncoder {
     api: Api,
     loader: mfxLoader,
     session: mfxSession,
-    memory: *mut mfxMemoryInterface,
+    /// The recorder's immediate context, for the per-frame GPU copy.
+    context: ID3D11DeviceContext,
     bitstream: mfxBitstream,
     buffer: Vec<u8>,
-    import_flags: u32,
     frame_duration: i64,
     pub name: String,
     pub rate_control: &'static str,
@@ -476,10 +428,9 @@ impl VplEncoder {
             api,
             loader,
             session: null_mut(),
-            memory: null_mut(),
+            context: gpu.context.clone(),
             bitstream: unsafe { std::mem::zeroed() },
             buffer: Vec::new(),
-            import_flags: MFX_SURFACE_FLAG_IMPORT_SHARED,
             frame_duration: 10_000_000 / cfg.fps as i64,
             name: String::new(),
             rate_control: "",
@@ -518,12 +469,11 @@ impl VplEncoder {
                 (api.set_handle)(self.session, MFX_HANDLE_D3D11_DEVICE, gpu.device.as_raw()),
                 "MFXVideoCORE_SetHandle",
             )?;
-            let mut memory: mfxHDL = null_mut();
-            check(
-                (api.get_handle)(self.session, MFX_HANDLE_MEMORY_INTERFACE, &mut memory),
-                "MFXGetMemoryInterface (runtime too old for zero-copy import)",
-            )?;
-            self.memory = memory as *mut mfxMemoryInterface;
+            if std::env::var_os("ARCHY_VPL_TRACE").is_some() {
+                let mut v = 0u32;
+                (api.query_version)(self.session, &mut v);
+                eprintln!("  vpl runtime API {}.{}", v >> 16, v & 0xffff);
+            }
         }
         Ok(())
     }
@@ -563,35 +513,42 @@ impl VplEncoder {
         check(last, "MFXVideoENCODE_Init").map(|_| ())
     }
 
-    /// Wraps the texture as an encoder surface without copying it.
-    fn import(&mut self, texture: &ID3D11Texture2D) -> Result<*mut mfxFrameSurface1> {
-        loop {
-            let mut desc: mfxSurfaceD3D11Tex2D = unsafe { std::mem::zeroed() };
-            desc.SurfaceInterface.Header.SurfaceType = MFX_SURFACE_TYPE_D3D11_TEX2D;
-            desc.SurfaceInterface.Header.SurfaceFlags = self.import_flags;
-            desc.SurfaceInterface.Header.StructSize =
-                std::mem::size_of::<mfxSurfaceD3D11Tex2D>() as u32;
-            desc.SurfaceInterface.Version = 1 << 8; // 1.0
-            desc.texture2D = texture.as_raw();
-            let mut surface = null_mut();
-            let status = unsafe {
-                ((*self.memory).ImportFrameSurface)(
-                    self.memory,
-                    MFX_SURFACE_COMPONENT_ENCODE,
-                    &mut desc.SurfaceInterface.Header,
-                    &mut surface,
-                )
-            };
-            if status >= MFX_ERR_NONE {
-                return Ok(surface);
-            }
-            if self.import_flags == MFX_SURFACE_FLAG_IMPORT_SHARED {
-                // Driver can't map our texture directly: fall back to a GPU-side copy.
-                self.import_flags = MFX_SURFACE_FLAG_IMPORT_COPY;
-                continue;
-            }
-            return check(status, "ImportFrameSurface").map(|_| null_mut());
+    /// Takes an input surface from the runtime's pool and GPU-copies the frame into it.
+    fn input_surface(&mut self, src: &ID3D11Texture2D) -> Result<*mut mfxFrameSurface1> {
+        let mut surface = null_mut();
+        check(
+            unsafe { (self.api.get_surface)(self.session, &mut surface) },
+            "GetSurfaceForEncode",
+        )?;
+        let mut resource: mfxHDL = null_mut();
+        let mut kind = 0u32;
+        let status = unsafe {
+            ((*(*surface).FrameInterface).GetNativeHandle)(surface, &mut resource, &mut kind)
+        };
+        if let Err(e) = check(status, "GetNativeHandle") {
+            unsafe { ((*(*surface).FrameInterface).Release)(surface) };
+            return Err(e);
         }
+        unsafe {
+            let dst = ID3D11Texture2D::from_raw_borrowed(&resource).expect("null surface texture");
+            let (mut d, mut s) = (
+                D3D11_TEXTURE2D_DESC::default(),
+                D3D11_TEXTURE2D_DESC::default(),
+            );
+            dst.GetDesc(&mut d);
+            src.GetDesc(&mut s);
+            let region = D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: d.Width.min(s.Width),
+                bottom: d.Height.min(s.Height),
+                back: 1,
+            };
+            self.context
+                .CopySubresourceRegion(dst, 0, 0, 0, 0, src, 0, Some(&region));
+        }
+        Ok(surface)
     }
 
     /// Submits one frame (or `None` to drain) and emits a packet if one is ready.
@@ -602,6 +559,7 @@ impl VplEncoder {
         stats: &mut Stats,
     ) -> Result<bool> {
         let mut sync: mfxSyncPoint = null_mut();
+        let t_submit = trace::now();
         let status = loop {
             let s = unsafe {
                 (self.api.encode)(
@@ -618,6 +576,7 @@ impl VplEncoder {
             }
             break s;
         };
+        trace::add(0, t_submit);
         if status == MFX_ERR_MORE_DATA {
             return Ok(false);
         }
@@ -625,10 +584,12 @@ impl VplEncoder {
         if sync.is_null() {
             return Ok(false);
         }
+        let t_sync = trace::now();
         check(
             unsafe { (self.api.sync)(self.session, sync, 1000) },
             "SyncOperation",
         )?;
+        trace::add(1, t_sync);
 
         let bs = &mut self.bitstream;
         let data = &self.buffer[bs.DataOffset as usize..(bs.DataOffset + bs.DataLength) as usize];
@@ -653,7 +614,9 @@ impl VplEncoder {
     ) -> Result<Stats> {
         let mut stats = Stats::default();
         while let Ok(SendPtr(input)) = inputs.recv() {
-            let surface = self.import(&input.texture)?;
+            let t_copy = trace::now();
+            let surface = self.input_surface(&input.texture)?;
+            trace::add(2, t_copy);
             unsafe { (*surface).Data.TimeStamp = (input.time * 9 / 1000) as u64 };
             let result = self.encode(surface, &mut on_packet, &mut stats);
             // The encoder holds its own reference while it needs the frame.
@@ -663,6 +626,7 @@ impl VplEncoder {
         }
         // Drain anything still buffered.
         while self.encode(null_mut(), &mut on_packet, &mut stats)? {}
+        trace::report(stats.frames_in);
         Ok(stats)
     }
 }
@@ -677,5 +641,58 @@ impl Drop for VplEncoder {
             (self.api.unload)(self.loader);
             let _ = FreeLibrary(self.api.lib);
         }
+    }
+}
+
+/// Profiling of the encode loop (set ARCHY_VPL_TRACE=1): wall and thread-CPU
+/// time spent in the input copy, submit and sync.
+mod trace {
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+
+    thread_local! {
+        static ACC: RefCell<[(Duration, Duration); 3]> = const { RefCell::new([(Duration::ZERO, Duration::ZERO); 3]) };
+    }
+
+    fn cpu() -> Duration {
+        let (mut c, mut e, mut k, mut u) = <(FILETIME, FILETIME, FILETIME, FILETIME)>::default();
+        unsafe {
+            let _ = GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u);
+        }
+        let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+        Duration::from_nanos((t(k) + t(u)) * 100)
+    }
+
+    pub fn now() -> (Instant, Duration) {
+        (Instant::now(), cpu())
+    }
+
+    pub fn add(slot: usize, start: (Instant, Duration)) {
+        let (wall, cpu_used) = (start.0.elapsed(), cpu().saturating_sub(start.1));
+        ACC.with(|a| {
+            let mut a = a.borrow_mut();
+            a[slot].0 += wall;
+            a[slot].1 += cpu_used;
+        });
+    }
+
+    pub fn report(frames: u64) {
+        if std::env::var_os("ARCHY_VPL_TRACE").is_none() {
+            return;
+        }
+        let n = frames.max(1) as f64;
+        ACC.with(|a| {
+            for (name, (wall, cpu_used)) in ["submit", "sync", "copy"].iter().zip(a.borrow().iter())
+            {
+                eprintln!(
+                    "  vpl {name:<6} wall {:.2} ms/frame, thread CPU {:.2} ms/frame",
+                    wall.as_secs_f64() * 1000.0 / n,
+                    cpu_used.as_secs_f64() * 1000.0 / n
+                );
+            }
+        });
     }
 }

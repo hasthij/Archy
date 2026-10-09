@@ -218,7 +218,9 @@ fn run(args: Args) -> Result<()> {
     let interval = Duration::from_secs_f64(1.0 / args.fps as f64);
     let capture = step(
         "start capture",
-        Capture::start(&gpu.device, target, interval),
+        // Half the interval: the compositor wakes us at most twice per wanted frame,
+        // and frames arriving a hair early are never pushed to the next refresh.
+        Capture::start(&gpu.device, target, interval / 2),
     )?;
     let (out_w, out_h) = fit_size(capture.width, capture.height, args.height);
     let mut converter = step(
@@ -315,48 +317,49 @@ fn run(args: Args) -> Result<()> {
         Ok((stats, thread_cpu_time() - cpu0))
     });
 
-    let total = args.fps * args.seconds;
-    let (mut fresh, mut skipped, mut dropped) = (0u64, 0u64, 0u64);
-    let (mut first_drop, mut last_drop) = (None, 0u32);
-    let (mut get_time, mut convert_time) = (Duration::ZERO, Duration::ZERO);
+    let duration = Duration::from_secs(args.seconds as u64);
+    // Cadence: each frame is due one interval after the previous due time. A frame
+    // may be up to a quarter interval early (display jitter); later frames reset the
+    // schedule. 144 Hz games thin evenly to 60, and a 60 Hz display at 60 loses nothing.
+    let frame_interval = 10_000_000 / args.fps as i64;
+    let tolerance = frame_interval / 4;
+    let mut next_due = i64::MIN / 2;
+    let (mut taken, mut thinned, mut dropped) = (0u64, 0u64, 0u64);
+    let (mut first_drop, mut last_drop) = (None, 0u64);
+    let mut convert_time = Duration::ZERO;
+    let mut first_time: Option<i64> = None;
     let cpu_start = cpu_time();
     let threads_before = threads::snapshot();
     let main_cpu_start = thread_cpu_time();
     let start = Instant::now();
     println!("Recording {} s...", args.seconds);
 
-    for n in 0..total {
-        let due = start + interval * n;
-        let now = Instant::now();
-        if due > now {
-            thread::sleep(due - now);
-        }
-        let t0 = Instant::now();
-        // No new frame from the game = nothing to encode. The MP4 timestamps keep
-        // timing correct (variable frame rate), so idle moments cost nothing.
-        let Some(frame) = step("get frame", capture.latest())? else {
-            skipped += 1;
+    while start.elapsed() < duration {
+        // Sleeps until the compositor has a new frame. A static screen produces
+        // none, so idle moments cost nothing (MP4 timestamps keep timing right).
+        let Some(frame) = step("get frame", capture.next(Duration::from_millis(100)))? else {
             continue;
         };
+        if frame.time < next_due - tolerance {
+            thinned += 1;
+            continue;
+        }
+        next_due = (next_due + frame_interval).max(frame.time - tolerance + frame_interval);
+        let time = frame.time - *first_time.get_or_insert(frame.time);
         let t1 = Instant::now();
-        get_time += t1 - t0;
         let texture = step("convert frame", converter.convert(&frame.texture))?;
         drop(frame); // hand the buffer back to the compositor right away
         convert_time += t1.elapsed();
-        fresh += 1;
+        taken += 1;
         if args.convert_only {
             continue;
         }
-        let input = Input {
-            texture,
-            time: n as i64 * 10_000_000 / args.fps as i64,
-        };
-        match tx.try_send(SendPtr(input)) {
+        match tx.try_send(SendPtr(Input { texture, time })) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 dropped += 1;
-                first_drop.get_or_insert(n);
-                last_drop = n;
+                first_drop.get_or_insert(taken);
+                last_drop = taken;
             }
             Err(TrySendError::Disconnected(_)) => break,
         }
@@ -376,7 +379,10 @@ fn run(args: Args) -> Result<()> {
     let secs = wall.as_secs_f64();
     println!();
     println!("Wrote {}", args.out.display());
-    println!("  Frames: {fresh} new, {skipped} skipped (nothing changed), {dropped} dropped (encoder busy)");
+    println!(
+        "  Frames: {taken} captured ({:.1} fps), {thinned} above target rate skipped, {dropped} dropped (encoder busy)",
+        taken as f64 / wall.as_secs_f64()
+    );
     if let Some(first) = first_drop {
         println!("    drops between frame {first} and {last_drop}");
     }
@@ -390,10 +396,10 @@ fn run(args: Args) -> Result<()> {
         stats.bytes as f64 * 8.0 / secs / 1e6
     );
     println!(
-        "  Recorder CPU: {:.1}% of one core  (per frame: get {:.2} ms, convert submit {:.2} ms)",
+        "  Recorder CPU: {:.1}% of one core, {:.2} ms per frame  (convert submit {:.2} ms)",
         cpu.as_secs_f64() / secs * 100.0,
-        get_time.as_secs_f64() * 1000.0 / fresh.max(1) as f64,
-        convert_time.as_secs_f64() * 1000.0 / fresh.max(1) as f64
+        cpu.as_secs_f64() * 1000.0 / taken.max(1) as f64,
+        convert_time.as_secs_f64() * 1000.0 / taken.max(1) as f64
     );
     let pct = |d: Duration| d.as_secs_f64() / secs * 100.0;
     println!(
