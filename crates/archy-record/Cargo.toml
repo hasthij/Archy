@@ -1,0 +1,12 @@
+[package]
+name = "archy-record"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+archy-gpu.workspace = true
+archy-capture.workspace = true
+archy-encode.workspace = true
+archy-mux.workspace = true
+windows.workspace = true
