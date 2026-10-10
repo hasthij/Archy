@@ -71,6 +71,8 @@ pub struct Adapter {
     pub index: u32,
     pub name: String,
     pub vendor_id: u32,
+    /// "vvvv:dddd" (PCI vendor and device id): stable across reboots, unlike the LUID.
+    pub id: String,
     pub luid: LUID,
     pub dedicated_vram: usize,
     pub shared_memory: usize,
@@ -132,6 +134,7 @@ fn probe_adapters() -> Result<Vec<Adapter>> {
             index,
             name: wide_to_string(&desc.Description),
             vendor_id: desc.VendorId,
+            id: format!("{:04x}:{:04x}", desc.VendorId, desc.DeviceId),
             luid: desc.AdapterLuid,
             dedicated_vram: desc.DedicatedVideoMemory,
             shared_memory: desc.SharedSystemMemory,

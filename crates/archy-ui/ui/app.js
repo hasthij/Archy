@@ -295,8 +295,45 @@ const RECORDING = () => [
 ];
 
 function renderRecording() {
-  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), screenPicker());
+  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), screenPicker(), gpuPicker());
   loadMonitors();
+  loadGpus();
+}
+
+// ---------- GPU picker ----------
+let gpus = null;
+async function loadGpus() {
+  if (gpus === null) {
+    try { gpus = await invoke("gpus"); } catch { gpus = []; }
+  }
+  const box = $("#gpu-picker");
+  if (box) box.replaceWith(gpuPicker());
+}
+
+function gpuPicker() {
+  const list = gpus || [];
+  const select = el("select", { class: "input", "aria-label": "GPU that records" },
+    el("option", { value: "", text: "Automatic (recommended)" }),
+    list.map((g) => el("option", {
+      value: g.id,
+      text: g.encoders.length ? `${g.name} (${g.encoders.join(", ")})` : `${g.name} (no video encoder)`,
+      disabled: g.encoders.length ? null : "",
+    })));
+  select.value = list.some((g) => g.id === settings.encoder_gpu) ? settings.encoder_gpu : "";
+  select.addEventListener("change", () => save({ encoder_gpu: select.value }, `Recording GPU: ${select.selectedOptions[0].text}`));
+  const chosen = list.find((g) => g.id === select.value);
+  const best = !chosen
+    ? "Archy picks a GPU that can record, and switches to another if one can't. Right for almost everyone."
+    : chosen.integrated
+      ? "Built-in graphics: your graphics card stays fully free for the game (best FPS, better battery on laptops). Clips look very slightly softer."
+      : "Graphics card: often slightly sharper clips, but recording uses a little of the GPU your game runs on.";
+  return el("div", { class: "card setting", id: "gpu-picker" },
+    el("div", { class: "about" }, el("h3", { text: "GPU that records" }),
+      el("p", { text: "Which graphics chip encodes your clips. Only matters on PCs with two (e.g. Intel + NVIDIA laptops)." })),
+    el("div", { class: "pick" },
+      el("div", { class: "field" }, select),
+      el("div", { class: "explain" }, el("div", { class: "best" }, el("b", { text: "Best for: " }), best)),
+      el("p", { class: "sub", text: gpus === null ? "Looking for GPUs…" : "If the chosen GPU can't record (driver problem, unplugged), Archy falls back to Automatic so you never miss a clip." })));
 }
 
 // ---------- screen picker (Whole screen mode) ----------
@@ -528,6 +565,8 @@ function renderGeneral() {
       "Never forgetting to open Archy before playing.", "Starting Archy yourself only when you want it.", false),
     onOff("tray_recording_dot", "Recording dot on the tray icon", "A small red dot on Archy's icon while a game is being recorded.",
       "Seeing at a glance that Archy is recording.", "A plain icon at all times."),
+    onOff("check_updates", "Check for updates", "When Archy starts, it asks GitHub whether a newer version exists. This is the only time Archy goes online. Updating always asks you first.",
+      "Getting fixes as soon as they're out.", "Archy never goes online; you update by downloading the installer yourself."),
     logCard());
   loadLog();
 }
@@ -685,6 +724,36 @@ function renderAll() {
   renderGeneral();
 }
 
+// ---------- updates ----------
+async function checkUpdate() {
+  let u = null;
+  try { u = await invoke("check_update"); } catch { return; }
+  if (!u) return;
+  const old = $("#update-banner");
+  if (old) old.remove();
+  const status = el("span", { class: "sub" });
+  const banner = el("section", { class: "status", id: "update-banner", style: "margin-bottom:12px;border-color:var(--accent)" },
+    el("div", { class: "what" },
+      el("b", { text: `Archy ${u.version} is available` }),
+      el("span", { text: "Fixes and improvements. Your clips and settings are kept. " },
+        el("a", { href: "#", text: "What's new", onclick: (e) => { e.preventDefault(); invoke("open_release_page", { url: u.page }).catch((err) => toast(String(err))); } }))),
+    status,
+    el("button", { class: "btn primary", text: "Update", onclick: async (e) => {
+      e.target.disabled = true;
+      status.textContent = "Downloading…";
+      try {
+        await invoke("install_update");
+        status.textContent = "The installer is open: finish there.";
+      } catch (err) {
+        status.textContent = "Update failed: " + err;
+        e.target.disabled = false;
+      }
+    } }),
+    el("button", { class: "btn", text: "Not now", onclick: () => banner.remove() }),
+    el("button", { class: "btn", text: "Skip this version", onclick: () => { save({ skipped_version: u.version }, `Won't ask about ${u.version} again`); banner.remove(); } }));
+  $("#status").before(banner);
+}
+
 // ---------- start ----------
 (async function start() {
   try {
@@ -697,6 +766,7 @@ function renderAll() {
   refreshStatus();
   loadClips();
   loadDevices();
+  checkUpdate();
   setInterval(refreshStatus, 2000);
   setInterval(() => { if (view === "clips" && !document.hidden) loadClips(); }, 4000);
 })();

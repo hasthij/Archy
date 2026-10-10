@@ -20,6 +20,39 @@ pub const RECORDER_GPU_PRIORITY: i32 = -4;
 /// (Quick Sync is on every Intel chip, and on laptops the Intel GPU drives the
 /// screen), then the rest. Laptop GPUs such as NVIDIA's MX series have no video
 /// encoder, so when Windows hands Archy one of those it must look further.
+/// The GPU with probe id `id` ("vvvv:dddd"), if it's present.
+pub fn adapter_by_id(id: &str) -> Option<LUID> {
+    unsafe {
+        let factory = CreateDXGIFactory1::<IDXGIFactory4>().ok()?;
+        let mut i = 0;
+        while let Ok(adapter) = factory.EnumAdapters1(i) {
+            i += 1;
+            if let Ok(d) = adapter.GetDesc1() {
+                if format!("{:04x}:{:04x}", d.VendorId, d.DeviceId).eq_ignore_ascii_case(id) {
+                    return Some(d.AdapterLuid);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The GPU's name as Windows shows it (e.g. "Intel(R) Iris(R) Xe Graphics").
+pub fn adapter_name(luid: LUID) -> String {
+    unsafe {
+        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory4>() else {
+            return String::new();
+        };
+        match factory.EnumAdapterByLuid::<IDXGIAdapter1>(luid).and_then(|a| a.GetDesc1()) {
+            Ok(d) => {
+                let len = d.Description.iter().position(|&c| c == 0).unwrap_or(0);
+                String::from_utf16_lossy(&d.Description[..len])
+            }
+            Err(_) => String::new(),
+        }
+    }
+}
+
 pub fn other_adapters(except: LUID) -> Vec<LUID> {
     use windows::Win32::Graphics::Dxgi::{DXGI_ADAPTER_FLAG, DXGI_ADAPTER_FLAG_SOFTWARE};
     let mut found: Vec<(bool, LUID)> = Vec::new();

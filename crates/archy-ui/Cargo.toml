@@ -1,6 +1,6 @@
 [package]
 name = "archy-ui"
-version = "0.1.2"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 description = "Archy window: clip library and settings"
@@ -8,6 +8,7 @@ description = "Archy window: clip library and settings"
 [dependencies]
 archy-audio.workspace = true
 archy-core.workspace = true
+archy-gpu.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tauri = { version = "2", features = ["protocol-asset"] }

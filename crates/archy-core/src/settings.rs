@@ -32,6 +32,12 @@ pub struct Settings {
     /// Screen to record in "screen" mode (Windows' name, e.g. `\\.\DISPLAY2`);
     /// empty = the screen the game is on.
     pub capture_monitor: String,
+    /// GPU that records ("vvvv:dddd"); empty = automatic.
+    pub encoder_gpu: String,
+    /// Ask GitHub for a newer Archy when it starts (the only time it goes online).
+    pub check_updates: bool,
+    /// A version the user chose to skip ("Skip this version").
+    pub skipped_version: String,
     /// Put each new clip on the clipboard, ready to paste into Discord.
     pub copy_after_save: bool,
     /// Keep Archy on efficiency cores at low priority so the game keeps the fast cores.
@@ -121,6 +127,9 @@ impl Default for Settings {
             record_fullscreen_apps: true,
             capture: "window".into(),
             capture_monitor: String::new(),
+            encoder_gpu: String::new(),
+            check_updates: true,
+            skipped_version: String::new(),
             copy_after_save: true,
             efficiency_mode: true,
             audio_everything: true,

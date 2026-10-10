@@ -13,6 +13,7 @@ pub mod recorder;
 pub mod ring;
 pub mod settings;
 pub mod status;
+pub mod update;
 
 pub use archy_capture::Target;
 pub use archy_gpu::convert::ConvertMode;
