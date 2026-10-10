@@ -250,6 +250,81 @@ fn read_log(lines: usize) -> String {
     all[all.len().saturating_sub(lines.clamp(1, 2000))..].join("\n")
 }
 
+#[derive(Serialize)]
+struct GpuView {
+    id: String,
+    name: String,
+    /// Codecs its hardware encoder can make, best first; empty = can't record.
+    encoders: Vec<String>,
+    integrated: bool,
+}
+
+/// GPUs and their video encoders, for the GPU picker.
+#[tauri::command]
+async fn gpus() -> Vec<GpuView> {
+    archy_gpu::probe::probe()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| {
+            let mut encoders: Vec<String> = Vec::new();
+            for e in &a.encoders {
+                let c = e.codec.to_string();
+                if !encoders.contains(&c) {
+                    encoders.push(c);
+                }
+            }
+            GpuView { id: a.id, name: a.name, encoders, integrated: a.integrated }
+        })
+        .collect()
+}
+
+/// The update the banner offered, for "Update".
+static OFFERED: std::sync::Mutex<Option<archy_core::update::Update>> = std::sync::Mutex::new(None);
+
+/// A newer Archy on GitHub, unless checking is off or the user skipped it.
+#[tauri::command]
+async fn check_update() -> Option<archy_core::update::Update> {
+    let s = Settings::load().0;
+    if !s.check_updates {
+        return None;
+    }
+    let update = tauri::async_runtime::spawn_blocking(|| {
+        archy_core::update::check(env!("CARGO_PKG_VERSION")).ok().flatten()
+    })
+    .await
+    .ok()
+    .flatten()?;
+    if update.version == s.skipped_version {
+        return None;
+    }
+    if let Ok(mut o) = OFFERED.lock() {
+        *o = Some(update.clone());
+    }
+    Some(update)
+}
+
+/// Downloads and verifies the offered installer, then runs it. The installer
+/// asks before changing anything and closes Archy itself.
+#[tauri::command]
+async fn install_update() -> Result<(), String> {
+    let update = OFFERED.lock().ok().and_then(|o| o.clone()).ok_or("no update offered")?;
+    let path = tauri::async_runtime::spawn_blocking(move || archy_core::update::download(&update))
+        .await
+        .map_err(|e| e.to_string())??;
+    std::process::Command::new(&path).spawn().map_err(|e| format!("couldn't start the installer: {e}"))?;
+    Ok(())
+}
+
+/// Opens a release page in the browser (only this project's GitHub pages).
+#[tauri::command]
+fn open_release_page(url: String) -> Result<(), String> {
+    if !url.starts_with("https://github.com/hasthij/Archy/") {
+        return Err("not an Archy release page".into());
+    }
+    std::process::Command::new("explorer").arg(&url).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Connected screens, for the screen picker.
 #[tauri::command]
 fn monitors() -> Vec<archy_core::monitors::Monitor> {
@@ -495,7 +570,11 @@ fn main() {
             stop_calibration,
             read_log,
             open_log_folder,
-            monitors
+            monitors,
+            gpus,
+            check_update,
+            install_update,
+            open_release_page
         ])
         .run(tauri::generate_context!())
         .expect("Archy window failed to start");

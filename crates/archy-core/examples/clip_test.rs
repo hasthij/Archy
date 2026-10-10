@@ -21,6 +21,7 @@ fn main() {
         quality: 70,
         buffer_seconds: 30,
         convert: ConvertMode::VideoEngine,
+        gpu: std::env::var("ARCHY_TEST_GPU").unwrap_or_default(),
         audio: vec![
             AudioSource {
                 name: "Everything".into(),
@@ -36,7 +37,7 @@ fn main() {
         audio_kbps: 160,
     };
     let rec = Recorder::start(cfg).unwrap();
-    println!("encoder: {} | audio: {:?}", rec.info.encoder, rec.audio_report);
+    println!("encoder: {} on {} | audio: {:?}", rec.info.encoder, rec.info.gpu, rec.audio_report);
     let secs = env("ARCHY_TEST_SECONDS", 8);
     std::thread::sleep(std::time::Duration::from_secs(secs as u64));
     let saved = rec.save_clip(secs.saturating_sub(3).max(2), &out);

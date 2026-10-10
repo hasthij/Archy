@@ -41,6 +41,9 @@ pub struct RecorderConfig {
     /// Seconds of history kept in RAM.
     pub buffer_seconds: u32,
     pub convert: ConvertMode,
+    /// GPU to encode on ("vvvv:dddd" from the GPU list); empty = automatic.
+    /// If it's missing or can't encode, recording falls back to automatic.
+    pub gpu: String,
     /// Audio tracks, in file order (track 1 is what single-track players play).
     pub audio: Vec<AudioSource>,
     pub audio_kbps: u32,
@@ -69,6 +72,8 @@ pub struct RecorderInfo {
     pub height: u32,
     pub fps: u32,
     pub encoder: String,
+    /// The GPU recording runs on.
+    pub gpu: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -397,6 +402,12 @@ fn capture_loop(
     // laptop GPU), every other GPU, Intel first. Capture, conversion and
     // encoding all run on the GPU that has the encoder.
     let mut adapters: Vec<Option<LUID>> = vec![None];
+    if !cfg.gpu.is_empty() {
+        match archy_gpu::device::adapter_by_id(&cfg.gpu) {
+            Some(luid) => adapters.insert(0, Some(luid)),
+            None => {} // not present any more (e.g. an unplugged eGPU): automatic
+        }
+    }
     let mut tried_others = false;
     let mut last_error = Error::new(E_FAIL, "no GPU found");
     let mut index = 0;
@@ -443,6 +454,7 @@ fn capture_loop(
         height,
         fps: cfg.fps,
         encoder: encoder.name().to_string(),
+        gpu: archy_gpu::device::adapter_name(_gpu.luid),
     };
 
     let (tx, rx) = sync_channel::<SendPtr<Input>>(QUEUE_DEPTH);

@@ -253,6 +253,7 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
         quality: 70,
         buffer_seconds: s.buffer_seconds(),
         convert: ConvertMode::VideoEngine,
+        gpu: s.encoder_gpu.clone(),
         audio,
         audio_kbps,
     }
@@ -498,12 +499,13 @@ impl App {
             Ok(rec) => {
                 let i = &rec.info;
                 log(&format!(
-                    "recording {game}: {} {}x{}@{} via {}; audio: {}",
+                    "recording {game}: {} {}x{}@{} via {} on {}; audio: {}",
                     i.codec,
                     i.width,
                     i.height,
                     i.fps,
                     i.encoder,
+                    i.gpu,
                     rec.audio_report.join(", ")
                 ));
                 self.session = Some(Session {
@@ -756,6 +758,7 @@ fn recording_changed(a: &Settings, b: &Settings) -> bool {
         || a.codec != b.codec
         || a.capture != b.capture
         || a.capture_monitor != b.capture_monitor
+        || a.encoder_gpu != b.encoder_gpu
         || a.buffer_seconds() != b.buffer_seconds()
 }
 
@@ -910,6 +913,20 @@ fn main() {
     );
     if app.settings.notify_on_start {
         notify(window.0 as isize, "Archy is running", &hint, false);
+    }
+    if app.settings.check_updates {
+        let skipped = app.settings.skipped_version.clone();
+        let hwnd = window.0 as isize;
+        std::thread::spawn(move || {
+            // Let start-up (and the game) settle first.
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            if let Ok(Some(u)) = archy_core::update::check(env!("CARGO_PKG_VERSION")) {
+                if u.version != skipped {
+                    log(&format!("update available: {}", u.version));
+                    notify(hwnd, &format!("Archy {} is available", u.version), "Open Archy to update (it asks first).", false);
+                }
+            }
+        });
     }
     // Keep the Windows start-up entry in line with the setting (and the exe's location).
     startup::set(app.settings.start_with_windows);
