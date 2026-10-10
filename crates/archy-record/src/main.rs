@@ -5,6 +5,7 @@
 //!   archy-record --window Roblox --seconds 20 --fps 60 --codec av1 --out test.mp4
 //!   archy-record --monitor --seconds 10
 
+mod eco;
 mod threads;
 
 use std::path::PathBuf;
@@ -23,6 +24,7 @@ use windows::core::Result;
 use windows::Win32::Foundation::FILETIME;
 use windows::Win32::Media::MediaFoundation::{MFShutdown, MFStartup, MFSTARTUP_FULL, MF_VERSION};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, GetProcessTimes, GetThreadTimes, SetThreadInformation,
     ThreadPowerThrottling, THREAD_POWER_THROTTLING_CURRENT_VERSION,
@@ -73,7 +75,7 @@ fn parse_args() -> std::result::Result<Args, String> {
         convert: ConvertMode::VideoEngine,
         discard: false,
         gpu_priority: archy_gpu::device::RECORDER_GPU_PRIORITY,
-        eco: false,
+        eco: true,
         backend: None,
     };
     let mut it = std::env::args().skip(1);
@@ -110,6 +112,7 @@ fn parse_args() -> std::result::Result<Args, String> {
             "--convert-only" => a.convert_only = true,
             "--discard" => a.discard = true,
             "--eco" => a.eco = true,
+            "--no-eco" => a.eco = false,
             "--encoder" => {
                 a.backend = Some(match val()?.to_lowercase().as_str() {
                     "vpl" | "qsv" => Backend::Vpl,
@@ -153,7 +156,7 @@ fn main() {
             if !msg.is_empty() {
                 eprintln!("{msg}");
             }
-            eprintln!("usage: archy-record [--window TITLE | --monitor] [--seconds N] [--fps 24-90] [--height PX] [--codec av1|hevc|h264] [--mbps N] [--quality 0-100] [--out FILE] [--preset 360p|480p|720p|1080p|1440p] [--target-mbps N] [--convert video|shader] [--convert-only] [--discard] [--eco] [--gpu-priority -7..7] [--encoder vpl|mf]");
+            eprintln!("usage: archy-record [--window TITLE | --monitor] [--seconds N] [--fps 24-90] [--height PX] [--codec av1|hevc|h264] [--mbps N] [--quality 0-100] [--out FILE] [--preset 360p|480p|720p|1080p|1440p] [--target-mbps N] [--convert video|shader] [--convert-only] [--discard] [--no-eco] [--gpu-priority -7..7] [--encoder vpl|mf]");
             std::process::exit(2);
         }
     };
@@ -234,7 +237,14 @@ fn run(args: Args) -> Result<()> {
 
     let gpu = step("create GPU device", Gpu::new(None, args.gpu_priority))?;
     if args.eco {
-        efficiency_mode();
+        let e = eco::apply();
+        if e.efficiency_cores > 0 {
+            println!("Efficiency mode: pinned to {} of {} cores (efficiency cores), EcoQoS, below-normal priority", e.efficiency_cores, e.total_cores);
+        } else {
+            println!(
+                "Efficiency mode: EcoQoS, below-normal priority (CPU has no efficiency cores)"
+            );
+        }
     }
     let interval = Duration::from_secs_f64(1.0 / args.fps as f64);
     let capture = step(
@@ -452,5 +462,18 @@ fn run(args: Args) -> Result<()> {
         pct(cpu.saturating_sub(main_cpu + enc_cpu))
     );
     threads::report(&threads_before, &threads_after, wall);
+    let mut mem = PROCESS_MEMORY_COUNTERS::default();
+    unsafe {
+        let _ = K32GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut mem,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        );
+    }
+    println!(
+        "  Recorder RAM: {:.0} MB now, {:.0} MB peak",
+        mem.WorkingSetSize as f64 / 1048576.0,
+        mem.PeakWorkingSetSize as f64 / 1048576.0
+    );
     Ok(())
 }

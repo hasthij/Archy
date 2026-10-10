@@ -42,10 +42,13 @@ pub fn fit_size(src_w: u32, src_h: u32, max_height: u32) -> (u32, u32) {
 /// which one costs a game less differs per GPU and driver, so benchmarks decide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConvertMode {
-    /// ID3D11VideoProcessor on the media engine: no shader time, but some drivers
-    /// (Intel) spend ~1.5 ms of CPU per frame queuing it.
+    /// ID3D11VideoProcessor on the media engine: no shader time. Some drivers
+    /// (Intel) spend ~1.5 ms of CPU per frame queuing it, which the recorder's
+    /// efficiency-core pinning keeps off the game's cores. The default: in Roblox
+    /// on an Intel iGPU it cost ~2.6% FPS vs ~9% for the shader path.
     VideoEngine,
-    /// Two pixel-shader passes: microseconds of CPU, a sliver of shader time.
+    /// Two pixel-shader passes: microseconds of CPU, but competes with the game
+    /// for the GPU (Roblox's GPU time per frame +17% on an Intel iGPU).
     Shader,
 }
 
