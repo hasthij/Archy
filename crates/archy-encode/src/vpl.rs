@@ -8,6 +8,7 @@
 //! and cost ~1.5 ms of CPU per frame in its copy fallback. The encoder runs on
 //! the fixed-function low-power path (VDEnc) when the GPU has one.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr::null_mut;
 use std::sync::mpsc::Receiver;
@@ -393,9 +394,8 @@ fn video_param(cfg: &Config, low_power: bool, icq: bool) -> mfxVideoParam {
         AllocId: 0,
         reserved: [0; 2],
         reserved3: 0,
-        // One frame in flight: lowest latency and memory, and the recorder
-        // submits frames one at a time anyway.
-        AsyncDepth: 1,
+        // Frames the runtime may have in flight; matches the encoder's pipeline.
+        AsyncDepth: PIPELINE as u16,
         mfx,
         _vpp_tail: [0; 32],
         Protected: 0,
@@ -406,14 +406,40 @@ fn video_param(cfg: &Config, low_power: bool, icq: bool) -> mfxVideoParam {
     }
 }
 
+/// Frames encoding at once. Waiting for each frame (~12 ms on an iGPU) before
+/// submitting the next made bursts back up and drop; with a few in flight the
+/// GPU stays fed and packets are collected oldest-first, in order.
+const PIPELINE: usize = 3;
+
+/// One output buffer; each in-flight frame needs its own.
+struct Slot {
+    bitstream: mfxBitstream,
+    _buffer: Vec<u8>,
+}
+
+impl Slot {
+    fn new(size: usize) -> Self {
+        let mut buffer = vec![0u8; size];
+        let mut bitstream: mfxBitstream = unsafe { std::mem::zeroed() };
+        // The Vec's heap storage never moves, so this pointer stays valid.
+        bitstream.Data = buffer.as_mut_ptr();
+        bitstream.MaxLength = size as u32;
+        Self {
+            bitstream,
+            _buffer: buffer,
+        }
+    }
+}
+
 pub struct VplEncoder {
     api: Api,
     loader: mfxLoader,
     session: mfxSession,
     /// The recorder's immediate context, for the per-frame GPU copy.
     context: ID3D11DeviceContext,
-    bitstream: mfxBitstream,
-    buffer: Vec<u8>,
+    slots: Vec<Slot>,
+    free: Vec<usize>,
+    in_flight: VecDeque<(mfxSyncPoint, usize)>,
     frame_duration: i64,
     pub name: String,
     pub rate_control: &'static str,
@@ -434,8 +460,9 @@ impl VplEncoder {
             loader,
             session: null_mut(),
             context: gpu.context.clone(),
-            bitstream: unsafe { std::mem::zeroed() },
-            buffer: Vec::new(),
+            slots: Vec::new(),
+            free: Vec::new(),
+            in_flight: VecDeque::new(),
             frame_duration: 10_000_000 / cfg.fps as i64,
             name: String::new(),
             rate_control: "",
@@ -512,9 +539,8 @@ impl VplEncoder {
                 let mult = actual.mfx.BRCParamMultiplier.max(1) as usize;
                 let size = (actual.mfx.BufferSizeInKB as usize * 1000 * mult)
                     .max(cfg.width as usize * cfg.height as usize * 3 / 2);
-                self.buffer = vec![0u8; size];
-                self.bitstream.Data = self.buffer.as_mut_ptr();
-                self.bitstream.MaxLength = size as u32;
+                self.slots = (0..PIPELINE).map(|_| Slot::new(size)).collect();
+                self.free = (0..PIPELINE).collect();
                 return Ok(());
             }
             last = status;
@@ -561,48 +587,66 @@ impl VplEncoder {
         Ok(surface)
     }
 
-    /// Submits one frame (or `None` to drain) and emits a packet if one is ready.
-    fn encode(
+    /// Submits one frame, or `null` to flush the encoder. Returns whether the
+    /// runtime produced an output task (always true for a frame it accepted).
+    fn submit(
         &mut self,
         surface: *mut mfxFrameSurface1,
         on_packet: &mut impl FnMut(Packet) -> Result<()>,
         stats: &mut Stats,
     ) -> Result<bool> {
+        if self.free.is_empty() {
+            self.finish_oldest(on_packet, stats)?;
+        }
+        let slot = self.free.pop().expect("a slot was just freed");
         let mut sync: mfxSyncPoint = null_mut();
         let t_submit = trace::now();
         let status = loop {
-            let s = unsafe {
-                (self.api.encode)(
-                    self.session,
-                    null_mut(),
-                    surface,
-                    &mut self.bitstream,
-                    &mut sync,
-                )
-            };
+            let bs = &mut self.slots[slot].bitstream;
+            let s = unsafe { (self.api.encode)(self.session, null_mut(), surface, bs, &mut sync) };
             if s == MFX_WRN_DEVICE_BUSY {
-                std::thread::sleep(Duration::from_millis(1));
+                // GPU queue full: collect a finished frame instead of sleeping, if there is one.
+                if !self.in_flight.is_empty() {
+                    self.finish_oldest(on_packet, stats)?;
+                } else {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 continue;
             }
             break s;
         };
         trace::add(0, t_submit);
-        if status == MFX_ERR_MORE_DATA {
+        if status == MFX_ERR_MORE_DATA || (status >= MFX_ERR_NONE && sync.is_null()) {
+            self.free.push(slot);
             return Ok(false);
         }
-        check(status, "EncodeFrameAsync")?;
-        if sync.is_null() {
-            return Ok(false);
+        if let Err(e) = check(status, "EncodeFrameAsync") {
+            self.free.push(slot);
+            return Err(e);
         }
-        let t_sync = trace::now();
-        check(
-            unsafe { (self.api.sync)(self.session, sync, 1000) },
-            "SyncOperation",
-        )?;
-        trace::add(1, t_sync);
+        self.in_flight.push_back((sync, slot));
+        Ok(true)
+    }
 
-        let bs = &mut self.bitstream;
-        let data = &self.buffer[bs.DataOffset as usize..(bs.DataOffset + bs.DataLength) as usize];
+    /// Waits for the oldest in-flight frame and hands its packet to `on_packet`.
+    fn finish_oldest(
+        &mut self,
+        on_packet: &mut impl FnMut(Packet) -> Result<()>,
+        stats: &mut Stats,
+    ) -> Result<()> {
+        let Some((sync, slot)) = self.in_flight.pop_front() else {
+            return Ok(());
+        };
+        let t_sync = trace::now();
+        let status = unsafe { (self.api.sync)(self.session, sync, 1000) };
+        trace::add(1, t_sync);
+        self.free.push(slot);
+        check(status, "SyncOperation")?;
+
+        let bs = &mut self.slots[slot].bitstream;
+        let data = unsafe {
+            std::slice::from_raw_parts(bs.Data.add(bs.DataOffset as usize), bs.DataLength as usize)
+        };
         let packet = Packet {
             data,
             // oneVPL timestamps are 90 kHz.
@@ -611,10 +655,10 @@ impl VplEncoder {
             keyframe: bs.FrameType & (MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_I) != 0,
         };
         stats.count(&packet);
-        on_packet(packet)?;
+        let result = on_packet(packet);
         bs.DataOffset = 0;
         bs.DataLength = 0;
-        Ok(true)
+        result
     }
 
     pub fn run(
@@ -628,14 +672,17 @@ impl VplEncoder {
             let surface = self.input_surface(&input.texture)?;
             trace::add(2, t_copy);
             unsafe { (*surface).Data.TimeStamp = (input.time * 9 / 1000) as u64 };
-            let result = self.encode(surface, &mut on_packet, &mut stats);
+            let result = self.submit(surface, &mut on_packet, &mut stats);
             // The encoder holds its own reference while it needs the frame.
             unsafe { ((*(*surface).FrameInterface).Release)(surface) };
             result?;
             stats.frames_in += 1;
         }
-        // Drain anything still buffered.
-        while self.encode(null_mut(), &mut on_packet, &mut stats)? {}
+        // Flush frames the runtime still holds, then collect everything in flight.
+        while self.submit(null_mut(), &mut on_packet, &mut stats)? {}
+        while !self.in_flight.is_empty() {
+            self.finish_oldest(&mut on_packet, &mut stats)?;
+        }
         trace::report(stats.frames_in);
         Ok(stats)
     }
