@@ -10,3 +10,4 @@ archy-capture.workspace = true
 archy-encode.workspace = true
 archy-mux.workspace = true
 windows.workspace = true
+archy-core.workspace = true

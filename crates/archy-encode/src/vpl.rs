@@ -389,6 +389,13 @@ fn video_param(cfg: &Config, low_power: bool, icq: bool) -> mfxVideoParam {
             .min(max_kbps);
         mfx.TargetKbps = (target_kbps / mult) as u16;
         mfx.MaxKbps = (max_kbps / mult) as u16;
+        // A 2-second rate-control buffer. With the driver's tiny default, keyframes
+        // were squeezed to ~4x a normal frame and clips went blocky once a second;
+        // now a keyframe can take what it needs and the following frames pay it back.
+        // The average (and so the file size) is unchanged.
+        let buffer_kb = target_kbps * 2 / 8;
+        mfx.BufferSizeInKB = (buffer_kb / mult).min(u16::MAX as u32) as u16;
+        mfx.InitialDelayInKB = (buffer_kb / 2 / mult).min(u16::MAX as u32) as u16;
     }
     mfxVideoParam {
         AllocId: 0,

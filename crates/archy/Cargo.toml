@@ -1,0 +1,17 @@
+[package]
+name = "archy"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Archy: local-first game clipper"
+
+[dependencies]
+archy-audio.workspace = true
+archy-core.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+windows.workspace = true
+windows-collections = "0.3.2"
+
+[build-dependencies]
+winresource = "0.1.31"

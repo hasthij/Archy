@@ -74,10 +74,15 @@ impl AnyConverter {
         })
     }
 
-    pub fn convert(&mut self, src: &ID3D11Texture2D) -> Result<ID3D11Texture2D> {
+    /// `content`: the valid (width, height) inside `src` (the window's current size).
+    pub fn convert(
+        &mut self,
+        src: &ID3D11Texture2D,
+        content: (u32, u32),
+    ) -> Result<ID3D11Texture2D> {
         match self {
-            Self::VideoEngine(c) => c.convert(src),
-            Self::Shader(c) => c.convert(src),
+            Self::VideoEngine(c) => c.convert(src, content),
+            Self::Shader(c) => c.convert(src, content),
         }
     }
 }
@@ -217,8 +222,26 @@ impl Converter {
     }
 
     /// Converts `src` (BGRA) into the next pooled NV12 texture and returns it.
-    pub fn convert(&mut self, src: &ID3D11Texture2D) -> Result<ID3D11Texture2D> {
+    pub fn convert(
+        &mut self,
+        src: &ID3D11Texture2D,
+        content: (u32, u32),
+    ) -> Result<ID3D11Texture2D> {
         let input = self.input_view(src)?;
+        let source = RECT {
+            left: 0,
+            top: 0,
+            right: content.0 as i32,
+            bottom: content.1 as i32,
+        };
+        unsafe {
+            self.video_context.VideoProcessorSetStreamSourceRect(
+                &self.processor,
+                0,
+                true,
+                Some(&source),
+            );
+        }
         let (tex, view) = &self.outputs[self.next];
         self.next = (self.next + 1) % self.outputs.len();
 

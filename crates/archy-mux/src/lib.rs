@@ -12,10 +12,21 @@ mod headers;
 
 pub use headers::codec_header;
 
+/// An AAC audio track as produced by the encoder.
+pub struct AudioTrack<'a> {
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub bytes_per_second: u32,
+    /// The encoder's MF_MT_USER_DATA (carries the AudioSpecificConfig).
+    pub user_data: &'a [u8],
+}
+
 pub struct Mp4Writer {
     writer: IMFSinkWriter,
-    stream: u32,
-    first_time: Option<i64>,
+    video: u32,
+    audio: Vec<u32>,
+    /// Packet time that becomes 0 in the file (100 ns). `None`: the first video packet.
+    base: Option<i64>,
 }
 
 fn pack(hi: u32, lo: u32) -> u64 {
@@ -23,8 +34,7 @@ fn pack(hi: u32, lo: u32) -> u64 {
 }
 
 impl Mp4Writer {
-    /// `first_keyframe`: the stream's first keyframe; the codec header
-    /// (SPS/PPS, VPS/SPS/PPS or AV1 sequence header) is taken from it.
+    /// Video only, starting at the first packet written.
     pub fn create(
         path: &Path,
         codec: Codec,
@@ -32,6 +42,23 @@ impl Mp4Writer {
         height: u32,
         fps: u32,
         first_keyframe: &[u8],
+    ) -> Result<Self> {
+        Self::create_with_audio(path, codec, width, height, fps, first_keyframe, &[], None)
+    }
+
+    /// `first_keyframe`: the stream's first keyframe; the codec header (SPS/PPS,
+    /// VPS/SPS/PPS or AV1 sequence header) is taken from it. `base`: the packet
+    /// time that becomes 0 in the file, shared by video and audio so they stay in sync.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_audio(
+        path: &Path,
+        codec: Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+        first_keyframe: &[u8],
+        audio: &[AudioTrack],
+        base: Option<i64>,
     ) -> Result<Self> {
         unsafe {
             let ty = MFCreateMediaType()?;
@@ -51,20 +78,37 @@ impl Mp4Writer {
             attrs.SetGUID(&MF_TRANSCODE_CONTAINERTYPE, &MFTranscodeContainerType_MPEG4)?;
             attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
             let writer = MFCreateSinkWriterFromURL(&HSTRING::from(path.as_os_str()), None, &attrs)?;
-            let stream = writer.AddStream(&ty)?;
-            writer.SetInputMediaType(stream, &ty, None)?;
+            let video = writer.AddStream(&ty)?;
+            writer.SetInputMediaType(video, &ty, None)?;
+
+            let mut audio_streams = Vec::with_capacity(audio.len());
+            for track in audio {
+                let a = MFCreateMediaType()?;
+                a.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+                a.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)?;
+                a.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, track.sample_rate)?;
+                a.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, track.channels)?;
+                a.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+                a.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, track.bytes_per_second)?;
+                a.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0)?;
+                if !track.user_data.is_empty() {
+                    a.SetBlob(&MF_MT_USER_DATA, track.user_data)?;
+                }
+                let stream = writer.AddStream(&a)?;
+                writer.SetInputMediaType(stream, &a, None)?;
+                audio_streams.push(stream);
+            }
             writer.BeginWriting()?;
             Ok(Self {
                 writer,
-                stream,
-                first_time: None,
+                video,
+                audio: audio_streams,
+                base,
             })
         }
     }
 
-    /// Writes one compressed frame; timestamps (100 ns) are rebased so the file starts at 0.
-    pub fn write(&mut self, data: &[u8], time: i64, duration: i64, keyframe: bool) -> Result<()> {
-        let first = *self.first_time.get_or_insert(time);
+    fn sample(data: &[u8], time: i64, duration: i64, keyframe: bool) -> Result<IMFSample> {
         unsafe {
             let buffer = MFCreateMemoryBuffer(data.len() as u32)?;
             let mut ptr = std::ptr::null_mut();
@@ -74,11 +118,35 @@ impl Mp4Writer {
             buffer.SetCurrentLength(data.len() as u32)?;
             let sample = MFCreateSample()?;
             sample.AddBuffer(&buffer)?;
-            sample.SetSampleTime(time - first)?;
+            sample.SetSampleTime(time)?;
             sample.SetSampleDuration(duration)?;
             sample.SetUINT32(&MFSampleExtension_CleanPoint, keyframe as u32)?;
-            self.writer.WriteSample(self.stream, &sample)
+            Ok(sample)
         }
+    }
+
+    /// Writes one compressed video frame (time in 100 ns).
+    pub fn write(&mut self, data: &[u8], time: i64, duration: i64, keyframe: bool) -> Result<()> {
+        let base = *self.base.get_or_insert(time);
+        let sample = Self::sample(data, time - base, duration, keyframe)?;
+        unsafe { self.writer.WriteSample(self.video, &sample) }
+    }
+
+    /// Writes one AAC frame to audio track `track` (index into the tracks given at
+    /// creation). Frames from before the clip start are skipped.
+    pub fn write_audio(
+        &mut self,
+        track: usize,
+        data: &[u8],
+        time: i64,
+        duration: i64,
+    ) -> Result<()> {
+        let Some(base) = self.base else { return Ok(()) };
+        if time < base {
+            return Ok(());
+        }
+        let sample = Self::sample(data, time - base, duration, true)?;
+        unsafe { self.writer.WriteSample(self.audio[track], &sample) }
     }
 
     pub fn finish(self) -> Result<()> {

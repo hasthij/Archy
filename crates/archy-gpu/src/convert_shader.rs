@@ -9,11 +9,13 @@ use windows::core::{s, Interface, Result, PCSTR};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11PixelShader,
+    ID3D11Buffer, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11PixelShader,
     ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D,
-    ID3D11VertexShader, D3D11_COMPARISON_NEVER, D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-    D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D,
-    D3D11_SAMPLER_DESC, D3D11_TEX2D_RTV, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_VIEWPORT,
+    ID3D11VertexShader, D3D11_BIND_CONSTANT_BUFFER, D3D11_BUFFER_DESC, D3D11_COMPARISON_NEVER,
+    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_RENDER_TARGET_VIEW_DESC,
+    D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SAMPLER_DESC,
+    D3D11_TEX2D_RTV, D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT,
+    D3D11_VIEWPORT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM};
 
@@ -23,6 +25,8 @@ use crate::device::Gpu;
 const HLSL: &str = r#"
 Texture2D src : register(t0);
 SamplerState samp : register(s0);
+// Part of the capture texture that holds the window (smaller after a shrink).
+cbuffer Crop : register(b0) { float2 uv_scale; float2 pad; };
 
 struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
@@ -50,13 +54,13 @@ float3 fetch(float2 uv) {
 
 // BT.709, limited (studio) range, applied to the sRGB-encoded values as video expects.
 float ps_y(V i) : SV_Target {
-    float3 c = fetch(i.uv);
+    float3 c = fetch(i.uv * uv_scale);
     return dot(c, float3(0.2126, 0.7152, 0.0722)) * (219.0 / 255.0) + (16.0 / 255.0);
 }
 
 // Rendered at half size: bilinear sampling at the 2x2 block centre averages it.
 float2 ps_uv(V i) : SV_Target {
-    float3 c = fetch(i.uv);
+    float3 c = fetch(i.uv * uv_scale);
     float cb = dot(c, float3(-0.1146, -0.3854, 0.5));
     float cr = dot(c, float3(0.5, -0.4542, -0.0458));
     return float2(cb, cr) * (224.0 / 255.0) + (128.0 / 255.0);
@@ -116,6 +120,7 @@ pub struct ShaderConverter {
     ps_y: ID3D11PixelShader,
     ps_uv: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
+    crop: ID3D11Buffer,
     outputs: Vec<Target>,
     next: usize,
     sources: Vec<(ID3D11Texture2D, ID3D11ShaderResourceView)>,
@@ -128,7 +133,7 @@ impl ShaderConverter {
         let vs_code = compile(s!("vs"), s!("vs_4_0"))?;
         let y_code = compile(s!("ps_y"), s!("ps_4_0"))?;
         let uv_code = compile(s!("ps_uv"), s!("ps_4_0"))?;
-        let (mut vs, mut ps_y, mut ps_uv, mut sampler) = (None, None, None, None);
+        let (mut vs, mut ps_y, mut ps_uv, mut sampler, mut crop) = (None, None, None, None, None);
         unsafe {
             device.CreateVertexShader(bytecode(&vs_code), None, Some(&mut vs))?;
             device.CreatePixelShader(bytecode(&y_code), None, Some(&mut ps_y))?;
@@ -143,6 +148,13 @@ impl ShaderConverter {
                 ..Default::default()
             };
             device.CreateSamplerState(&desc, Some(&mut sampler))?;
+            let cb = D3D11_BUFFER_DESC {
+                ByteWidth: 16,
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+                ..Default::default()
+            };
+            device.CreateBuffer(&cb, None, Some(&mut crop))?;
         }
 
         let mut outputs = Vec::with_capacity(pool_len);
@@ -162,6 +174,7 @@ impl ShaderConverter {
             ps_y: ps_y.expect("no Y shader"),
             ps_uv: ps_uv.expect("no UV shader"),
             sampler: sampler.expect("no sampler"),
+            crop: crop.expect("no constant buffer"),
             outputs,
             next: 0,
             sources: Vec::new(),
@@ -169,8 +182,21 @@ impl ShaderConverter {
         })
     }
 
-    pub fn convert(&mut self, src: &ID3D11Texture2D) -> Result<ID3D11Texture2D> {
+    /// `content`: the valid (width, height) inside `src`.
+    pub fn convert(
+        &mut self,
+        src: &ID3D11Texture2D,
+        content: (u32, u32),
+    ) -> Result<ID3D11Texture2D> {
         let srv = self.source_view(src)?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { src.GetDesc(&mut desc) };
+        let scale = [
+            content.0 as f32 / desc.Width.max(1) as f32,
+            content.1 as f32 / desc.Height.max(1) as f32,
+            0.0,
+            0.0,
+        ];
         let target = &self.outputs[self.next];
         self.next = (self.next + 1) % self.outputs.len();
         let (w, h) = (self.out_size.0 as f32, self.out_size.1 as f32);
@@ -183,6 +209,8 @@ impl ShaderConverter {
             ctx.VSSetShader(&self.vs, None);
             ctx.PSSetShaderResources(0, Some(&[Some(srv)]));
             ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            ctx.UpdateSubresource(&self.crop, 0, None, scale.as_ptr() as *const _, 0, 0);
+            ctx.PSSetConstantBuffers(0, Some(&[Some(self.crop.clone())]));
 
             ctx.PSSetShader(&self.ps_y, None);
             ctx.OMSetRenderTargets(Some(&[Some(target.y.clone())]), None);
