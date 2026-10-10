@@ -35,7 +35,7 @@ use windows::Win32::UI::HiDpi::{
 /// NV12 textures in rotation: channel depth + frames the encoder may still hold + one being written.
 const NV12_POOL: usize = 8;
 /// Frames allowed to wait for the encoder. Beyond this we drop instead of queueing.
-const QUEUE_DEPTH: usize = 2;
+const QUEUE_DEPTH: usize = 3;
 
 struct Args {
     window: Option<String>,
@@ -340,16 +340,20 @@ fn run(args: Args) -> Result<()> {
     });
 
     let duration = Duration::from_secs(args.seconds as u64);
-    // Cadence: each frame is due one interval after the previous due time. A frame
-    // may be up to a quarter interval early (display jitter); later frames reset the
-    // schedule. 144 Hz games thin evenly to 60, and a 60 Hz display at 60 loses nothing.
+    // Cadence: frames are due on a fixed grid (one per interval). Each due slot takes
+    // the first frame within half an interval of it, so a 90 or 144 Hz game averages
+    // exactly the target rate; after a short hiccup it catches up. After a real pause
+    // (static screen) the grid restarts instead of bursting to catch up.
+    const GRID_RESET: i64 = 2_500_000; // 250 ms
     let frame_interval = 10_000_000 / args.fps as i64;
-    let tolerance = frame_interval / 4;
+    let tolerance = frame_interval / 2;
     let mut next_due = i64::MIN / 2;
+    let mut cadence_trace = std::env::var_os("ARCHY_CADENCE_TRACE").map(|_| Vec::<i64>::new());
     let (mut taken, mut thinned, mut dropped) = (0u64, 0u64, 0u64);
     let (mut first_drop, mut last_drop) = (None, 0u64);
     let mut convert_time = Duration::ZERO;
     let mut first_time: Option<i64> = None;
+    let mut last_taken = 0i64;
     let cpu_start = cpu_time();
     let threads_before = threads::snapshot();
     let main_cpu_start = thread_cpu_time();
@@ -362,12 +366,22 @@ fn run(args: Args) -> Result<()> {
         let Some(frame) = step("get frame", capture.next(Duration::from_millis(100)))? else {
             continue;
         };
+        if let Some(gaps) = cadence_trace.as_mut() {
+            gaps.push(frame.time);
+        }
         if frame.time < next_due - tolerance {
             thinned += 1;
             continue;
         }
-        next_due = (next_due + frame_interval).max(frame.time - tolerance + frame_interval);
+        // Restart the grid only after a real pause (static screen); restarting on
+        // the 20-30 ms delivery hiccups the compositor has cost ~6% of frames.
+        next_due = if frame.time > next_due + GRID_RESET {
+            frame.time + frame_interval
+        } else {
+            next_due + frame_interval
+        };
         let time = frame.time - *first_time.get_or_insert(frame.time);
+        last_taken = time;
         let t1 = Instant::now();
         let texture = step("convert frame", converter.convert(&frame.texture))?;
         drop(frame); // hand the buffer back to the compositor right away
@@ -387,6 +401,13 @@ fn run(args: Args) -> Result<()> {
         }
     }
     let wall = start.elapsed();
+    if let Some(times) = &cadence_trace {
+        let mut hist = std::collections::BTreeMap::<i64, u32>::new();
+        for w in times.windows(2) {
+            *hist.entry((w[1] - w[0]) / 10_000).or_default() += 1; // ms buckets
+        }
+        eprintln!("  delivered frame gaps (ms: count): {hist:?}");
+    }
     let main_cpu = thread_cpu_time() - main_cpu_start;
     // Before the encoder thread exits, so its time is still attributable.
     let threads_after = threads::snapshot();
@@ -402,8 +423,8 @@ fn run(args: Args) -> Result<()> {
     println!();
     println!("Wrote {}", args.out.display());
     println!(
-        "  Frames: {taken} captured ({:.1} fps), {thinned} above target rate skipped, {dropped} dropped (encoder busy)",
-        taken as f64 / wall.as_secs_f64()
+        "  Frames: {taken} captured ({:.1} fps while the game was drawing), {thinned} above target rate skipped, {dropped} dropped (encoder busy)",
+        (taken.saturating_sub(1)) as f64 / (last_taken.max(1) as f64 / 1e7)
     );
     if let Some(first) = first_drop {
         println!("    drops between frame {first} and {last_drop}");
