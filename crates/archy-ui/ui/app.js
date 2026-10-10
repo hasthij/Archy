@@ -308,12 +308,26 @@ function renderGames() {
     input.value = "";
   };
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
+  const running = el("select", { class: "input", "aria-label": "Running apps" }, el("option", { value: "", text: "Pick from apps that are open now…" }));
+  const loadRunning = async () => {
+    const apps = await invoke("running_apps").catch(() => []);
+    running.replaceChildren(el("option", { value: "", text: apps.length ? "Pick from apps that are open now…" : "No apps found" }),
+      ...apps.map((a) => el("option", { value: a.exe, text: `${a.title}  (${a.exe})` })));
+  };
+  running.addEventListener("focus", loadRunning);
+  running.addEventListener("change", () => {
+    const exe = running.value;
+    if (exe && !settings.games.some((g) => g.toLowerCase() === exe.toLowerCase())) save({ games: [...settings.games, exe] }, `Added ${exe}`);
+  });
+  loadRunning();
   box.replaceChildren(
     el("div", { class: "card" },
       el("h3", { text: "Always record these" }),
       el("p", { class: "sub", text: "The program file of each game. Archy starts recording when one is in front." }),
       el("div", { class: "chips", style: "margin:14px 0" }, settings.games.map((g) =>
         el("span", { class: "tag" }, g, el("button", { "aria-label": `Remove ${g}`, text: "×", onclick: () => save({ games: settings.games.filter((x) => x !== g) }, `Removed ${g}`) })))),
+      el("div", { class: "field" }, running, el("button", { class: "btn", text: "Refresh", onclick: loadRunning })),
+      el("p", { class: "sub", style: "margin:12px 0 6px", text: "Or type the program's file name:" }),
       el("div", { class: "field" }, input, el("button", { class: "btn", text: "Add", onclick: add }))),
     settingCard({ key: "record_fullscreen_apps", name: "Other fullscreen apps", rec: true,
       what: "Also record anything else running fullscreen (browsers, Discord and video players are ignored).",
@@ -415,16 +429,16 @@ function devicePicker(key, list, label, what, note) {
 function renderAudio() {
   $("#audio-settings").replaceChildren(
     devicePicker("mic_device", devices.mics, "Microphone", "Which mic Archy records for your voice track.",
-      "If it's unplugged, Archy uses Windows' default mic instead. Voice clipping always listens on Windows' default mic (a Windows limit)."),
+      "If it's unplugged, Archy uses Windows' default mic instead. Voice clipping listens on this mic too."),
     devicePicker("output_device", devices.outputs, "Speakers / headphones", "Which output track 1 (everything you heard) records from. Pick the one you actually listen on.",
       "If it's unplugged, Archy uses Windows' default output instead."),
-    onOff("audio_everything", "Track 1: everything you heard", "All PC audio mixed together: game, friends, music. Discord, phones and most players only play this track.",
+    onOff("audio_everything", "Track 1: everything you heard", "All PC audio mixed together: game, friends, music, plus your microphone when it's on below. Discord, phones and most players only play this track.",
       "Clips that sound right everywhere. Keep this on.", "Silent clips in apps that only play the first track."),
     onOff("audio_game", "Game only", "A separate track with just the game's sound.",
       "Editing: turn the game up or down on its own.", "Smaller files if you never edit."),
     onOff("audio_discord", "Discord only", "A separate track with just your friends in voice chat.",
       "Muting or lowering friends later without losing game sound.", "Keeping friends' voices out of the separate tracks (they're still in track 1)."),
-    onOff("audio_mic", "Your microphone", "A separate track with your voice.",
+    onOff("audio_mic", "Your microphone", "Your voice, mixed into track 1 (so every player hears you) and also kept as its own track.",
       "Commentary and reactions; turn yourself up or down later.", "Keeping your mic out of clips entirely."),
     settingCard({ key: "audio_kbps", name: "Audio quality", rec: 160,
       what: "Bitrate per track. Audio is tiny next to video; higher is clearer music and voices.",
@@ -436,6 +450,8 @@ function renderAudio() {
       ] }),
     el("h2", { text: "Voice clipping" }),
     el("div", { id: "voice-settings" }));
+  // The voice section lives inside this page, so redraw it whenever the page is.
+  renderVoice();
 }
 
 function renderGeneral() {
@@ -472,17 +488,101 @@ function renderVoice() {
     onclick: () => save({ voice_phrases: [...settings.voice_phrases, { text: "Archy save that", seconds: 30 }] }, "Phrase added") });
   $("#voice-settings").replaceChildren(
     settingCard({ key: "voice_enabled", name: "Voice clipping", rec: true,
-      what: "Say a phrase instead of pressing a key. Windows' own speech recognizer listens for only these phrases, entirely on this PC. Nothing is sent anywhere.",
+      what: "Say a phrase instead of pressing a key. A tiny keyword model listens to your Archy microphone for only these phrases, entirely on this PC. Nothing is sent anywhere.",
       options: [
-        { value: true, label: "On", best: "Clipping without taking your hands off the game. Needs Windows' microphone access for desktop apps turned on.", f: 0 },
+        { value: true, label: "On", best: "Clipping without taking your hands off the game. Uses a little CPU on one efficiency core. Needs Windows' microphone access for desktop apps turned on.", f: 0 },
         { value: false, label: "Off", best: "Hotkeys only, and the microphone is never listened to.", f: 0 },
       ] }),
     el("div", { class: "card" },
       el("h3", { text: "Your phrases" }),
-      el("p", { class: "sub", text: "2–4 words you wouldn't say by accident work best. Starting with \"Archy\" makes accidental clips very rare." }),
+      el("p", { class: "sub", text: "Use 3–4 real, everyday words you wouldn't say by accident, like \"Archer clip that\". Made-up names and gamer tags can't be recognized: the voice model only knows real English words." }),
       el("div", { style: "margin-top:8px" }, rows), el("div", { style: "margin-top:12px" }, add)),
+    calibrationCard(),
+    settingCard({ key: "voice_sensitivity", name: "Sensitivity", rec: settings.voice_tuning ? 0 : 50,
+      what: "How easily your phrase triggers a clip. Calibrating (above) finds the best setting for your voice and mic.",
+      options: [
+        ...(settings.voice_tuning ? [{ value: 0, label: "Calibrated",
+          best: `Tuned to your voice: caught ${settings.voice_tuning.hits} of ${settings.voice_tuning.prompts} phrases and never fired while you were just talking. Recalibrate if you change mic or phrase.` }] : []),
+        { value: 25, label: "Strict", best: "Loud games, music or friends talking a lot: almost never clips by accident, but you may need to repeat the phrase." },
+        { value: 50, label: "Balanced", best: "Most setups, if you haven't calibrated." },
+        { value: 80, label: "Loose", best: "Quiet rooms or a soft voice, if Balanced misses you. May clip on similar-sounding words." },
+      ] }),
     onOff("sound_on_voice", "Sound when a phrase is heard", "A soft blip the moment Archy hears you, before the clip finishes saving.",
       "Knowing Archy heard you.", "Silent voice clipping."));
+}
+
+// ---------- voice calibration ----------
+// Lives outside the settings so a redraw mid-run keeps showing progress.
+let calib = { running: false, line: "", sub: "", result: null };
+
+function calibrationCard() {
+  const phrase = settings.voice_phrases[0]?.text || "";
+  const big = el("div", { style: "font-size:20px;font-weight:600;margin:10px 0 4px", text: calib.line });
+  const sub = el("p", { class: "sub", text: calib.sub });
+  const start = el("button", { class: "btn primary", text: calib.result ? "Calibrate again" : "Calibrate",
+    disabled: !phrase ? "" : null, onclick: () => runCalibration(phrase) });
+  const stop = el("button", { class: "btn", text: "Stop", onclick: stopCalibration });
+  const restart = el("button", { class: "btn", text: "Restart", onclick: async () => { await stopCalibration(); runCalibration(phrase); } });
+  const t = settings.voice_tuning;
+  const learnedNote = t && t.phrase === phrase && t.learned?.length
+    ? el("p", { class: "sub", text: `Archy has learned ${t.learned.length} way${t.learned.length === 1 ? "" : "s"} you say "${phrase}".` })
+    : null;
+  return el("div", { class: "card" },
+    el("h3", { text: "Calibrate to your voice" }),
+    el("p", { class: "sub", text: `About a minute. Archy asks you to say "${phrase}" 5 times (say it all in one go, the way you would in a game), then to talk normally for 15 s. It learns how you pronounce it and picks the setting that hears you best without clipping by accident. Uses the microphone chosen above; the recording never leaves this PC and is thrown away afterwards.` }),
+    learnedNote,
+    calib.line ? big : null, calib.sub ? sub : null,
+    el("div", { class: "field", style: "margin-top:12px" }, calib.running ? [stop, restart] : start));
+}
+
+function showCalib(line, sub = "") {
+  calib.line = line;
+  calib.sub = sub;
+  renderVoice();
+}
+
+async function stopCalibration() {
+  calib.cancelled = true;
+  try { await invoke("stop_calibration"); } catch { /* already finished */ }
+}
+
+async function runCalibration(phrase) {
+  if (calib.running) return;
+  calib = { running: true, cancelled: false, line: "Starting the microphone…", sub: "", result: null };
+  renderVoice();
+  let countdown;
+  const progress = new tauri.core.Channel();
+  progress.onmessage = (m) => {
+    clearInterval(countdown);
+    if (m.step === "ready") showCalib("Get ready…", `Say "${phrase}" each time Archy asks.`);
+    else if (m.step === "say") showCalib(`Say: "${phrase}"`, `${m.n} of ${m.of}. Say it the way you would in a game.`);
+    else if (m.step === "talk") {
+      let left = m.secs;
+      const tick = () => showCalib("Now just talk normally (or play)", `Don't say the phrase. ${left} s left…`);
+      tick();
+      countdown = setInterval(() => { left = Math.max(0, left - 1); tick(); }, 1000);
+    } else if (m.step === "analyzing") showCalib("Learning how you say it…", "Testing settings on your recording. About 30 seconds; you can play meanwhile.");
+    else if (m.step === "error") { calib.running = false; showCalib("Calibration didn't finish", m.message); }
+    else if (m.step === "done") {
+      calib.running = false;
+      calib.result = m;
+      if (m.hits >= 3) {
+        const learned = m.learned?.length ? ` Learned ${m.learned.length} way${m.learned.length === 1 ? "" : "s"} you say it.` : "";
+        showCalib(`Done: caught ${m.hits} of ${m.prompts}`, `No false alarms while you talked.${learned} Archy uses this now (Sensitivity: Calibrated).`);
+        save({ voice_sensitivity: 0, voice_tuning: { score: m.score, paths: m.paths, threshold: m.threshold, hits: m.hits, prompts: m.prompts, phrase, learned: m.learned || [] } }, "Voice calibrated");
+      } else {
+        showCalib(`Only caught ${m.hits} of ${m.prompts}`, "Nothing was changed. Try again closer to the mic, check the microphone picked above, or use a phrase with clearer, longer words.");
+      }
+    }
+  };
+  try {
+    await invoke("calibrate_voice", { phrase, mic: settings.mic_device || "", progress });
+  } catch (e) {
+    calib.running = false;
+    if (calib.cancelled) showCalib("", "");
+    else showCalib("Calibration didn't finish", String(e));
+  }
+  clearInterval(countdown);
 }
 
 function renderAll() {
@@ -492,7 +592,6 @@ function renderAll() {
   renderHotkeys();
   renderAudio();
   renderGeneral();
-  renderVoice();
 }
 
 // ---------- start ----------

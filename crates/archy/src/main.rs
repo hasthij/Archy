@@ -68,8 +68,8 @@ struct App {
     saving: Arc<AtomicBool>,
     settings_modified: Option<std::time::SystemTime>,
     voice: Option<voice::VoiceListener>,
-    /// Phrases the running listener was started with (restart when they change).
-    voice_phrases: Vec<String>,
+    /// What the running listener was started with (restart when it changes).
+    voice_config: Option<voice::VoiceConfig>,
     /// Whether the tray currently shows the recording-dot icon.
     dot_shown: bool,
 }
@@ -155,11 +155,20 @@ const DISCORD_LIMIT_BYTES: f64 = 10_000_000.0 * 0.92;
 fn recorder_config(s: &Settings, target: Target, game_pid: u32) -> RecorderConfig {
     let mut audio = Vec::new();
     if s.audio_everything {
+        // Track 1 is what single-track players play, so it carries your mic too.
+        let source = if s.audio_mic {
+            Source::Mix {
+                output: Some(s.output_device.clone()),
+                mic: Some(s.mic_device.clone()),
+            }
+        } else {
+            Source::System {
+                device: Some(s.output_device.clone()),
+            }
+        };
         audio.push(AudioSource {
             name: "Everything".into(),
-            source: Source::System {
-                device: Some(s.output_device.clone()),
-            },
+            source,
         });
     }
     if s.audio_game && game_pid != 0 {
@@ -331,42 +340,66 @@ impl App {
 
     /// Starts, restarts or stops the voice listener to match settings and pause state.
     fn sync_voice(&mut self) {
-        let wanted: Vec<String> = if self.settings.voice_enabled && !self.paused {
-            self.settings
-                .voice_phrases
-                .iter()
-                .map(|p| p.text.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if wanted.is_empty() {
+        let phrases: Vec<String> = self
+            .settings
+            .voice_phrases
+            .iter()
+            .map(|p| p.text.clone())
+            .filter(|t| !t.trim().is_empty())
+            .collect();
+        if !self.settings.voice_enabled || self.paused || phrases.is_empty() {
             self.voice = None;
-            self.voice_phrases.clear();
+            self.voice_config = None;
             return;
         }
-        if self.voice.is_some() && wanted == self.voice_phrases {
+        let wanted = voice::VoiceConfig {
+            phrases,
+            mic: self.settings.mic_device.clone(),
+            tuning: match (self.settings.voice_sensitivity, &self.settings.voice_tuning) {
+                (0, Some(t)) => archy_voice::Tuning { score: t.score, paths: t.paths, threshold: t.threshold },
+                (s, _) => archy_voice::Tuning::preset(s),
+            },
+            // Learned takes belong to the phrase that was calibrated, if it's still there.
+            learned: match &self.settings.voice_tuning {
+                Some(t) => self
+                    .settings
+                    .voice_phrases
+                    .iter()
+                    .position(|p| p.text == t.phrase)
+                    .map(|i| t.learned.iter().map(|l| (i, l.clone())).collect())
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            },
+        };
+        if self.voice.is_some() && self.voice_config.as_ref() == Some(&wanted) {
             return;
         }
         self.voice = None; // stop the old listener before starting a new one
-        let window = self.window.0 as isize;
-        self.voice = Some(voice::VoiceListener::start(
-            wanted.clone(),
-            window,
-            WM_VOICE,
-            move |why| {
-                log(&format!("voice: {why}"));
-                notify(window, "Voice clipping is off", &why, true);
-            },
-        ));
-        log(&format!("voice: listening for {wanted:?}"));
-        self.voice_phrases = wanted;
+        match voice::VoiceListener::start(&wanted, self.window.0 as isize, WM_VOICE) {
+            Ok(v) => self.voice = Some(v),
+            Err(e) => log(&format!("voice: couldn't start the voice helper: {e}")),
+        }
+        self.voice_config = Some(wanted);
     }
 
-    fn heard(&self, index: usize) {
+    fn heard(&self, index: usize, code: isize) {
+        if index == voice::VOICE_ERROR {
+            let why = voice::explain_code(code);
+            notify(self.window.0 as isize, "Voice clipping is off", &why, true);
+            return;
+        }
         let Some(phrase) = self.settings.voice_phrases.get(index) else {
             return;
         };
+        // Practice phrases during calibration aren't requests (a stale marker from
+        // a crash is ignored after two minutes).
+        let calibrating = std::fs::metadata(archy_core::settings::calibration_marker())
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age.as_secs() < 120));
+        if calibrating {
+            log(&format!("voice: heard \"{}\" during calibration (ignored)", phrase.text));
+            return;
+        }
         log(&format!("voice: heard \"{}\"", phrase.text));
         if self.settings.sound_on_voice {
             play(VOICE_WAV);
@@ -668,7 +701,7 @@ fn with_app(f: impl FnOnce(&mut App)) {
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_TIMER if wp.0 == TIMER_WATCH => with_app(|a| a.watch()),
-        WM_VOICE => with_app(|a| a.heard(wp.0)),
+        WM_VOICE => with_app(|a| a.heard(wp.0, lp.0)),
         WM_HOTKEY => with_app(|a| match wp.0 as i32 {
             HK_SAVE => a.save(a.settings.clip_seconds),
             HK_SAVE_LONG => a.save(a.settings.long_clip_seconds),
@@ -698,6 +731,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 }
 
 fn main() {
+    // The voice helper process (see voice.rs) shares this exe.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--voice-calibrate") {
+        voice::calibrate_main(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--voice-host") {
+        voice::host_main(&args[1..], log);
+        return;
+    }
     unsafe {
         // One Archy at a time.
         let _mutex = CreateMutexW(None, true, w!("Local\\ArchyRecorder"));
@@ -761,7 +804,7 @@ fn main() {
         saving: Arc::new(AtomicBool::new(false)),
         settings_modified: Settings::modified(),
         voice: None,
-        voice_phrases: Vec::new(),
+        voice_config: None,
         dot_shown: false,
     };
     app.register_hotkeys();

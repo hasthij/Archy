@@ -63,6 +63,26 @@ pub struct Settings {
     pub voice_phrases: Vec<VoicePhrase>,
     /// Play a short sound the moment a phrase is heard.
     pub sound_on_voice: bool,
+    /// How easily a phrase triggers: 25 strict, 50 balanced, 80 loose, or 0 =
+    /// use `voice_tuning` from the user's own calibration.
+    pub voice_sensitivity: u32,
+    /// Detector settings found by calibrating with the user's voice and mic.
+    pub voice_tuning: Option<VoiceTuning>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct VoiceTuning {
+    pub score: f32,
+    pub paths: u32,
+    pub threshold: f32,
+    /// How many of the calibration prompts it caught, e.g. 5 of 5.
+    pub hits: u32,
+    pub prompts: u32,
+    /// The phrase that was calibrated.
+    pub phrase: String,
+    /// How the user actually says it, as voice-model tokens: extra triggers.
+    pub learned: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -104,17 +124,25 @@ impl Default for Settings {
             voice_enabled: false,
             voice_phrases: vec![
                 VoicePhrase {
-                    text: "Archy clip that".into(),
+                    text: "Archer clip that".into(),
                     seconds: 30,
                 },
                 VoicePhrase {
-                    text: "Archy clip the last minute".into(),
+                    text: "Archer clip the last minute".into(),
                     seconds: 60,
                 },
             ],
             sound_on_voice: true,
+            voice_sensitivity: 50,
+            voice_tuning: None,
         }
     }
+}
+
+/// Exists while the voice calibration runs, so the tray doesn't clip each
+/// practice phrase.
+pub fn calibration_marker() -> PathBuf {
+    app_dir().join("voice-calibrating")
 }
 
 pub fn app_dir() -> PathBuf {
@@ -172,8 +200,22 @@ impl Settings {
     fn clamped(mut self) -> Self {
         for p in &mut self.voice_phrases {
             p.seconds = p.seconds.clamp(5, 60);
+            // The voice model only knows real words: "Archy" was never heard, while
+            // "Archer" (said almost the same) is. Old default phrases move over.
+            p.text = p
+                .text
+                .split_whitespace()
+                .map(|w| match w.to_ascii_lowercase().trim_matches(|c: char| !c.is_alphanumeric()) {
+                    "archy" | "archie" | "archi" => "Archer",
+                    _ => w,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
         }
         self.voice_phrases.retain(|p| !p.text.trim().is_empty());
+        if self.voice_sensitivity == 0 && self.voice_tuning.is_none() {
+            self.voice_sensitivity = 50;
+        }
         self.clip_seconds = self.clip_seconds.clamp(5, 60);
         self.long_clip_seconds = self.long_clip_seconds.clamp(5, 60);
         self.fps = self.fps.clamp(24, 90);

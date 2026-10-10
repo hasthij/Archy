@@ -7,6 +7,7 @@ default-members = [
     "crates/archy",
     "crates/archy-ui",
     "crates/archy-audio",
+    "crates/archy-voice",
     "crates/archy-bench",
     "crates/archy-capture",
     "crates/archy-core",
@@ -27,6 +28,7 @@ archy-encode = { path = "crates/archy-encode" }
 archy-mux = { path = "crates/archy-mux" }
 archy-core = { path = "crates/archy-core" }
 archy-audio = { path = "crates/archy-audio" }
+archy-voice = { path = "crates/archy-voice" }
 windows = { version = "0.62.2", features = [
     "Foundation",
     "Foundation_Collections",

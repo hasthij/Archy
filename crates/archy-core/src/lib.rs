@@ -5,6 +5,7 @@ pub mod cadence;
 pub mod clipboard;
 pub mod discord;
 pub mod eco;
+pub mod permissions;
 pub mod presets;
 pub mod recorder;
 pub mod ring;
