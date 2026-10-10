@@ -49,7 +49,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "archy"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "archy-audio",
  "archy-core",
@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "archy-setup"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "archy-core",
  "windows",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "archy-ui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "archy-audio",
  "archy-core",
@@ -2432,7 +2432,7 @@ version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
 dependencies = [
- "toml_edit 0.25.17+spec-1.1.0",
+ "toml_edit 0.25.15+spec-1.1.0",
 ]
 
 [[package]]
@@ -3556,9 +3556,9 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.25.17+spec-1.1.0"
+version = "0.25.15+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3641d5bbb5349a79e1020a242d251efbc546ad8048d133958323ce9c40a9c9c"
+checksum = "1340ea94a5856333492c9064b02c778b191dd2c853778d9609debdcdfea3a614"
 dependencies = [
  "indexmap 2.14.2",
  "toml_datetime 1.1.2+spec-1.1.0",

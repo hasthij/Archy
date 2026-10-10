@@ -28,6 +28,8 @@ const NOT_GAMES: &[&str] = &[
     "Discord.exe",
     "Spotify.exe",
     "Archy.exe",
+    // Archy's own window: maximized, it looked like a fullscreen game.
+    "archy-ui.exe",
     "ApplicationFrameHost.exe",
     "SearchHost.exe",
     "StartMenuExperienceHost.exe",

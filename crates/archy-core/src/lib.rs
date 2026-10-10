@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod discord;
 pub mod eco;
 pub mod permissions;
+pub mod monitors;
 pub mod presets;
 pub mod process;
 pub mod recorder;

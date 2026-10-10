@@ -295,7 +295,31 @@ const RECORDING = () => [
 ];
 
 function renderRecording() {
-  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard));
+  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), screenPicker());
+  loadMonitors();
+}
+
+// ---------- screen picker (Whole screen mode) ----------
+let monitors = [];
+async function loadMonitors() {
+  try { monitors = await invoke("monitors"); } catch { monitors = []; }
+  const box = $("#screen-picker");
+  if (box) box.replaceWith(screenPicker());
+}
+
+function screenPicker() {
+  if (settings.capture !== "screen") return el("div", { id: "screen-picker" });
+  const select = el("select", { class: "input", "aria-label": "Screen to record" },
+    el("option", { value: "", text: "The screen the game is on" }),
+    monitors.map((m) => el("option", { value: m.id, text: m.label })));
+  select.value = monitors.some((m) => m.id === settings.capture_monitor) ? settings.capture_monitor : "";
+  select.addEventListener("change", () => save({ capture_monitor: select.value }, `Recording: ${select.selectedOptions[0].text}`));
+  return el("div", { class: "card setting", id: "screen-picker" },
+    el("div", { class: "about" }, el("h3", { text: "Which screen" }),
+      el("p", { text: "With Whole screen on, Archy records this screen while a game is open, like picking a screen to share." })),
+    el("div", { class: "pick" },
+      el("div", { class: "field" }, select, el("button", { class: "btn", text: "Refresh", onclick: loadMonitors })),
+      el("p", { class: "sub", text: "If the screen is unplugged, Archy records the screen the game is on instead." })));
 }
 
 function renderGames() {

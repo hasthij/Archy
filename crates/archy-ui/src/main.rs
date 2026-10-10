@@ -250,6 +250,12 @@ fn read_log(lines: usize) -> String {
     all[all.len().saturating_sub(lines.clamp(1, 2000))..].join("\n")
 }
 
+/// Connected screens, for the screen picker.
+#[tauri::command]
+fn monitors() -> Vec<archy_core::monitors::Monitor> {
+    archy_core::monitors::list()
+}
+
 /// Opens the folder with archy.log and settings.json, with the log selected.
 #[tauri::command]
 fn open_log_folder() -> Result<(), String> {
@@ -488,7 +494,8 @@ fn main() {
             calibrate_voice,
             stop_calibration,
             read_log,
-            open_log_folder
+            open_log_folder,
+            monitors
         ])
         .run(tauri::generate_context!())
         .expect("Archy window failed to start");
