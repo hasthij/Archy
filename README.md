@@ -58,7 +58,7 @@ You can **Stop** or **Restart** at any time. Calibrate again if you change your 
 > Calibrate when you're not in the middle of a match. The learning step uses a few CPU cores for about 30 seconds.
 
 ### 3. Add your games
-**Games.** Roblox is already in the list. Use the running-apps picker to add anything else that's open, **Other fullscreen apps** (on by default) also records most other games running fullscreen.
+**Games.** Roblox is already in the list. Use the running-apps picker to add anything else that's open. **Other fullscreen apps** (on by default) also records most other games running fullscreen.
 
 ### 4. Check your clips folder
 **Storage.** Clips go to `Videos\Archy` by default. Click to choose a different folder.
