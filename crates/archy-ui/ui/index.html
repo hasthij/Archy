@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archy</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <nav class="side" aria-label="Main">
+    <div class="brand">
+      <img src="logo.svg" alt="" width="28" height="28">
+      <span>Archy</span>
+    </div>
+    <button class="nav" data-view="clips" aria-current="page">Clips</button>
+    <button class="nav" data-view="recording">Recording</button>
+    <button class="nav" data-view="games">Games</button>
+    <button class="nav" data-view="storage">Storage &amp; sharing</button>
+    <button class="nav" data-view="hotkeys">Hotkeys</button>
+    <button class="nav" data-view="audio">Audio &amp; voice</button>
+    <button class="nav" data-view="general">General</button>
+    <div class="side-foot">
+      <div class="local">Everything stays on this PC.<br>No account, no uploads.</div>
+    </div>
+  </nav>
+
+  <main class="main">
+    <section class="status" id="status" aria-live="polite"></section>
+
+    <section class="view" id="view-clips">
+      <header class="head">
+        <h1>Clips</h1>
+        <div class="tools">
+          <div class="seg" role="group" aria-label="Filter clips">
+            <button data-filter="all" aria-pressed="true">All</button>
+            <button data-filter="today" aria-pressed="false">Today</button>
+          </div>
+          <button class="btn" id="open-folder">Open folder</button>
+        </div>
+      </header>
+      <div class="grid" id="clips"></div>
+      <p class="empty" id="clips-empty" hidden>No clips yet. While a game is open, press your save hotkey and the last seconds land here.</p>
+    </section>
+
+    <section class="view" id="view-recording" hidden>
+      <header class="head">
+        <div>
+          <h1>Recording</h1>
+          <p class="sub">Every setting is yours to change. Pick an option to see what it's best for and what it costs. Changes apply within two seconds.</p>
+        </div>
+      </header>
+      <div id="recording-settings"></div>
+    </section>
+
+    <section class="view" id="view-games" hidden>
+      <header class="head"><div><h1>Games</h1><p class="sub">Archy only records while one of these is open, so there's zero load the rest of the time.</p></div></header>
+      <div id="games-settings"></div>
+    </section>
+
+    <section class="view" id="view-storage" hidden>
+      <header class="head"><div><h1>Storage &amp; sharing</h1><p class="sub">Clips are saved on this PC, in your Videos folder unless you pick another one.</p></div></header>
+      <div id="storage-settings"></div>
+    </section>
+
+    <section class="view" id="view-hotkeys" hidden>
+      <header class="head"><div><h1>Hotkeys</h1><p class="sub">Click a box, then press the keys you want. Esc cancels.</p></div></header>
+      <div id="hotkey-settings"></div>
+    </section>
+
+    <section class="view" id="view-general" hidden>
+      <header class="head"><div><h1>General</h1><p class="sub">Notifications, sounds and how Archy starts.</p></div></header>
+      <div id="general-settings"></div>
+    </section>
+
+    <section class="view" id="view-audio" hidden>
+      <header class="head"><div><h1>Audio &amp; voice</h1></div></header>
+      <p class="sub" style="margin:-8px 0 16px">Each source is its own track, so you can mute a friend or your keyboard later without touching game sound. Changes apply to the next clip.</p>
+      <div id="audio-settings"></div>
+    </section>
+  </main>
+</div>
+
+<div class="player" id="player" hidden>
+  <div class="player-box" role="dialog" aria-modal="true" aria-label="Clip player">
+    <div class="player-bar">
+      <span id="player-title"></span>
+      <button class="btn" id="player-close" aria-label="Close player">Close</button>
+    </div>
+    <video id="player-video" controls></video>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

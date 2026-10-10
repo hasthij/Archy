@@ -5,7 +5,6 @@
 //!   archy-record --window Roblox --seconds 20 --fps 60 --codec av1 --out test.mp4
 //!   archy-record --monitor --seconds 10
 
-mod eco;
 mod threads;
 
 use std::path::PathBuf;
@@ -237,7 +236,7 @@ fn run(args: Args) -> Result<()> {
 
     let gpu = step("create GPU device", Gpu::new(None, args.gpu_priority))?;
     if args.eco {
-        let e = eco::apply();
+        let e = archy_core::eco::apply();
         if e.efficiency_cores > 0 {
             println!("Efficiency mode: pinned to {} of {} cores (efficiency cores), EcoQoS, below-normal priority", e.efficiency_cores, e.total_cores);
         } else {
@@ -393,7 +392,10 @@ fn run(args: Args) -> Result<()> {
         let time = frame.time - *first_time.get_or_insert(frame.time);
         last_taken = time;
         let t1 = Instant::now();
-        let texture = step("convert frame", converter.convert(&frame.texture))?;
+        let texture = step(
+            "convert frame",
+            converter.convert(&frame.texture, (frame.content_width, frame.content_height)),
+        )?;
         drop(frame); // hand the buffer back to the compositor right away
         convert_time += t1.elapsed();
         taken += 1;

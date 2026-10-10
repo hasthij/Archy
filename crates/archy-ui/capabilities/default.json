@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The Archy window: core APIs only; everything else goes through Archy's own commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

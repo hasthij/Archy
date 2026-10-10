@@ -1,0 +1,143 @@
+//! Which window is the game.
+
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
+};
+
+pub struct Foreground {
+    pub hwnd: HWND,
+    /// Executable file name, e.g. "RobloxPlayerBeta.exe".
+    pub exe: String,
+    pub pid: u32,
+    pub fullscreen: bool,
+}
+
+/// Desktop/shell windows and apps that are often fullscreen but aren't games.
+const NOT_GAMES: &[&str] = &[
+    "explorer.exe",
+    "chrome.exe",
+    "msedge.exe",
+    "firefox.exe",
+    "opera.exe",
+    "brave.exe",
+    "vlc.exe",
+    "Discord.exe",
+    "Spotify.exe",
+    "Archy.exe",
+    "ApplicationFrameHost.exe",
+    "SearchHost.exe",
+    "StartMenuExperienceHost.exe",
+    "LockApp.exe",
+];
+const SHELL_CLASSES: &[&str] = &["Progman", "WorkerW", "Shell_TrayWnd"];
+
+pub fn foreground() -> Option<Foreground> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() || unsafe { IsIconic(hwnd) }.as_bool() {
+        return None;
+    }
+    let mut class = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
+    let class = String::from_utf16_lossy(&class[..n]);
+    if SHELL_CLASSES.contains(&class.as_str()) {
+        return None;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    let exe = exe_name(hwnd)?;
+    Some(Foreground {
+        hwnd,
+        pid,
+        fullscreen: covers_monitor(hwnd),
+        exe,
+    })
+}
+
+impl Foreground {
+    pub fn is_game(&self, games: &[String], any_fullscreen: bool) -> bool {
+        if games.iter().any(|g| g.eq_ignore_ascii_case(&self.exe)) {
+            return true;
+        }
+        any_fullscreen
+            && self.fullscreen
+            && !NOT_GAMES.iter().any(|n| n.eq_ignore_ascii_case(&self.exe))
+    }
+}
+
+pub fn alive(hwnd: HWND) -> bool {
+    unsafe { IsWindow(Some(hwnd)) }.as_bool()
+}
+
+fn exe_name(hwnd: HWND) -> Option<String> {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buf = [0u16; 512];
+    let mut len = buf.len() as u32;
+    let ok = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    ok.ok()?;
+    let path = String::from_utf16_lossy(&buf[..len as usize]);
+    path.rsplit(['\\', '/']).next().map(str::to_string)
+}
+
+fn covers_monitor(hwnd: HWND) -> bool {
+    let mut win = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut win) }.is_err() {
+        return false;
+    }
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return false;
+    }
+    let m = info.rcMonitor;
+    win.left <= m.left && win.top <= m.top && win.right >= m.right && win.bottom >= m.bottom
+}
+
+/// Friendly name for clip file names: "RobloxPlayerBeta.exe" -> "Roblox".
+pub fn game_name(exe: &str) -> String {
+    let stem = exe
+        .strip_suffix(".exe")
+        .or_else(|| exe.strip_suffix(".EXE"))
+        .unwrap_or(exe);
+    match stem.to_ascii_lowercase().as_str() {
+        "robloxplayerbeta" => "Roblox".into(),
+        "valorant-win64-shipping" => "Valorant".into(),
+        "fortniteclient-win64-shipping" => "Fortnite".into(),
+        "cs2" => "Counter-Strike 2".into(),
+        "javaw" => "Minecraft".into(),
+        _ => stem.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn friendly_names() {
+        assert_eq!(game_name("RobloxPlayerBeta.exe"), "Roblox");
+        assert_eq!(game_name("SomeGame.exe"), "SomeGame");
+    }
+}

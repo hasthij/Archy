@@ -5,6 +5,8 @@
 //! keeps only as many as its target frame rate, so a game running at 240 fps
 //! costs the same as one at 60.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use windows::core::{factory, Interface, Result, BOOL};
@@ -14,6 +16,7 @@ use windows::Graphics::Capture::{
 };
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
+use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
@@ -35,6 +38,9 @@ pub enum Target {
     Window(HWND),
     Monitor(HMONITOR),
 }
+
+// Window and monitor handles are system-wide identifiers, usable from any thread.
+unsafe impl Send for Target {}
 
 /// First visible top-level window whose title contains `needle` (case-insensitive).
 pub fn find_window(needle: &str) -> Option<(HWND, String)> {
@@ -80,11 +86,16 @@ pub fn monitor_of(hwnd: HWND) -> HMONITOR {
 }
 
 pub struct Capture {
-    _item: GraphicsCaptureItem,
+    item: GraphicsCaptureItem,
+    closed: Arc<AtomicBool>,
+    closed_token: i64,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     event: HANDLE,
     token: i64,
+    device: IDirect3DDevice,
+    /// Current size of the captured content (follows window resizes).
+    size: std::cell::Cell<SizeInt32>,
     pub width: u32,
     pub height: u32,
 }
@@ -97,6 +108,9 @@ pub struct Frame {
     /// When the compositor produced the frame, in 100 ns QPC units. Using this
     /// (not the time we picked it up) keeps clip motion exactly as it was shown.
     pub time: i64,
+    /// Valid area of `texture` (the window's current size; may be smaller than the texture).
+    pub content_width: u32,
+    pub content_height: u32,
 }
 
 impl Capture {
@@ -142,17 +156,33 @@ impl Capture {
             }
             Ok(())
         }))?;
+        // The window (or monitor) going away ends the capture; the recorder polls this.
+        let closed = Arc::new(AtomicBool::new(false));
+        let flag = closed.clone();
+        let closed_token = item.Closed(&TypedEventHandler::new(move |_, _| {
+            flag.store(true, Ordering::Release);
+            Ok(())
+        }))?;
         session.StartCapture()?;
 
         Ok(Self {
-            _item: item,
+            item,
+            closed,
+            closed_token,
             pool,
             session,
             event,
             token,
+            device: winrt_device,
+            size: std::cell::Cell::new(size),
             width: size.Width as u32,
             height: size.Height as u32,
         })
+    }
+
+    /// True once the captured window has closed (or the monitor was removed).
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 
     /// Waits up to `timeout` for the compositor to deliver a frame, then returns
@@ -173,13 +203,34 @@ impl Capture {
             newest = Some(frame);
         }
         let Some(frame) = newest else { return Ok(None) };
+        let content = frame.ContentSize()?;
+        let current = self.size.get();
+        if content.Width > 0
+            && content.Height > 0
+            && (content.Width != current.Width || content.Height != current.Height)
+        {
+            // The game window was resized or went fullscreen: rebuild the pool at the
+            // new size (from the next frame on) instead of ending the capture.
+            self.pool.Recreate(
+                &self.device,
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                2,
+                content,
+            )?;
+            self.size.set(content);
+        }
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
         let texture: ID3D11Texture2D = unsafe { access.GetInterface()? };
         let time = frame.SystemRelativeTime()?.Duration;
+        // Never report more than the texture holds (frames from before a Recreate).
+        let mut desc = Default::default();
+        unsafe { texture.GetDesc(&mut desc) };
         Ok(Some(Frame {
             _frame: frame,
             texture,
             time,
+            content_width: (content.Width.max(1) as u32).min(desc.Width),
+            content_height: (content.Height.max(1) as u32).min(desc.Height),
         }))
     }
 }
@@ -187,6 +238,7 @@ impl Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         let _ = self.pool.RemoveFrameArrived(self.token);
+        let _ = self.item.RemoveClosed(self.closed_token);
         let _ = self.session.Close();
         let _ = self.pool.Close();
         unsafe {
