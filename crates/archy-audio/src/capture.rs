@@ -20,7 +20,7 @@ use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObj
 use windows::Win32::System::Variant::VT_BLOB;
 
 use crate::aac::{AacEncoder, AacInfo};
-use crate::{AudioPacket, Source, CHANNELS, SAMPLE_RATE};
+use crate::{with_volume, AudioPacket, Source, Volume, CHANNELS, SAMPLE_RATE};
 
 /// A gap longer than this in the device timeline (an idle output device sends
 /// nothing) is filled with silence so the track stays continuous and in sync.
@@ -216,6 +216,7 @@ pub fn list_devices(input: bool) -> Vec<AudioDevice> {
 pub fn run(
     source: Source,
     kbps: u32,
+    volume: &Volume,
     stop: &Arc<AtomicBool>,
     ready: &SyncSender<Result<AacInfo>>,
     on_packet: &mut dyn FnMut(AudioPacket),
@@ -263,6 +264,7 @@ pub fn run(
         let frame_time = |frames: i64| frames * 10_000_000 / SAMPLE_RATE as i64;
         let mut next_time: Option<i64> = None;
         let mut silence: Vec<i16> = Vec::new();
+        let mut scaled: Vec<i16> = Vec::new();
         let mut emit = |data: &[u8], time: i64, duration: i64| {
             on_packet(AudioPacket {
                 data,
@@ -304,6 +306,7 @@ pub fn run(
                     encoder.encode(&silence, time, &mut emit)?;
                 } else {
                     let pcm = unsafe { std::slice::from_raw_parts(data as *const i16, samples) };
+                    let pcm = with_volume(pcm, volume.load(Ordering::Relaxed), &mut scaled);
                     encoder.encode(pcm, time, &mut emit)?;
                 }
                 unsafe { capture.ReleaseBuffer(frames)? };

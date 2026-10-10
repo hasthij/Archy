@@ -15,7 +15,7 @@ use archy_core::status::Status;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 use windows::core::{w, PCWSTR};
-use windows::core::{BOOL, PWSTR};
+use windows::core::BOOL;
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, STILL_ACTIVE,
@@ -26,7 +26,6 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Threading::{
     CreateMutexW, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
 use windows::Win32::UI::Shell::{
     FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, SHFileOperationW,
     FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FO_DELETE,
@@ -242,6 +241,30 @@ fn open_clips_folder() -> Result<(), String> {
     Ok(())
 }
 
+/// The last `lines` lines of Archy's log (%APPDATA%\Archy\archy.log), newest last.
+#[tauri::command]
+fn read_log(lines: usize) -> String {
+    let path = archy_core::settings::app_dir().join("archy.log");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(lines.clamp(1, 2000))..].join("\n")
+}
+
+/// Opens the folder with archy.log and settings.json, with the log selected.
+#[tauri::command]
+fn open_log_folder() -> Result<(), String> {
+    let dir = archy_core::settings::app_dir();
+    let log = dir.join("archy.log");
+    let mut cmd = std::process::Command::new("explorer");
+    if log.exists() {
+        cmd.arg(format!("/select,{}", log.display()));
+    } else {
+        cmd.arg(&dir);
+    }
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Windows' own folder picker, owned by the Archy window. `None` if cancelled.
 #[tauri::command]
 async fn pick_folder(window: tauri::WebviewWindow) -> Option<String> {
@@ -313,22 +336,8 @@ fn running_apps() -> Vec<AppView> {
         let title = String::from_utf16_lossy(&buf[..n as usize]);
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            return true.into();
-        };
-        let mut path = [0u16; 512];
-        let mut size = path.len() as u32;
-        let ok = QueryFullProcessImageNameW(
-            process,
-            PROCESS_NAME_WIN32,
-            PWSTR(path.as_mut_ptr()),
-            &mut size,
-        )
-        .is_ok();
-        let _ = CloseHandle(process);
-        if ok {
-            let full = String::from_utf16_lossy(&path[..size as usize]);
-            let exe = full.rsplit(['\\', '/']).next().unwrap_or(&full).to_string();
+        // Also works for games whose anti-cheat blocks opening their process.
+        if let Some(exe) = archy_core::process::exe_name(pid) {
             const SKIP: &[&str] = &[
                 "explorer.exe",
                 "archy.exe",
@@ -477,7 +486,9 @@ fn main() {
             running_apps,
             start_recorder,
             calibrate_voice,
-            stop_calibration
+            stop_calibration,
+            read_log,
+            open_log_folder
         ])
         .run(tauri::generate_context!())
         .expect("Archy window failed to start");

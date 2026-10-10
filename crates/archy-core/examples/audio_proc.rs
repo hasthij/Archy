@@ -10,7 +10,7 @@ fn main() {
     eprintln!("starting process loopback for pid {pid}");
     let mut n = 0u64;
     let cap =
-        archy_audio::AudioCapture::start(archy_audio::Source::Process { pid }, 160, move |_p| {
+        archy_audio::AudioCapture::start(archy_audio::Source::Process { pid }, 160, Default::default(), move |_p| {
             n += 1;
             if n % 50 == 0 {
                 eprintln!("{n} packets");

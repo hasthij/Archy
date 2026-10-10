@@ -358,13 +358,29 @@ function renderStorage() {
       ] }));
 }
 
+// Physical keys (e.code), so Shift+1 is "Shift+1" not "!", and layouts don't matter.
+const CODE_NAMES = {
+  BracketLeft: "[", BracketRight: "]", Semicolon: ";", Quote: "'", Comma: ",", Period: ".",
+  Slash: "/", Backslash: "\\", Minus: "-", Equal: "=", Backquote: "`",
+  NumpadAdd: "NumPlus", NumpadSubtract: "NumMinus", NumpadMultiply: "NumMultiply",
+  NumpadDivide: "NumDivide", NumpadDecimal: "NumDecimal",
+  ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
+  Space: "Space", Tab: "Tab", Enter: "Enter", Backspace: "Backspace",
+  Insert: "Insert", Delete: "Delete", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown",
+  Pause: "Pause", ScrollLock: "ScrollLock",
+};
 function keyName(e) {
-  const k = e.key;
-  if (["Control", "Shift", "Alt", "Meta"].includes(k)) return null;
-  if (/^F\d{1,2}$/.test(k)) return k;
-  if (k.length === 1 && /[a-z0-9]/i.test(k)) return k.toUpperCase();
-  return { Insert: "Insert", Delete: "Delete", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown", Pause: "Pause", ScrollLock: "ScrollLock" }[k] || null;
+  const c = e.code;
+  if (/^(Control|Shift|Alt|Meta|OS)(Left|Right)?$/.test(c)) return null;
+  if (/^F\d{1,2}$/.test(c)) return c;
+  let m = c.match(/^Key([A-Z])$/) || c.match(/^Digit(\d)$/);
+  if (m) return m[1];
+  m = c.match(/^Numpad(\d)$/);
+  if (m) return "Num" + m[1];
+  return CODE_NAMES[c] || null;
 }
+// Keys you type with: bound alone, Windows would swallow them everywhere (chat, Discord).
+const TYPING_KEY = /^([A-Z0-9]|[\[\];',./\\=`-]|Space|Tab|Enter|Backspace)$/;
 
 function hotkeyRow(key, label, desc) {
   const shown = () => settings[key] || "Off";
@@ -378,6 +394,10 @@ function hotkeyRow(key, label, desc) {
       const name = keyName(e);
       if (!name) return;
       const mods = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Win"].filter(Boolean);
+      if (!mods.length && TYPING_KEY.test(name)) {
+        toast(`Add Ctrl, Alt or Shift: "${name}" alone would stop working for typing everywhere.`);
+        return;
+      }
       done([...mods, name].join("+"));
     };
     const done = (value) => {
@@ -434,12 +454,16 @@ function renderAudio() {
       "If it's unplugged, Archy uses Windows' default output instead."),
     onOff("audio_everything", "Track 1: everything you heard", "All PC audio mixed together: game, friends, music, plus your microphone when it's on below. Discord, phones and most players only play this track.",
       "Clips that sound right everywhere. Keep this on.", "Silent clips in apps that only play the first track."),
+    volumeRow("volume_everything", "Track 1 volume", "How loud everything the PC plays is in track 1 (your mic has its own slider below)."),
     onOff("audio_game", "Game only", "A separate track with just the game's sound.",
       "Editing: turn the game up or down on its own.", "Smaller files if you never edit."),
+    volumeRow("volume_game", "Game track volume", "How loud the game-only track is."),
     onOff("audio_discord", "Discord only", "A separate track with just your friends in voice chat.",
       "Muting or lowering friends later without losing game sound.", "Keeping friends' voices out of the separate tracks (they're still in track 1)."),
+    volumeRow("volume_discord", "Discord track volume", "How loud the Discord-only track is."),
     onOff("audio_mic", "Your microphone", "Your voice, mixed into track 1 (so every player hears you) and also kept as its own track.",
       "Commentary and reactions; turn yourself up or down later.", "Keeping your mic out of clips entirely."),
+    volumeRow("volume_mic", "Microphone volume", "How loud your voice is, in track 1 and in your own track."),
     settingCard({ key: "audio_kbps", name: "Audio quality", rec: 160,
       what: "Bitrate per track. Audio is tiny next to video; higher is clearer music and voices.",
       options: [
@@ -454,18 +478,60 @@ function renderAudio() {
   renderVoice();
 }
 
+// A 0-200% volume slider; saves when released.
+function volumeRow(key, label, desc) {
+  const value = el("b", { text: `${settings[key]}%` });
+  const range = el("input", { type: "range", min: 0, max: 200, step: 5, value: settings[key], "aria-label": label, style: "width:220px" });
+  range.addEventListener("input", () => { value.textContent = `${range.value}%`; });
+  range.addEventListener("change", () => save({ [key]: Number(range.value) }, `${label}: ${range.value}%`));
+  range.addEventListener("dblclick", () => { range.value = 100; value.textContent = "100%"; save({ [key]: 100 }, `${label}: 100%`); });
+  return el("div", { class: "card setting" },
+    el("div", { class: "about" }, el("h3", { text: label }), el("p", { text: desc })),
+    el("div", { class: "pick" }, el("div", { class: "field" }, range, value),
+      el("p", { class: "sub", text: "0% is silent, 100% is normal, up to 200%. Double-click to reset." })));
+}
+
 function renderGeneral() {
   $("#general-settings").replaceChildren(
     onOff("notify_on_save", "Notification when a clip saves", "A small Windows notification with the clip's length and size.",
       "Knowing the clip saved without leaving the game.", "No pop-ups at all; check the library instead."),
     onOff("sound_on_save", "Sound when a clip saves", "Archy's short two-note chime.",
       "Hearing it worked while you keep playing, even in fullscreen.", "Silence: for streams or quiet rooms."),
+    volumeRow("clip_sound_volume", "Clip sound volume", "How loud the clip-saved chime is."),
     onOff("notify_on_start", "\"Archy is running\" notification", "A reminder when Archy starts that it's ready and what your hotkey is.",
       "Remembering your hotkey.", "A quieter start-up."),
     onOff("start_with_windows", "Start with Windows", "Archy starts in the tray when you sign in, so clips are always ready.",
       "Never forgetting to open Archy before playing.", "Starting Archy yourself only when you want it.", false),
     onOff("tray_recording_dot", "Recording dot on the tray icon", "A small red dot on Archy's icon while a game is being recorded.",
-      "Seeing at a glance that Archy is recording.", "A plain icon at all times."));
+      "Seeing at a glance that Archy is recording.", "A plain icon at all times."),
+    logCard());
+  loadLog();
+}
+
+// ---------- log viewer ----------
+function logCard() {
+  const box = el("pre", { id: "log-box", style: "max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,Consolas,monospace;background:var(--bg,#0d0f14);border:1px solid var(--line-soft,#2a2f3a);border-radius:8px;padding:10px;margin:10px 0 0;user-select:text" });
+  return el("div", { class: "card" },
+    el("h3", { text: "Log" }),
+    el("p", { class: "sub", text: "What Archy did: games it recorded, clips it saved, voice phrases it heard, and any errors. If something goes wrong, copy this and send it along when asking for help. It stays on this PC." }),
+    box,
+    el("div", { class: "field", style: "margin-top:10px" },
+      el("button", { class: "btn", text: "Refresh", onclick: loadLog }),
+      el("button", { class: "btn", text: "Copy", onclick: async () => {
+        try { await navigator.clipboard.writeText($("#log-box").textContent); toast("Log copied"); }
+        catch { toast("Couldn't copy; use Open folder instead"); }
+      } }),
+      el("button", { class: "btn", text: "Open folder", onclick: () => invoke("open_log_folder").catch((e) => toast(String(e))) })));
+}
+
+async function loadLog() {
+  const box = $("#log-box");
+  if (!box) return;
+  try {
+    const text = await invoke("read_log", { lines: 300 });
+    box.textContent = text || "Nothing logged yet.";
+    box.scrollTop = box.scrollHeight;
+  } catch (e) { box.textContent = "Couldn't read the log: " + e; }
 }
 
 function renderVoice() {
@@ -508,7 +574,8 @@ function renderVoice() {
         { value: 80, label: "Loose", best: "Quiet rooms or a soft voice, if Balanced misses you. May clip on similar-sounding words." },
       ] }),
     onOff("sound_on_voice", "Sound when a phrase is heard", "A soft blip the moment Archy hears you, before the clip finishes saving.",
-      "Knowing Archy heard you.", "Silent voice clipping."));
+      "Knowing Archy heard you.", "Silent voice clipping."),
+    volumeRow("voice_sound_volume", "Voice ping volume", "How loud the blip is when Archy hears your phrase."));
 }
 
 // ---------- voice calibration ----------

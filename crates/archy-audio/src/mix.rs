@@ -65,7 +65,8 @@ impl Timeline {
 
     /// Adds this device's samples for `[from, from + BLOCK)` into `out`, and
     /// drops everything before the block's end.
-    fn mix_into(&mut self, from: i64, out: &mut [i32]) {
+    fn mix_into(&mut self, from: i64, out: &mut [i32], percent: u32) {
+        let percent = percent as i32;
         let Some(start) = self.start else { return };
         let offset = hns_to_frames(from - start);
         for (i, slot) in out.chunks_mut(CHANNELS as usize).enumerate() {
@@ -76,7 +77,7 @@ impl Timeline {
             let at = frame as usize * CHANNELS as usize;
             for (c, v) in slot.iter_mut().enumerate() {
                 if let Some(&s) = self.buf.get(at + c) {
-                    *v += s as i32;
+                    *v += s as i32 * percent / 100;
                 }
             }
         }
@@ -134,6 +135,7 @@ pub fn run(
     output: Option<String>,
     mic: Option<String>,
     kbps: u32,
+    volumes: &crate::Volumes,
     stop: &Arc<AtomicBool>,
     ready: &SyncSender<Result<AacInfo>>,
     on_packet: &mut dyn FnMut(AudioPacket),
@@ -186,10 +188,12 @@ pub fn run(
                 break;
             }
             mixed.iter_mut().for_each(|v| *v = 0);
-            a.mix_into(from, &mut mixed);
-            b.mix_into(from, &mut mixed);
+            a.mix_into(from, &mut mixed, volumes.main.load(Ordering::Relaxed));
+            b.mix_into(from, &mut mixed, volumes.mic.load(Ordering::Relaxed));
+            // Two loud sources (or >100% volume) can add up past full scale:
+            // round the peaks off rather than clip.
             for (o, m) in pcm.iter_mut().zip(&mixed) {
-                *o = (*m).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                *o = crate::soft_limit(*m as f32);
             }
             encoder.encode(&pcm, from, &mut emit)?;
             out_frames += BLOCK as i64;

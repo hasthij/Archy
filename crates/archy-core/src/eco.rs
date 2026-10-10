@@ -15,6 +15,32 @@ use windows::Win32::System::Threading::{
     PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
 };
 
+/// Lifts efficiency mode for the calling thread only (still on the efficiency
+/// cores, so the game's cores stay untouched): normal speed and priority. For
+/// saving a clip, which used to take seconds while throttled.
+pub fn boost_current_thread() {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadInformation, SetThreadPriority, ThreadPowerThrottling,
+        THREAD_POWER_THROTTLING_CURRENT_VERSION, THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        THREAD_POWER_THROTTLING_STATE, THREAD_PRIORITY_ABOVE_NORMAL,
+    };
+    unsafe {
+        let thread = GetCurrentThread();
+        let state = THREAD_POWER_THROTTLING_STATE {
+            Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        let _ = SetThreadInformation(
+            thread,
+            ThreadPowerThrottling,
+            &state as *const _ as *const _,
+            std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+        );
+        let _ = SetThreadPriority(thread, THREAD_PRIORITY_ABOVE_NORMAL);
+    }
+}
+
 /// What was applied, for logging.
 pub struct Applied {
     pub efficiency_cores: usize,

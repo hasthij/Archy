@@ -49,7 +49,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "archy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "archy-audio",
  "archy-core",
@@ -103,6 +103,7 @@ version = "0.1.0"
 dependencies = [
  "archy-gpu",
  "windows",
+ "windows-core",
 ]
 
 [[package]]
@@ -134,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "archy-setup"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "archy-core",
  "windows",
@@ -143,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "archy-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "archy-audio",
  "archy-core",

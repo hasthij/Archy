@@ -50,6 +50,8 @@ pub struct RecorderConfig {
 pub struct AudioSource {
     pub name: String,
     pub source: Source,
+    /// Live volumes for this track (0-200%).
+    pub volumes: archy_audio::Volumes,
 }
 
 struct AudioTrackState {
@@ -92,6 +94,10 @@ struct Shared {
     failed: AtomicBool,
     frames: AtomicU64,
     dropped: AtomicU64,
+    /// Packets the encoder labelled wrongly (keyframe or not), per the bitstream.
+    mislabeled: AtomicU64,
+    /// The encoder's own counters, once it has finished.
+    encoder_stats: Mutex<Option<archy_encode::Stats>>,
     /// Why recording ended, for the log and the user.
     reason: Mutex<String>,
 }
@@ -118,6 +124,8 @@ impl Recorder {
             failed: AtomicBool::new(false),
             frames: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            mislabeled: AtomicU64::new(0),
+            encoder_stats: Mutex::new(None),
             reason: Mutex::new(String::new()),
         });
         let (ready_tx, ready_rx) = sync_channel::<Result<RecorderInfo>>(1);
@@ -150,7 +158,7 @@ impl Recorder {
         for src in audio_sources {
             let ring = Arc::new(Mutex::new(ReplayBuffer::new(buffer_seconds)));
             let sink = ring.clone();
-            match AudioCapture::start(src.source.clone(), audio_kbps, move |p| {
+            match AudioCapture::start(src.source.clone(), audio_kbps, src.volumes.clone(), move |p| {
                 if let Ok(mut r) = sink.lock() {
                     r.push(StoredPacket {
                         data: Arc::from(p.data),
@@ -203,6 +211,28 @@ impl Recorder {
             .lock()
             .map(|r| r.clone())
             .unwrap_or_default()
+    }
+
+    /// Encoder trouble worth logging when a recording ends (empty when all was well).
+    pub fn health(&self) -> String {
+        let mut notes = Vec::new();
+        let dropped = self.shared.dropped.load(Ordering::Relaxed);
+        if dropped > 0 {
+            notes.push(format!("{dropped} frames skipped (encoder busy)"));
+        }
+        let mislabeled = self.shared.mislabeled.load(Ordering::Relaxed);
+        if mislabeled > 0 {
+            notes.push(format!("{mislabeled} keyframe labels corrected"));
+        }
+        if let Some(s) = self.shared.encoder_stats.lock().ok().and_then(|s| s.clone()) {
+            if s.late > 0 {
+                notes.push(format!("{} slow frames (>1 s)", s.late));
+            }
+            if s.forced_keyframes > 0 {
+                notes.push(format!("{} keyframes forced (driver ignored the interval)", s.forced_keyframes));
+            }
+        }
+        notes.join(", ")
     }
 
     /// (frames recorded, frames dropped because the encoder was busy).
@@ -326,7 +356,14 @@ fn open_encoder(
     // Backend first, then codec: on Intel, every codec is tried on oneVPL (fixed-function)
     // before Media Foundation, whose Intel AV1 encoder on GPUs without hardware AV1
     // runs partly on shader cores. NVIDIA/AMD have no oneVPL and go straight to MF.
-    for backend in [Backend::Vpl, Backend::MediaFoundation] {
+    // ARCHY_ENCODER=mf|vpl forces one path, e.g. to test the AMD/NVIDIA (Media
+    // Foundation) path on an Intel PC.
+    let backends: &[Backend] = match std::env::var("ARCHY_ENCODER").as_deref() {
+        Ok("mf") => &[Backend::MediaFoundation],
+        Ok("vpl") => &[Backend::Vpl],
+        _ => &[Backend::Vpl, Backend::MediaFoundation],
+    };
+    for &backend in backends {
         for &codec in &cfg.codecs {
             let enc_cfg = Config {
                 codec,
@@ -361,6 +398,8 @@ fn capture_loop(
     // and frames arriving a hair early are never pushed to the next refresh.
     let capture = Capture::start(&gpu.device, cfg.target, interval / 2)?;
     let (width, height) = fit_size(capture.width, capture.height, cfg.max_height);
+    // Hardware encoders reject tiny frames (a minimized or collapsed window).
+    let (width, height) = (width.max(160), height.max(120));
     let mut converter = AnyConverter::new(
         &gpu,
         cfg.convert,
@@ -384,19 +423,48 @@ fn capture_loop(
         .name("archy-encode".into())
         .spawn(move || -> Result<()> {
             crate::init_thread()?;
-            encoder.run(rx, |p| {
+            // Latest codec header (SPS/PPS, VPS/SPS/PPS) seen in the stream. Some
+            // drivers send it only once, at the start; a clip starting at a later
+            // keyframe then has no header and can't be written. Such keyframes get
+            // the cached header put in front.
+            let mut header: Option<Vec<u8>> = None;
+            let stats = encoder.run(rx, |p| {
+                // Clips may only start on a frame that really resets the decoder, so
+                // the bitstream decides; starting on a mislabelled frame shows blocks
+                // and smeared colours until the next real keyframe.
+                let keyframe = archy_encode::random_access(codec, p.data).unwrap_or(p.keyframe);
+                if keyframe != p.keyframe {
+                    enc_shared.mislabeled.fetch_add(1, Ordering::Relaxed);
+                }
+                let data: Arc<[u8]> = if keyframe && codec != Codec::Av1 {
+                    match archy_mux::codec_header(codec, p.data) {
+                        Some(h) => {
+                            header = Some(h);
+                            Arc::from(p.data)
+                        }
+                        None => match &header {
+                            Some(h) => [h.as_slice(), p.data].concat().into(),
+                            None => Arc::from(p.data),
+                        },
+                    }
+                } else {
+                    Arc::from(p.data)
+                };
                 let packet = StoredPacket {
-                    data: Arc::from(p.data),
+                    data,
                     time: p.time,
                     duration: p.duration,
-                    keyframe: p.keyframe,
+                    keyframe,
                 };
                 if let Ok(mut ring) = enc_shared.ring.lock() {
                     ring.push(packet);
                 }
                 Ok(())
-            })?;
-            Ok(())
+            });
+            if let (Ok(s), Ok(mut slot)) = (&stats, enc_shared.encoder_stats.lock()) {
+                *slot = Some(s.clone());
+            }
+            stats.map(|_| ())
         })
         .map_err(|e| Error::new(E_FAIL, e.to_string()))?;
     let _ = ready.send(Ok(info));
@@ -437,5 +505,10 @@ fn capture_loop(
     let encoded = encoder_thread
         .join()
         .unwrap_or_else(|_| Err(Error::new(E_FAIL, "encoder panicked")));
-    result.and(encoded)
+    // When the encoder fails, the capture side only sees "encoder stopped";
+    // report the encoder's own error instead, so the log says why.
+    match encoded {
+        Err(e) => Err(e),
+        Ok(()) => result,
+    }
 }

@@ -12,7 +12,7 @@ mod mix;
 mod pcm;
 mod process;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -46,6 +46,49 @@ pub enum Source {
 
 pub use capture::{default_device_id, list_devices, AudioDevice};
 
+/// A track volume in percent (0-200), shared with the settings so a change
+/// applies to the next audio at once, without restarting the recording.
+pub type Volume = Arc<AtomicU32>;
+
+/// Volumes for one track: `main` for the source; `mic` is the microphone's
+/// share when the track mixes one in (`Source::Mix`).
+#[derive(Clone, Debug)]
+pub struct Volumes {
+    pub main: Volume,
+    pub mic: Volume,
+}
+
+impl Default for Volumes {
+    fn default() -> Self {
+        Self {
+            main: Arc::new(AtomicU32::new(100)),
+            mic: Arc::new(AtomicU32::new(100)),
+        }
+    }
+}
+
+/// Rounds off peaks instead of hard clipping (louder than 100% would crackle).
+pub(crate) fn soft_limit(x: f32) -> i16 {
+    let s = x / 32768.0;
+    let y = if s.abs() <= 0.8 {
+        s
+    } else {
+        s.signum() * (0.8 + 0.2 * ((s.abs() - 0.8) / 0.2).tanh())
+    };
+    (y * 32767.0) as i16
+}
+
+/// `pcm` at `percent` volume, into `out` (reused buffer). None at 100%: use as is.
+pub(crate) fn with_volume<'a>(pcm: &'a [i16], percent: u32, out: &'a mut Vec<i16>) -> &'a [i16] {
+    if percent == 100 {
+        return pcm;
+    }
+    let gain = percent as f32 / 100.0;
+    out.clear();
+    out.extend(pcm.iter().map(|&s| soft_limit(s as f32 * gain)));
+    out
+}
+
 /// One encoded AAC frame (1024 samples, ~21 ms).
 pub struct AudioPacket<'a> {
     pub data: &'a [u8],
@@ -65,6 +108,7 @@ impl AudioCapture {
     pub fn start(
         source: Source,
         bitrate_kbps: u32,
+        volumes: Volumes,
         mut on_packet: impl FnMut(AudioPacket) + Send + 'static,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
@@ -78,13 +122,19 @@ impl AudioCapture {
                         output,
                         mic,
                         bitrate_kbps,
+                        &volumes,
                         &thread_stop,
                         &ready_tx,
                         &mut on_packet,
                     ),
-                    other => {
-                        capture::run(other, bitrate_kbps, &thread_stop, &ready_tx, &mut on_packet)
-                    }
+                    other => capture::run(
+                        other,
+                        bitrate_kbps,
+                        &volumes.main,
+                        &thread_stop,
+                        &ready_tx,
+                        &mut on_packet,
+                    ),
                 };
                 if let Err(e) = result {
                     let _ = ready_tx.try_send(Err(e));

@@ -27,6 +27,9 @@ pub struct Mp4Writer {
     audio: Vec<u32>,
     /// Packet time that becomes 0 in the file (100 ns). `None`: the first video packet.
     base: Option<i64>,
+    /// Last time written per stream (video first, then audio tracks): times must
+    /// rise, or the sink writer fails the whole save ("The parameter is incorrect").
+    last: Vec<Option<i64>>,
 }
 
 fn pack(hi: u32, lo: u32) -> u64 {
@@ -68,8 +71,14 @@ impl Mp4Writer {
             ty.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1))?;
             ty.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1))?;
             ty.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-            if let Some(header) = codec_header(codec, first_keyframe) {
-                ty.SetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &header)?;
+            match codec_header(codec, first_keyframe) {
+                Some(header) => ty.SetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &header)?,
+                None => {
+                    return Err(windows::core::Error::new(
+                        windows::Win32::Foundation::E_FAIL,
+                        "the clip's first keyframe has no codec header",
+                    ))
+                }
             }
 
             let mut attrs: Option<IMFAttributes> = None;
@@ -99,11 +108,13 @@ impl Mp4Writer {
                 audio_streams.push(stream);
             }
             writer.BeginWriting()?;
+            let streams = 1 + audio_streams.len();
             Ok(Self {
                 writer,
                 video,
                 audio: audio_streams,
                 base,
+                last: vec![None; streams],
             })
         }
     }
@@ -125,10 +136,24 @@ impl Mp4Writer {
         }
     }
 
+    /// Makes `time` (relative to the base) strictly rise on stream `index`.
+    fn next_time(&mut self, index: usize, time: i64) -> i64 {
+        let time = match self.last[index] {
+            Some(last) if time <= last => last + 1,
+            _ => time,
+        };
+        self.last[index] = Some(time);
+        time
+    }
+
     /// Writes one compressed video frame (time in 100 ns).
     pub fn write(&mut self, data: &[u8], time: i64, duration: i64, keyframe: bool) -> Result<()> {
+        if data.is_empty() {
+            return Ok(()); // an empty packet (skipped frame) is rejected by the writer
+        }
         let base = *self.base.get_or_insert(time);
-        let sample = Self::sample(data, time - base, duration, keyframe)?;
+        let t = self.next_time(0, time - base);
+        let sample = Self::sample(data, t, duration.max(1), keyframe)?;
         unsafe { self.writer.WriteSample(self.video, &sample) }
     }
 
@@ -142,10 +167,11 @@ impl Mp4Writer {
         duration: i64,
     ) -> Result<()> {
         let Some(base) = self.base else { return Ok(()) };
-        if time < base {
+        if time < base || data.is_empty() {
             return Ok(());
         }
-        let sample = Self::sample(data, time - base, duration, true)?;
+        let t = self.next_time(1 + track, time - base);
+        let sample = Self::sample(data, t, duration.max(1), true)?;
         unsafe { self.writer.WriteSample(self.audio[track], &sample) }
     }
 

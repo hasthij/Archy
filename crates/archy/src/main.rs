@@ -72,6 +72,10 @@ struct App {
     voice_config: Option<voice::VoiceConfig>,
     /// Whether the tray currently shows the recording-dot icon.
     dot_shown: bool,
+    /// A window that couldn't be recorded even as a screen capture; skipped
+    /// until it closes, so one bad window doesn't stop recording other games.
+    failed_window: Option<isize>,
+    volumes: TrackVolumes,
 }
 
 thread_local! {
@@ -152,7 +156,30 @@ fn open_path(path: &std::path::Path) {
 /// Discord's free upload limit, with a margin for the MP4 container.
 const DISCORD_LIMIT_BYTES: f64 = 10_000_000.0 * 0.92;
 
-fn recorder_config(s: &Settings, target: Target, game_pid: u32) -> RecorderConfig {
+/// Live track volumes; the recorder reads them for every audio block.
+#[derive(Default)]
+struct TrackVolumes {
+    everything: archy_audio::Volume,
+    game: archy_audio::Volume,
+    discord: archy_audio::Volume,
+    mic: archy_audio::Volume,
+}
+
+impl TrackVolumes {
+    fn update(&self, s: &Settings) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.everything.store(s.volume_everything, Relaxed);
+        self.game.store(s.volume_game, Relaxed);
+        self.discord.store(s.volume_discord, Relaxed);
+        self.mic.store(s.volume_mic, Relaxed);
+    }
+
+    fn of(&self, main: &archy_audio::Volume) -> archy_audio::Volumes {
+        archy_audio::Volumes { main: main.clone(), mic: self.mic.clone() }
+    }
+}
+
+fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolumes) -> RecorderConfig {
     let mut audio = Vec::new();
     if s.audio_everything {
         // Track 1 is what single-track players play, so it carries your mic too.
@@ -169,12 +196,14 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32) -> RecorderConfi
         audio.push(AudioSource {
             name: "Everything".into(),
             source,
+            volumes: vols.of(&vols.everything),
         });
     }
     if s.audio_game && game_pid != 0 {
         audio.push(AudioSource {
             name: "Game".into(),
             source: Source::Process { pid: game_pid },
+            volumes: vols.of(&vols.game),
         });
     }
     if s.audio_discord {
@@ -182,6 +211,7 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32) -> RecorderConfi
             audio.push(AudioSource {
                 name: "Discord".into(),
                 source: Source::Process { pid },
+                volumes: vols.of(&vols.discord),
             });
         }
     }
@@ -191,6 +221,7 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32) -> RecorderConfi
             source: Source::Microphone {
                 device: Some(s.mic_device.clone()),
             },
+            volumes: vols.of(&vols.mic),
         });
     }
 
@@ -328,6 +359,7 @@ impl App {
             startup::set(s.start_with_windows);
         }
         self.settings = s;
+        self.volumes.update(&self.settings);
         self.register_hotkeys();
         self.sync_voice();
         self.publish();
@@ -402,7 +434,7 @@ impl App {
         }
         log(&format!("voice: heard \"{}\"", phrase.text));
         if self.settings.sound_on_voice {
-            play(VOICE_WAV);
+            play(VOICE_WAV, self.settings.voice_sound_volume);
         }
         self.save(phrase.seconds);
     }
@@ -420,7 +452,12 @@ impl App {
             } else {
                 s.recorder.stop_reason()
             };
-            log(&format!("stopped recording {}: {reason}", s.game));
+            let health = s.recorder.health();
+            if health.is_empty() {
+                log(&format!("stopped recording {}: {reason}", s.game));
+            } else {
+                log(&format!("stopped recording {}: {reason} ({health})", s.game));
+            }
             self.session = None;
             self.publish();
         }
@@ -433,13 +470,27 @@ impl App {
         if !fg.is_game(&self.settings.games, self.settings.record_fullscreen_apps) {
             return;
         }
+        if self.failed_window == Some(fg.hwnd.0 as isize) {
+            if watch::alive(fg.hwnd) {
+                return;
+            }
+            self.failed_window = None;
+        }
         let target = if self.settings.capture.eq_ignore_ascii_case("screen") {
             Target::Monitor(unsafe { MonitorFromWindow(fg.hwnd, MONITOR_DEFAULTTONEAREST) })
         } else {
             Target::Window(fg.hwnd)
         };
         let game = watch::game_name(&fg.exe);
-        match Recorder::start(recorder_config(&self.settings, target, fg.pid)) {
+        let mut started = Recorder::start(recorder_config(&self.settings, target, fg.pid, &self.volumes));
+        // Some games can't be captured as a window (exclusive fullscreen, protected
+        // windows): record the screen the game is on instead.
+        if let (Err(e), Target::Window(_)) = (&started, target) {
+            log(&format!("window capture of {game} failed ({}); recording its screen instead", e.message()));
+            let monitor = unsafe { MonitorFromWindow(fg.hwnd, MONITOR_DEFAULTTONEAREST) };
+            started = Recorder::start(recorder_config(&self.settings, Target::Monitor(monitor), fg.pid, &self.volumes));
+        }
+        match started {
             Ok(rec) => {
                 let i = &rec.info;
                 log(&format!(
@@ -465,8 +516,8 @@ impl App {
                     &e.message(),
                     true,
                 );
-                // Don't retry this window every 2 s; pause until settings change or the user resumes.
-                self.paused = true;
+                // Don't retry this window every 2 s; other games still record.
+                self.failed_window = Some(fg.hwnd.0 as isize);
             }
         }
         self.publish();
@@ -492,8 +543,10 @@ impl App {
         let copy = self.settings.copy_after_save;
         let show = self.settings.notify_on_save;
         let chime = self.settings.sound_on_save;
+        let chime_volume = self.settings.clip_sound_volume;
         let saving = self.saving.clone();
         std::thread::spawn(move || {
+            archy_core::eco::boost_current_thread();
             let _ = std::fs::create_dir_all(&folder);
             let path = clip::new_path(&folder, &game);
             match recorder.save_clip(seconds, &path) {
@@ -507,7 +560,7 @@ impl App {
                         c.save_time.as_millis()
                     ));
                     if chime {
-                        play(CLIP_WAV);
+                        play(CLIP_WAV, chime_volume);
                     }
                     if show {
                         let mb = c.bytes as f64 / 1e6;
@@ -613,15 +666,50 @@ impl App {
 static CLIP_WAV: &[u8] = include_bytes!("../../../assets/clip.wav");
 static VOICE_WAV: &[u8] = include_bytes!("../../../assets/voice.wav");
 
-/// Plays one of Archy's short sounds without blocking.
-fn play(sound: &'static [u8]) {
+/// Plays one of Archy's short sounds without blocking, at `volume` percent (0-200).
+fn play(sound: &'static [u8], volume: u32) {
+    if volume == 0 {
+        return;
+    }
+    let data = if volume == 100 { sound } else { scaled(sound, volume) };
     unsafe {
         let _ = PlaySoundW(
-            PCWSTR(sound.as_ptr() as *const u16),
+            PCWSTR(data.as_ptr() as *const u16),
             None,
             SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
         );
     }
+}
+
+/// A copy of a 16-bit PCM WAV at `volume` percent. Kept for the life of the
+/// process (PlaySound reads it while playing; only a few volumes are ever used).
+/// Above 100% loud peaks are rounded off instead of clipping into crackle.
+fn scaled(sound: &'static [u8], volume: u32) -> &'static [u8] {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<(usize, u32), &'static [u8]>>> = Mutex::new(None);
+    let key = (sound.as_ptr() as usize, volume);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&d) = cache.get_or_insert_with(HashMap::new).get(&key) {
+        return d;
+    }
+    let mut out = sound.to_vec();
+    // Samples start after the "data" chunk header (our WAVs are plain PCM16).
+    if let Some(at) = out.windows(4).position(|w| w == b"data") {
+        let gain = volume as f32 / 100.0;
+        for s in out[at + 8..].chunks_exact_mut(2) {
+            let x = i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0 * gain;
+            let y = if x.abs() <= 0.8 {
+                x
+            } else {
+                x.signum() * (0.8 + 0.2 * ((x.abs() - 0.8) / 0.2).tanh())
+            };
+            s.copy_from_slice(&((y * 32767.0) as i16).to_le_bytes());
+        }
+    }
+    let leaked: &'static [u8] = Box::leak(out.into_boxed_slice());
+    cache.get_or_insert_with(HashMap::new).insert(key, leaked);
+    leaked
 }
 
 /// Archy's icon at the size Windows uses for tray icons (scales with DPI);
@@ -806,7 +894,10 @@ fn main() {
         voice: None,
         voice_config: None,
         dot_shown: false,
+        failed_window: None,
+        volumes: TrackVolumes::default(),
     };
+    app.volumes.update(&app.settings);
     app.register_hotkeys();
     let hint = format!(
         "Recording starts when a game is open. {} saves the last {} s.",

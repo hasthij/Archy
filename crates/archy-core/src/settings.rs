@@ -41,6 +41,12 @@ pub struct Settings {
     pub audio_discord: bool,
     /// Separate track with your microphone.
     pub audio_mic: bool,
+    /// Track volumes, 0-200 (%). Everything = what the PC plays in track 1.
+    pub volume_everything: u32,
+    pub volume_game: u32,
+    pub volume_discord: u32,
+    /// Your mic, in track 1 and in its own track.
+    pub volume_mic: u32,
     /// AAC bitrate per track: 96, 128, 160 or 192.
     pub audio_kbps: u32,
     /// Microphone to record (device id); empty = Windows' default microphone.
@@ -63,6 +69,10 @@ pub struct Settings {
     pub voice_phrases: Vec<VoicePhrase>,
     /// Play a short sound the moment a phrase is heard.
     pub sound_on_voice: bool,
+    /// Volume of the clip-saved chime, 0-200 (%).
+    pub clip_sound_volume: u32,
+    /// Volume of the phrase-heard blip, 0-200 (%).
+    pub voice_sound_volume: u32,
     /// How easily a phrase triggers: 25 strict, 50 balanced, 80 loose, or 0 =
     /// use `voice_tuning` from the user's own calibration.
     pub voice_sensitivity: u32,
@@ -114,6 +124,10 @@ impl Default for Settings {
             audio_discord: true,
             audio_mic: true,
             audio_kbps: 160,
+            volume_everything: 100,
+            volume_game: 100,
+            volume_discord: 100,
+            volume_mic: 100,
             mic_device: String::new(),
             output_device: String::new(),
             notify_on_save: true,
@@ -134,6 +148,8 @@ impl Default for Settings {
             ],
             sound_on_voice: true,
             voice_sensitivity: 50,
+            clip_sound_volume: 100,
+            voice_sound_volume: 100,
             voice_tuning: None,
         }
     }
@@ -219,6 +235,16 @@ impl Settings {
         self.clip_seconds = self.clip_seconds.clamp(5, 60);
         self.long_clip_seconds = self.long_clip_seconds.clamp(5, 60);
         self.fps = self.fps.clamp(24, 90);
+        self.clip_sound_volume = self.clip_sound_volume.min(200);
+        for v in [
+            &mut self.volume_everything,
+            &mut self.volume_game,
+            &mut self.volume_discord,
+            &mut self.volume_mic,
+        ] {
+            *v = (*v).min(200);
+        }
+        self.voice_sound_volume = self.voice_sound_volume.min(200);
         self
     }
 

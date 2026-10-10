@@ -1,19 +1,25 @@
 //! Media Foundation encoder MFTs (NVENC / AMD AMF / Intel Quick Sync behind one interface).
 
 use std::mem::ManuallyDrop;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use archy_gpu::device::Gpu;
 use archy_gpu::probe::{encoder_activates, friendly_name};
 use archy_gpu::SendPtr;
-use windows::core::{Interface, Result, GUID};
-use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use archy_gpu::probe::Codec;
+use windows::core::{implement, Error, Interface, Ref, Result, GUID};
+use windows::Win32::Foundation::{E_FAIL, E_NOTIMPL};
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_TEXTURE2D_DESC,
+};
 
-use crate::{Config, Input, Packet, Stats};
-use windows::Win32::Foundation::VARIANT_TRUE;
+use crate::{random_access, Config, Input, Packet, Stats};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Variant::{
-    VARENUM, VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4,
+    VARENUM, VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_UI4,
 };
 
 pub struct MfEncoder {
@@ -24,8 +30,41 @@ pub struct MfEncoder {
     provides_samples: bool,
     output_buffer_size: u32,
     frame_duration: i64,
+    codec: Codec,
+    /// Frames between keyframes that were asked for.
+    gop: u32,
+    /// For forcing keyframes when the driver ignores the interval.
+    codec_api: Option<ICodecAPI>,
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    /// Encoder-owned copies of the input frames (see `input_sample`).
+    pool: Vec<Slot>,
     pub name: String,
     pub rate_control: &'static str,
+}
+
+/// One input texture and whether the encoder still holds it.
+struct Slot {
+    texture: ID3D11Texture2D,
+    busy: Arc<AtomicBool>,
+}
+
+/// More than any encoder should ever hold; past this the encoder is stuck.
+const MAX_POOL: usize = 32;
+
+/// Called by Media Foundation when the encoder lets go of an input sample.
+#[implement(IMFAsyncCallback)]
+struct Released(Arc<AtomicBool>);
+
+impl IMFAsyncCallback_Impl for Released_Impl {
+    fn GetParameters(&self, _flags: *mut u32, _queue: *mut u32) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn Invoke(&self, _result: Ref<IMFAsyncResult>) -> Result<()> {
+        self.0.store(false, Ordering::Release);
+        Ok(())
+    }
 }
 
 // The MFT is created free-threaded (async, unlocked) and the device it uses is
@@ -54,7 +93,8 @@ impl MfEncoder {
         unsafe {
             let attrs = transform.GetAttributes()?;
             attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
-            let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+            // No MF_LOW_LATENCY: on AMD/NVIDIA it also shrinks the rate-control
+            // buffer to about one frame, which crushes keyframes into blocks.
         }
 
         let mut ins = [0u32; 1];
@@ -80,7 +120,10 @@ impl MfEncoder {
             let out = MFCreateMediaType()?;
             out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
             out.SetGUID(&MF_MT_SUBTYPE, &cfg.codec.subtype())?;
-            out.SetUINT32(&MF_MT_AVG_BITRATE, cfg.max_bitrate)?;
+            // The average to aim for (the max is only a ceiling): with the max here,
+            // drivers aimed for it and files came out about twice the chosen size.
+            let average = cfg.target_bitrate.unwrap_or(cfg.max_bitrate / 10 * 7).min(cfg.max_bitrate);
+            out.SetUINT32(&MF_MT_AVG_BITRATE, average)?;
             out.SetUINT64(&MF_MT_FRAME_SIZE, pack(cfg.width, cfg.height))?;
             out.SetUINT64(&MF_MT_FRAME_RATE, pack(cfg.fps, 1))?;
             out.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1))?;
@@ -98,6 +141,7 @@ impl MfEncoder {
             (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0) as u32;
 
         Ok(Self {
+            codec_api: transform.cast::<ICodecAPI>().ok(),
             transform,
             _manager: manager,
             input_id,
@@ -105,6 +149,11 @@ impl MfEncoder {
             provides_samples: info.dwFlags & provides != 0,
             output_buffer_size: info.cbSize.max(1 << 20),
             frame_duration: 10_000_000 / cfg.fps as i64,
+            codec: cfg.codec,
+            gop: cfg.gop.max(1),
+            device: gpu.device.clone(),
+            context: gpu.context.clone(),
+            pool: Vec::new(),
             name,
             rate_control,
         })
@@ -113,13 +162,16 @@ impl MfEncoder {
     /// Encodes until `inputs` disconnects, then drains. `on_sample(sample, is_keyframe)`
     /// receives every compressed sample in order.
     pub fn run(
-        &self,
+        &mut self,
         inputs: Receiver<SendPtr<Input>>,
         mut on_packet: impl FnMut(Packet) -> Result<()>,
     ) -> Result<Stats> {
         let events: IMFMediaEventGenerator = self.transform.cast()?;
         let mut stats = Stats::default();
         let mut draining = false;
+        // Packets since the last real keyframe, and whether one was requested.
+        let mut since_key = 0u32;
+        let mut force_pending = false;
         unsafe {
             self.transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
@@ -135,6 +187,17 @@ impl MfEncoder {
                 }
                 match inputs.recv() {
                     Ok(SendPtr(input)) => {
+                        // Some drivers ignore the keyframe interval; clips can only start
+                        // on a keyframe, so ask for one when it's overdue.
+                        if !force_pending && since_key >= self.gop + self.gop / 4 {
+                            if let Some(api) = &self.codec_api {
+                                unsafe {
+                                    let _ = api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &var_u32(1));
+                                }
+                            }
+                            force_pending = true;
+                            stats.forced_keyframes += 1;
+                        }
                         let sample = self.input_sample(&input)?;
                         unsafe { self.transform.ProcessInput(self.input_id, &sample, 0)? };
                         stats.frames_in += 1;
@@ -148,7 +211,14 @@ impl MfEncoder {
                     },
                 }
             } else if kind == METransformHaveOutput.0 as u32 {
-                self.pull_output(&mut on_packet, &mut stats)?;
+                match self.pull_output(&mut on_packet, &mut stats)? {
+                    Some(true) => {
+                        since_key = 0;
+                        force_pending = false;
+                    }
+                    Some(false) => since_key += 1,
+                    None => {}
+                }
             } else if kind == METransformDrainComplete.0 as u32 {
                 break;
             }
@@ -156,23 +226,62 @@ impl MfEncoder {
         Ok(stats)
     }
 
-    fn input_sample(&self, input: &Input) -> Result<IMFSample> {
+    /// Wraps a copy of the frame in a sample. The recorder reuses its textures in
+    /// rotation and an async encoder can hold several frames, so handing the
+    /// recorder's texture straight over let a held frame be overwritten by a later
+    /// one (mixed-up frames, then blocks until the next keyframe). The copy lives
+    /// in a slot that is only reused once Media Foundation reports the encoder
+    /// has released it.
+    fn input_sample(&mut self, input: &Input) -> Result<IMFSample> {
+        let slot = self.free_slot(&input.texture)?;
+        let Slot { texture, busy } = &self.pool[slot];
         unsafe {
-            let buffer =
-                MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &input.texture, 0, false)?;
-            let sample = MFCreateSample()?;
+            self.context.CopyResource(texture, &input.texture);
+            let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false)?;
+            let tracked = MFCreateTrackedSample()?;
+            let sample: IMFSample = tracked.cast()?;
             sample.AddBuffer(&buffer)?;
             sample.SetSampleTime(input.time)?;
             sample.SetSampleDuration(self.frame_duration)?;
+            busy.store(true, Ordering::Release);
+            let released: IMFAsyncCallback = Released(busy.clone()).into();
+            tracked.SetAllocator(&released, None)?;
             Ok(sample)
         }
     }
 
+    /// A slot the encoder isn't holding; grows the pool when all are held.
+    fn free_slot(&mut self, like: &ID3D11Texture2D) -> Result<usize> {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            if let Some(i) = self.pool.iter().position(|s| !s.busy.load(Ordering::Acquire)) {
+                return Ok(i);
+            }
+            if self.pool.len() < MAX_POOL {
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                let mut texture = None;
+                unsafe {
+                    like.GetDesc(&mut desc);
+                    desc.MiscFlags = 0;
+                    self.device.CreateTexture2D(&desc, None, Some(&mut texture))?;
+                }
+                let texture = texture.ok_or_else(|| Error::new(E_FAIL, "no texture"))?;
+                self.pool.push(Slot { texture, busy: Arc::new(AtomicBool::new(false)) });
+                return Ok(self.pool.len() - 1);
+            }
+            if Instant::now() > deadline {
+                return Err(Error::new(E_FAIL, "the encoder stopped releasing frames"));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Collects one output sample; returns whether it was a keyframe (None: no packet).
     fn pull_output(
         &self,
         on_packet: &mut impl FnMut(Packet) -> Result<()>,
         stats: &mut Stats,
-    ) -> Result<()> {
+    ) -> Result<Option<bool>> {
         let own_sample = if self.provides_samples {
             None
         } else {
@@ -197,30 +306,31 @@ impl MfEncoder {
         drop(ManuallyDrop::into_inner(buffer.pEvents));
 
         match result {
-            Ok(()) => {
-                if let Some(sample) = sample {
-                    emit(&sample, on_packet, stats)?;
-                }
-                Ok(())
-            }
+            Ok(()) => match sample {
+                Some(sample) => emit(&sample, self.codec, on_packet, stats).map(Some),
+                None => Ok(None),
+            },
             Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => unsafe {
                 let t = self.transform.GetOutputAvailableType(self.output_id, 0)?;
-                self.transform.SetOutputType(self.output_id, &t, 0)
+                self.transform.SetOutputType(self.output_id, &t, 0)?;
+                Ok(None)
             },
-            Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => Ok(()),
+            Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => Ok(None),
             Err(e) => Err(e),
         }
     }
 }
 
-/// Hands a compressed MF sample to `on_packet` as a borrowed packet.
+/// Hands a compressed MF sample to `on_packet` as a borrowed packet; returns
+/// whether it is a keyframe.
 fn emit(
     sample: &IMFSample,
+    codec: Codec,
     on_packet: &mut impl FnMut(Packet) -> Result<()>,
     stats: &mut Stats,
-) -> Result<()> {
+) -> Result<bool> {
     unsafe {
-        let keyframe = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
+        let clean_point = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
         let time = sample.GetSampleTime()?;
         let duration = sample.GetSampleDuration().unwrap_or(0);
         let buffer = sample.ConvertToContiguousBuffer()?;
@@ -228,6 +338,8 @@ fn emit(
         let mut len = 0u32;
         buffer.Lock(&mut ptr, None, Some(&mut len))?;
         let data = strip_ivf(std::slice::from_raw_parts(ptr, len as usize));
+        // The bitstream decides, not the driver's label.
+        let keyframe = random_access(codec, data).unwrap_or(clean_point);
         let packet = Packet {
             data,
             time,
@@ -237,7 +349,7 @@ fn emit(
         stats.count(&packet);
         let result = on_packet(packet);
         buffer.Unlock()?;
-        result
+        result.map(|()| keyframe)
     }
 }
 
@@ -276,9 +388,9 @@ fn configure_codec_api(transform: &IMFTransform, cfg: &Config) -> &'static str {
     let set = |key: &GUID, value: VARIANT| unsafe { api.SetValue(key, &value).is_ok() };
 
     set(&CODECAPI_AVEncMPVGOPSize, var_u32(cfg.gop));
-    // Low-latency mode turns off lookahead and B-frame reordering: less GPU work,
-    // packets out sooner. Quality is recovered with bitrate.
-    set(&CODECAPI_AVLowLatencyMode, var_bool());
+    // No low-latency mode: on AMD/NVIDIA it also squeezes the rate-control buffer
+    // to about one frame, so keyframes come out as blocks. B-frames stay off
+    // explicitly instead (no reordering, less GPU work).
     set(&CODECAPI_AVEncMPVDefaultBPictureCount, var_u32(0u32));
     set(&CODECAPI_AVEncCommonMaxBitRate, var_u32(cfg.max_bitrate));
 
@@ -295,14 +407,14 @@ fn configure_codec_api(transform: &IMFTransform, cfg: &Config) -> &'static str {
         &CODECAPI_AVEncCommonRateControlMode,
         var_u32(eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32),
     ) {
-        set(
-            &CODECAPI_AVEncCommonMeanBitRate,
-            var_u32(
-                cfg.target_bitrate
-                    .unwrap_or(cfg.max_bitrate / 10 * 7)
-                    .min(cfg.max_bitrate),
-            ),
-        );
+        let mean = cfg
+            .target_bitrate
+            .unwrap_or(cfg.max_bitrate / 10 * 7)
+            .min(cfg.max_bitrate);
+        set(&CODECAPI_AVEncCommonMeanBitRate, var_u32(mean));
+        // A 2-second rate-control buffer (in bits), as on the Intel path: a keyframe
+        // can take what it needs and the next frames pay it back. Same file size.
+        set(&CODECAPI_AVEncCommonBufferSize, var_u32(mean.saturating_mul(2)));
         return "peak-constrained VBR";
     }
     "driver default"
@@ -324,11 +436,3 @@ fn var_u32(v: u32) -> VARIANT {
     variant(VT_UI4, VARIANT_0_0_0 { ulVal: v })
 }
 
-fn var_bool() -> VARIANT {
-    variant(
-        VT_BOOL,
-        VARIANT_0_0_0 {
-            boolVal: VARIANT_TRUE,
-        },
-    )
-}

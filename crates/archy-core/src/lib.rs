@@ -7,6 +7,7 @@ pub mod discord;
 pub mod eco;
 pub mod permissions;
 pub mod presets;
+pub mod process;
 pub mod recorder;
 pub mod ring;
 pub mod settings;

@@ -44,6 +44,7 @@ mod ffi {
 
     pub const MFX_ERR_NONE: mfxStatus = 0;
     pub const MFX_ERR_MORE_DATA: mfxStatus = -10;
+    pub const MFX_WRN_IN_EXECUTION: mfxStatus = 1;
     pub const MFX_WRN_DEVICE_BUSY: mfxStatus = 2;
 
     pub const MFX_VARIANT_TYPE_U32: u32 = 5;
@@ -374,6 +375,10 @@ fn video_param(cfg: &Config, low_power: bool, icq: bool) -> mfxVideoParam {
         // No B-frames: no reordering delay, less encoder work.
         GopRefDist: 1,
         GopOptFlag: MFX_GOP_CLOSED,
+        // Every keyframe must be a full reset (IDR) so any clip can start on it.
+        // H.264: 0 = every I-frame is IDR. HEVC: 1 = every I-frame is IDR (0 there
+        // would mean only the very first one is).
+        IdrInterval: if cfg.codec == Codec::Hevc { 1 } else { 0 },
         ..Default::default()
     };
     if icq {
@@ -448,6 +453,8 @@ pub struct VplEncoder {
     free: Vec<usize>,
     in_flight: VecDeque<(mfxSyncPoint, usize)>,
     frame_duration: i64,
+    /// AV1 reports key frames as I (no IDR concept).
+    av1: bool,
     pub name: String,
     pub rate_control: &'static str,
 }
@@ -471,6 +478,7 @@ impl VplEncoder {
             free: Vec::new(),
             in_flight: VecDeque::new(),
             frame_duration: 10_000_000 / cfg.fps as i64,
+            av1: cfg.codec == Codec::Av1,
             name: String::new(),
             rate_control: "",
         };
@@ -645,9 +653,23 @@ impl VplEncoder {
             return Ok(());
         };
         let t_sync = trace::now();
-        let status = unsafe { (self.api.sync)(self.session, sync, 1000) };
+        // "Still encoding" is not "done": reading the slot now would store a
+        // half-written frame, and reusing it would let the GPU overwrite the next
+        // one (both corrupt every frame until the next keyframe). Keep waiting;
+        // only a frame stuck for 10 s is an error.
+        let mut status = MFX_WRN_IN_EXECUTION;
+        for _ in 0..10 {
+            status = unsafe { (self.api.sync)(self.session, sync, 1000) };
+            if status != MFX_WRN_IN_EXECUTION {
+                break;
+            }
+            stats.late += 1;
+        }
         trace::add(1, t_sync);
         self.free.push(slot);
+        if status == MFX_WRN_IN_EXECUTION {
+            return Err(Error::new(E_FAIL, "the GPU encoder stopped responding (a frame took over 10 s)"));
+        }
         check(status, "SyncOperation")?;
 
         let bs = &mut self.slots[slot].bitstream;
@@ -659,7 +681,13 @@ impl VplEncoder {
             // oneVPL timestamps are 90 kHz.
             time: (bs.TimeStamp as i64) * 1000 / 9,
             duration: self.frame_duration,
-            keyframe: bs.FrameType & (MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_I) != 0,
+            // IDR only: a plain I-frame (e.g. one inserted on a scene change) can be
+            // followed by frames that reference pictures before it.
+            keyframe: if self.av1 {
+                bs.FrameType & (MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_I) != 0
+            } else {
+                bs.FrameType & MFX_FRAMETYPE_IDR != 0
+            },
         };
         stats.count(&packet);
         let result = on_packet(packet);
