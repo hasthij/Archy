@@ -8,6 +8,8 @@
 
 mod aac;
 mod capture;
+mod mix;
+mod pcm;
 mod process;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +18,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 pub use aac::AacInfo;
+pub use pcm::listen_microphone;
 pub use process::find_root_process;
 use windows::core::{Error, Result};
 use windows::Win32::Foundation::E_FAIL;
@@ -33,9 +36,15 @@ pub enum Source {
     Process { pid: u32 },
     /// A microphone. `None` = Windows' default microphone.
     Microphone { device: Option<String> },
+    /// An output device's mix plus a microphone, added together (track 1, so
+    /// single-track players still hear your voice).
+    Mix {
+        output: Option<String>,
+        mic: Option<String>,
+    },
 }
 
-pub use capture::{list_devices, AudioDevice};
+pub use capture::{default_device_id, list_devices, AudioDevice};
 
 /// One encoded AAC frame (1024 samples, ~21 ms).
 pub struct AudioPacket<'a> {
@@ -64,13 +73,19 @@ impl AudioCapture {
         let thread = std::thread::Builder::new()
             .name("archy-audio".into())
             .spawn(move || {
-                let result = capture::run(
-                    source,
-                    bitrate_kbps,
-                    &thread_stop,
-                    &ready_tx,
-                    &mut on_packet,
-                );
+                let result = match source {
+                    Source::Mix { output, mic } => mix::run(
+                        output,
+                        mic,
+                        bitrate_kbps,
+                        &thread_stop,
+                        &ready_tx,
+                        &mut on_packet,
+                    ),
+                    other => {
+                        capture::run(other, bitrate_kbps, &thread_stop, &ready_tx, &mut on_packet)
+                    }
+                };
                 if let Err(e) = result {
                     let _ = ready_tx.try_send(Err(e));
                 }

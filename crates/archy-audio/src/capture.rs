@@ -1,13 +1,12 @@
 //! WASAPI capture loop for one source.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, SyncSender};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::mpsc::SyncSender;
+use std::sync::Arc;
 
 use windows::core::{implement, Error, Interface, Ref, Result, HSTRING};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::{CloseHandle, E_FAIL, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
@@ -16,8 +15,8 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, IAgileObject, IAgileObject_Impl, BLOB, CLSCTX_ALL,
     COINIT_MULTITHREADED,
 };
-use windows::Win32::System::Com::{CoTaskMemFree, STGM_READ};
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::Win32::System::Com::{CoTaskMemAlloc, CoTaskMemFree, STGM_READ};
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::Win32::System::Variant::VT_BLOB;
 
 use crate::aac::{AacEncoder, AacInfo};
@@ -30,7 +29,8 @@ const MAX_FILL: i64 = 20_000_000; // never invent more than 2 s at once
 
 #[implement(IActivateAudioInterfaceCompletionHandler, IAgileObject)]
 struct Activated {
-    done: Mutex<Option<SyncSender<()>>>,
+    /// Win32 event signalled when activation finishes (no Rust allocation on the callback thread).
+    done: isize,
 }
 
 // Marker interface: the handler may be called from any thread.
@@ -38,65 +38,100 @@ impl IAgileObject_Impl for Activated_Impl {}
 
 impl IActivateAudioInterfaceCompletionHandler_Impl for Activated_Impl {
     fn ActivateCompleted(&self, _op: Ref<IActivateAudioInterfaceAsyncOperation>) -> Result<()> {
-        if let Some(tx) = self.done.lock().ok().and_then(|mut d| d.take()) {
-            let _ = tx.send(());
+        unsafe {
+            let _ = SetEvent(HANDLE(self.done as *mut _));
         }
         Ok(())
     }
 }
 
+/// Activation objects that must outlive the process-loopback client. Windows
+/// keeps using the activation parameters while the client exists and frees the
+/// parameter blob itself when the operation is released, so it is allocated with
+/// CoTaskMemAlloc and owned by Windows; freeing it from Rust (or too early)
+/// corrupted the heap and crashed Archy when recording started.
+/// Fields drop in order: the operation (which frees the blob) before the
+/// PROPVARIANT that points at it.
+struct ActivationData {
+    _op: IActivateAudioInterfaceAsyncOperation,
+    _handler: IActivateAudioInterfaceCompletionHandler,
+    _prop: Box<PROPVARIANT>,
+}
+
 /// An IAudioClient that captures one process tree (Windows 10 2004+).
-fn process_client(pid: u32) -> Result<IAudioClient> {
-    let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
-        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-        Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
-            ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
-                TargetProcessId: pid,
-                ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+fn process_client(pid: u32) -> Result<(IAudioClient, ActivationData)> {
+    // The blob is allocated with CoTaskMemAlloc because Windows frees it itself
+    // (CoTaskMemFree) when the activation operation is released.
+    let size = std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>();
+    let params = unsafe { CoTaskMemAlloc(size) } as *mut AUDIOCLIENT_ACTIVATION_PARAMS;
+    if params.is_null() {
+        return Err(Error::new(E_FAIL, "out of memory"));
+    }
+    unsafe {
+        params.write(AUDIOCLIENT_ACTIVATION_PARAMS {
+            ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+            Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+                ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                    TargetProcessId: pid,
+                    ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+                },
             },
-        },
-    };
-    let prop = PROPVARIANT {
+        });
+    }
+    let prop = Box::new(PROPVARIANT {
         Anonymous: PROPVARIANT_0 {
             Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
                 vt: VT_BLOB,
                 Anonymous: PROPVARIANT_0_0_0 {
                     blob: BLOB {
                         cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                        pBlobData: &mut params as *mut _ as *mut u8,
+                        pBlobData: params as *mut u8,
                     },
                 },
                 ..Default::default()
             }),
         },
-    };
-    let (tx, rx) = sync_channel(1);
+    });
+    let done = unsafe { CreateEventW(None, true, false, None)? };
     let handler: IActivateAudioInterfaceCompletionHandler = Activated {
-        done: Mutex::new(Some(tx)),
+        done: done.0 as isize,
     }
     .into();
     let op = unsafe {
         ActivateAudioInterfaceAsync(
             VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
             &IAudioClient::IID,
-            Some(&prop),
+            Some(&*prop),
             &handler,
         )?
     };
-    rx.recv_timeout(Duration::from_secs(5))
-        .map_err(|_| Error::new(E_FAIL, "audio activation timed out"))?;
+    let waited = unsafe { WaitForSingleObject(done, 5000) };
+    unsafe {
+        let _ = CloseHandle(done);
+    }
+    if waited != WAIT_OBJECT_0 {
+        return Err(Error::new(E_FAIL, "audio activation timed out"));
+    }
     let mut hr = windows::core::HRESULT(0);
     let mut unknown = None;
     unsafe { op.GetActivateResult(&mut hr, &mut unknown)? };
     hr.ok()?;
-    unknown
+    let client: IAudioClient = unknown
         .ok_or_else(|| Error::new(E_FAIL, "no audio client"))?
-        .cast()
+        .cast()?;
+    Ok((
+        client,
+        ActivationData {
+            _op: op,
+            _handler: handler,
+            _prop: prop,
+        },
+    ))
 }
 
 /// A specific device by id, falling back to Windows' default if it's gone
 /// (unplugged headset), so a missing device never stops recording.
-fn device_client(flow: EDataFlow, id: Option<&str>) -> Result<IAudioClient> {
+pub(crate) fn device_client(flow: EDataFlow, id: Option<&str>) -> Result<IAudioClient> {
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -111,11 +146,39 @@ fn device_client(flow: EDataFlow, id: Option<&str>) -> Result<IAudioClient> {
     }
 }
 
+/// Exactly what the AAC encoder takes; Windows converts and resamples to it.
+pub(crate) fn pcm_format() -> WAVEFORMATEX {
+    WAVEFORMATEX {
+        wFormatTag: WAVE_FORMAT_PCM as u16,
+        nChannels: CHANNELS as u16,
+        nSamplesPerSec: SAMPLE_RATE,
+        nAvgBytesPerSec: SAMPLE_RATE * CHANNELS * 2,
+        nBlockAlign: (CHANNELS * 2) as u16,
+        wBitsPerSample: 16,
+        cbSize: 0,
+    }
+}
+
 /// A microphone or output device Windows has, for the device pickers.
 #[derive(Clone, Debug)]
 pub struct AudioDevice {
     pub id: String,
     pub name: String,
+}
+
+/// Id of Windows' current default microphone (`input`) or output device.
+pub fn default_device_id(input: bool) -> Option<String> {
+    let flow = if input { eCapture } else { eRender };
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let device = enumerator.GetDefaultAudioEndpoint(flow, eConsole).ok()?;
+        let id = device.GetId().ok()?;
+        let s = id.to_string().ok();
+        CoTaskMemFree(Some(id.0 as *const _));
+        s
+    }
 }
 
 /// Active microphones (`input`) or output devices, by their Windows names.
@@ -158,10 +221,16 @@ pub fn run(
     on_packet: &mut dyn FnMut(AudioPacket),
 ) -> Result<()> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
-    let (client, loopback) = match source {
-        Source::System { device } => (device_client(eRender, device.as_deref())?, true),
-        Source::Process { pid } => (process_client(pid)?, true),
-        Source::Microphone { device } => (device_client(eCapture, device.as_deref())?, false),
+    // `activation` must outlive `client` (see ActivationData); both are dropped
+    // explicitly, client first, at the end.
+    let (client, loopback, activation) = match source {
+        Source::System { device } => (device_client(eRender, device.as_deref())?, true, None),
+        Source::Process { pid } => {
+            let (client, data) = process_client(pid)?;
+            (client, true, Some(data))
+        }
+        Source::Microphone { device } => (device_client(eCapture, device.as_deref())?, false, None),
+        Source::Mix { .. } => unreachable!("mixed sources run in mix::run"),
     };
     // Ask for exactly what the AAC encoder takes; Windows converts and resamples.
     let format = WAVEFORMATEX {
@@ -249,5 +318,7 @@ pub fn run(
     unsafe {
         let _ = CloseHandle(event);
     }
+    drop(client);
+    drop(activation);
     result
 }

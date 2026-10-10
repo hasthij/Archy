@@ -7,8 +7,11 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod voice;
+
 use std::path::{Path, PathBuf};
 
+use archy_core::permissions;
 use archy_core::settings::Settings;
 use windows::core::{w, Interface, HSTRING, PCWSTR};
 use windows::Win32::Foundation::CloseHandle;
@@ -178,7 +181,7 @@ fn register(dir: &Path, uninstaller: &Path) {
         reg_dword(
             key,
             "EstimatedSize",
-            ((ARCHY.len() + ARCHY_UI.len()) / 1024) as u32,
+            ((ARCHY.len() + ARCHY_UI.len()) / 1024 + 20 * 1024) as u32, // + voice files
         );
         let _ = RegCloseKey(key);
     }
@@ -210,6 +213,10 @@ fn install() -> Result<(), String> {
             .map_err(|e| format!("couldn't write uninstall.exe: {e}"))?;
     }
 
+    // Voice clipping's engine and model are downloaded, not bundled (~24 MB).
+    // Without them everything else still works, so a failure isn't fatal.
+    let voice_problem = if voice::installed(&dir) { None } else { voice::install(&dir).err() };
+
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
@@ -227,14 +234,61 @@ fn install() -> Result<(), String> {
         let _ = settings.save();
     }
 
-    // Start the recorder in the tray, then open the window.
-    let _ = std::process::Command::new(dir.join("archy.exe")).spawn();
+    // Things Archy needs that only the user can change; Archy never changes them itself.
+    if let Some(e) = &voice_problem {
+        tell(&format!("Voice clipping couldn't be set up: {e}
+
+Hotkeys and everything else work. Run Archy Setup again later to retry."), true);
+    } else if !permissions::cpp_runtime_installed()
+        && ask("Voice clipping needs Microsoft's Visual C++ runtime, which isn't on this PC.
+
+Open Microsoft's download for it now? (Run it, then restart Archy.)")
+    {
+        permissions::open_cpp_runtime_download();
+    }
+    if !permissions::microphone_allowed()
+        && ask("Windows is blocking microphone access for desktop apps, so Archy can't record your voice or hear voice commands.
+
+Open Settings > Privacy & security > Microphone to allow it?")
+    {
+        permissions::open_microphone_settings();
+    }
+    if !permissions::webview2_installed()
+        && ask("Archy's settings window needs Microsoft Edge WebView2, which isn't on this PC.
+
+Open Microsoft's download for it now?")
+    {
+        permissions::open_webview2_download();
+    }
+
+    // Start the recorder in the tray and make sure it stays up, then open the window.
+    let started = std::process::Command::new(dir.join("archy.exe"))
+        .spawn()
+        .map_err(|e| e.to_string())
+        .and_then(|mut child| {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            match child.try_wait() {
+                Ok(None) => Ok(()),
+                Ok(Some(code)) => Err(format!("it exited right away ({code})")),
+                Err(e) => Err(e.to_string()),
+            }
+        });
     let _ = std::process::Command::new(&ui).spawn();
     let key = Settings::load().0.hotkey_save;
-    tell(
-        &format!("Archy is installed and running in your system tray (bottom-right, next to the clock).\n\nOpen a game and press {key} to save the last seconds."),
-        false,
-    );
+    match started {
+        Ok(()) => tell(
+            &format!("Archy is installed and running in your system tray (bottom-right, next to the clock).
+
+Open a game and press {key} to save the last seconds."),
+            false,
+        ),
+        Err(e) => tell(
+            &format!("Archy is installed, but the recorder didn't start: {e}.
+
+If antivirus blocked it, allow archy.exe in {}, then open Archy from the Start menu. Details are in %APPDATA%\\Archy\\archy.log.", dir.display()),
+            true,
+        ),
+    }
     Ok(())
 }
 
