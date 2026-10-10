@@ -11,8 +11,14 @@ use std::process::Command;
 /// No console window flashing up for curl, certutil and tar.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Windows' own copy of a tool (System32), not whatever is first on PATH.
 fn tool(name: &str) -> Command {
-    let mut c = Command::new(name);
+    let system = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| r"C:\Windows".into())
+        .join("System32")
+        .join(name);
+    let mut c = Command::new(if system.exists() { system } else { name.into() });
     c.creation_flags(CREATE_NO_WINDOW);
     c
 }
@@ -87,7 +93,7 @@ fn fetch(url: &str, sha256: &str, work: &Path, name: &str) -> Result<std::path::
 
 /// SHA-256 via Windows' certutil.
 fn hash(path: &Path) -> Result<String, String> {
-    let out = tool("certutil")
+    let out = tool("certutil.exe")
         .arg("-hashfile")
         .arg(path)
         .arg("SHA256")
@@ -100,16 +106,15 @@ fn hash(path: &Path) -> Result<String, String> {
         .ok_or_else(|| "couldn't check the download".into())
 }
 
-/// Unpacks with Windows' own tar.exe (handles .tar.bz2).
+/// Unpacks a .tar.bz2 in-process. (It used tar.exe, but on PCs with Git or
+/// other tools a GNU tar can come first on PATH, which reads "C:\..." as a
+/// network host and fails; some Windows 10 tars can't do bzip2 either.)
 fn unpack(archive: &Path, into: &Path) -> Result<(), String> {
-    let status = tool("tar.exe")
-        .arg("-xf")
-        .arg(archive)
-        .arg("-C")
-        .arg(into)
-        .status()
-        .map_err(|e| format!("couldn't run tar: {e}"))?;
-    status.success().then_some(()).ok_or_else(|| "couldn't unpack the download".into())
+    let file = std::fs::File::open(archive).map_err(|e| format!("couldn't open the download: {e}"))?;
+    let reader = bzip2_rs::DecoderReader::new(std::io::BufReader::new(file));
+    tar::Archive::new(reader)
+        .unpack(into)
+        .map_err(|e| format!("couldn't unpack the download: {e}"))
 }
 
 fn copy(from: &Path, to: &Path) -> Result<(), String> {

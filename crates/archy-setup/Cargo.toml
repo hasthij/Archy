@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 archy-core.workspace = true
+bzip2-rs = "0.1"
+tar = "0.4"
 windows.workspace = true
 
 [build-dependencies]
