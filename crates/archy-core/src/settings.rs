@@ -29,6 +29,9 @@ pub struct Settings {
     pub record_fullscreen_apps: bool,
     /// "window" (only the game; popups never appear) | "screen" (whole monitor).
     pub capture: String,
+    /// Screen to record in "screen" mode (Windows' name, e.g. `\\.\DISPLAY2`);
+    /// empty = the screen the game is on.
+    pub capture_monitor: String,
     /// Put each new clip on the clipboard, ready to paste into Discord.
     pub copy_after_save: bool,
     /// Keep Archy on efficiency cores at low priority so the game keeps the fast cores.
@@ -117,6 +120,7 @@ impl Default for Settings {
             games: vec!["RobloxPlayerBeta.exe".into()],
             record_fullscreen_apps: true,
             capture: "window".into(),
+            capture_monitor: String::new(),
             copy_after_save: true,
             efficiency_mode: true,
             audio_everything: true,

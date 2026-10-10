@@ -477,7 +477,11 @@ impl App {
             self.failed_window = None;
         }
         let target = if self.settings.capture.eq_ignore_ascii_case("screen") {
-            Target::Monitor(unsafe { MonitorFromWindow(fg.hwnd, MONITOR_DEFAULTTONEAREST) })
+            // The screen picked in settings, else (or if it was unplugged) the game's.
+            let chosen = archy_core::monitors::find(&self.settings.capture_monitor);
+            Target::Monitor(chosen.unwrap_or_else(|| unsafe {
+                MonitorFromWindow(fg.hwnd, MONITOR_DEFAULTTONEAREST)
+            }))
         } else {
             Target::Window(fg.hwnd)
         };
@@ -751,6 +755,7 @@ fn recording_changed(a: &Settings, b: &Settings) -> bool {
         || a.fps != b.fps
         || a.codec != b.codec
         || a.capture != b.capture
+        || a.capture_monitor != b.capture_monitor
         || a.buffer_seconds() != b.buffer_seconds()
 }
 

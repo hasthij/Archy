@@ -16,7 +16,7 @@ use archy_gpu::probe::Codec;
 use archy_gpu::SendPtr;
 use archy_mux::{AudioTrack, Mp4Writer};
 use windows::core::{Error, Result};
-use windows::Win32::Foundation::E_FAIL;
+use windows::Win32::Foundation::{E_FAIL, LUID};
 
 use crate::cadence::Cadence;
 use crate::ring::{ReplayBuffer, StoredPacket};
@@ -392,23 +392,51 @@ fn capture_loop(
     ready: &std::sync::mpsc::SyncSender<Result<RecorderInfo>>,
 ) -> Result<()> {
     crate::init_thread()?;
-    let gpu = Gpu::new(None, RECORDER_GPU_PRIORITY)?;
     let interval = Duration::from_secs_f64(1.0 / cfg.fps as f64);
-    // Half the interval: the compositor wakes us at most twice per wanted frame,
-    // and frames arriving a hair early are never pushed to the next refresh.
-    let capture = Capture::start(&gpu.device, cfg.target, interval / 2)?;
-    let (width, height) = fit_size(capture.width, capture.height, cfg.max_height);
-    // Hardware encoders reject tiny frames (a minimized or collapsed window).
-    let (width, height) = (width.max(160), height.max(120));
-    let mut converter = AnyConverter::new(
-        &gpu,
-        cfg.convert,
-        (capture.width, capture.height),
-        (width, height),
-        cfg.fps,
-        NV12_POOL,
-    )?;
-    let (mut encoder, codec) = open_encoder(&gpu, &cfg, width, height)?;
+    // Windows' default GPU first; if it has no video encoder (e.g. an NVIDIA MX
+    // laptop GPU), every other GPU, Intel first. Capture, conversion and
+    // encoding all run on the GPU that has the encoder.
+    let mut adapters: Vec<Option<LUID>> = vec![None];
+    let mut tried_others = false;
+    let mut last_error = Error::new(E_FAIL, "no GPU found");
+    let mut index = 0;
+    let (_gpu, capture, mut converter, mut encoder, codec, width, height) = loop {
+        let Some(&adapter) = adapters.get(index) else {
+            return Err(last_error);
+        };
+        index += 1;
+        let attempt = (|| -> Result<_> {
+            let gpu = Gpu::new(adapter, RECORDER_GPU_PRIORITY)?;
+            // Half the interval: the compositor wakes us at most twice per wanted
+            // frame, and frames arriving a hair early are never pushed to the next refresh.
+            let capture = Capture::start(&gpu.device, cfg.target, interval / 2)?;
+            let (width, height) = fit_size(capture.width, capture.height, cfg.max_height);
+            // Hardware encoders reject tiny frames (a minimized or collapsed window).
+            let (width, height) = (width.max(160), height.max(120));
+            let converter = AnyConverter::new(
+                &gpu,
+                cfg.convert,
+                (capture.width, capture.height),
+                (width, height),
+                cfg.fps,
+                NV12_POOL,
+            )?;
+            let (encoder, codec) = open_encoder(&gpu, &cfg, width, height)?;
+            Ok((gpu, capture, converter, encoder, codec, width, height))
+        })();
+        match attempt {
+            Ok(parts) => break parts,
+            Err(e) => {
+                if !tried_others {
+                    tried_others = true;
+                    let default = Gpu::new(None, RECORDER_GPU_PRIORITY).map(|g| g.luid).ok();
+                    let except = default.unwrap_or_default();
+                    adapters.extend(archy_gpu::device::other_adapters(except).into_iter().map(Some));
+                }
+                last_error = e;
+            }
+        }
+    };
     let info = RecorderInfo {
         codec,
         width,
