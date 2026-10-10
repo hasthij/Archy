@@ -58,6 +58,43 @@ pub struct Stats {
     pub packets: u64,
     pub keyframes: u64,
     pub bytes: u64,
+    /// Times the encoder needed more than a second for a frame.
+    pub late: u64,
+    /// Keyframes the encoder was made to insert because it ignored the keyframe interval.
+    pub forced_keyframes: u64,
+}
+
+/// Whether a compressed frame really is a safe place to start decoding, read
+/// from the bitstream itself rather than trusting the encoder's label:
+/// H.264 IDR (NAL 5), HEVC IRAP (NAL 16-21; with no B-frames a CRA has no
+/// leading pictures). `None` for AV1, where the encoder's flag is used.
+/// Cheap: stops at the first picture NAL unit, near the start of the packet.
+pub fn random_access(codec: Codec, data: &[u8]) -> Option<bool> {
+    if codec == Codec::Av1 {
+        return None;
+    }
+    let mut i = 0;
+    while i + 3 < data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            let header = data[i + 3];
+            match codec {
+                Codec::H264 => match header & 0x1f {
+                    5 => return Some(true),
+                    1..=4 => return Some(false),
+                    _ => {}
+                },
+                _ => match (header >> 1) & 0x3f {
+                    16..=21 => return Some(true),
+                    0..=15 => return Some(false),
+                    _ => {}
+                },
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    Some(false)
 }
 
 impl Stats {
@@ -79,7 +116,7 @@ pub enum Backend {
 
 pub enum Encoder {
     Vpl(Box<vpl::VplEncoder>),
-    Mf(mf::MfEncoder),
+    Mf(Box<mf::MfEncoder>),
 }
 
 // Both backends drive a multithread-protected device and are used from one
@@ -90,7 +127,7 @@ impl Encoder {
     pub fn new(backend: Backend, gpu: &archy_gpu::device::Gpu, cfg: &Config) -> Result<Self> {
         Ok(match backend {
             Backend::Vpl => Self::Vpl(Box::new(vpl::VplEncoder::new(gpu, cfg)?)),
-            Backend::MediaFoundation => Self::Mf(mf::MfEncoder::new(gpu, cfg)?),
+            Backend::MediaFoundation => Self::Mf(Box::new(mf::MfEncoder::new(gpu, cfg)?)),
         })
     }
 

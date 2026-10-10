@@ -33,7 +33,35 @@ fn key_code(key: &str) -> Option<u32> {
     if bytes.len() == 1 && bytes[0].is_ascii_alphanumeric() {
         return Some(bytes[0].to_ascii_uppercase() as u32);
     }
+    if let Some(n) = key.strip_prefix("num").and_then(|n| n.parse::<u32>().ok()) {
+        return (n <= 9).then_some(0x60 + n); // VK_NUMPAD0..9
+    }
     Some(match key {
+        // Punctuation (US positions; Windows maps them to the physical keys).
+        "[" => 0xDB,
+        "]" => 0xDD,
+        ";" => 0xBA,
+        "'" => 0xDE,
+        "," => 0xBC,
+        "." => 0xBE,
+        "/" => 0xBF,
+        "\\" => 0xDC,
+        "-" => 0xBD,
+        "=" => 0xBB,
+        "`" => 0xC0,
+        "nummultiply" => 0x6A,
+        "numplus" => 0x6B,
+        "numminus" => 0x6D,
+        "numdecimal" => 0x6E,
+        "numdivide" => 0x6F,
+        "up" => 0x26,
+        "down" => 0x28,
+        "left" => 0x25,
+        "right" => 0x27,
+        "space" => 0x20,
+        "tab" => 0x09,
+        "enter" => 0x0D,
+        "backspace" => 0x08,
         "insert" => 0x2D,
         "delete" => 0x2E,
         "home" => 0x24,
@@ -59,6 +87,12 @@ mod tests {
         assert!(h.modifiers.contains(MOD_SHIFT));
         assert_eq!(parse("ctrl+alt+k").unwrap().vk, b'K' as u32);
         assert!(parse("Shift+").is_none());
+        assert_eq!(parse("Ctrl+[").unwrap().vk, 0xDB);
+        assert_eq!(parse("Alt+;").unwrap().vk, 0xBA);
+        assert_eq!(parse("Ctrl+'").unwrap().vk, 0xDE);
+        assert_eq!(parse("Ctrl+-").unwrap().vk, 0xBD);
+        assert_eq!(parse("Shift+Num5").unwrap().vk, 0x65);
+        assert_eq!(parse("Ctrl+Up").unwrap().vk, 0x26);
         assert!(parse("F99").is_none());
     }
 }

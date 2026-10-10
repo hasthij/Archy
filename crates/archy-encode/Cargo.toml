@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 windows.workspace = true
 archy-gpu.workspace = true
+windows-core = "0.62.2"

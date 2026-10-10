@@ -1,12 +1,8 @@
 //! Which window is the game.
 
-use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-};
-use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
@@ -79,23 +75,7 @@ pub fn alive(hwnd: HWND) -> bool {
 fn exe_name(hwnd: HWND) -> Option<String> {
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
-    let mut buf = [0u16; 512];
-    let mut len = buf.len() as u32;
-    let ok = unsafe {
-        QueryFullProcessImageNameW(
-            process,
-            PROCESS_NAME_WIN32,
-            PWSTR(buf.as_mut_ptr()),
-            &mut len,
-        )
-    };
-    unsafe {
-        let _ = CloseHandle(process);
-    }
-    ok.ok()?;
-    let path = String::from_utf16_lossy(&buf[..len as usize]);
-    path.rsplit(['\\', '/']).next().map(str::to_string)
+    archy_core::process::exe_name(pid)
 }
 
 fn covers_monitor(hwnd: HWND) -> bool {
