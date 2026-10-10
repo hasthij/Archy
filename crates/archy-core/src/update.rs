@@ -34,8 +34,18 @@ fn parse(v: &str) -> Option<(u32, u32, u32)> {
     Some((it.next()??, it.next().flatten().unwrap_or(0), it.next().flatten().unwrap_or(0)))
 }
 
+/// Windows' own curl (System32), not whatever is first on PATH.
+fn system_tool(name: &str) -> std::path::PathBuf {
+    let path = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| r"C:\Windows".into())
+        .join("System32")
+        .join(name);
+    if path.exists() { path } else { name.into() }
+}
+
 fn curl() -> Command {
-    let mut c = Command::new("curl.exe");
+    let mut c = Command::new(system_tool("curl.exe"));
     c.creation_flags(CREATE_NO_WINDOW);
     c
 }
@@ -96,7 +106,7 @@ pub fn download(update: &Update) -> Result<PathBuf, String> {
         return Err("the download failed".into());
     }
     if let Some(expected) = &update.sha256 {
-        let out = Command::new("certutil")
+        let out = Command::new(system_tool("certutil.exe"))
             .creation_flags(CREATE_NO_WINDOW)
             .arg("-hashfile")
             .arg(&path)
