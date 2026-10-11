@@ -222,6 +222,7 @@ pub fn run(
     on_packet: &mut dyn FnMut(AudioPacket),
 ) -> Result<()> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
+    crate::audio_thread();
     // `activation` must outlive `client` (see ActivationData); both are dropped
     // explicitly, client first, at the end.
     let (client, loopback, activation) = match source {

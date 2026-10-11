@@ -20,6 +20,8 @@ pub fn listen_microphone(
     on_pcm: &mut dyn FnMut(&[i16]),
 ) -> Result<()> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
+    // No audio-thread boost here: the voice engine runs inside this callback,
+    // and Windows demotes audio-class threads that do heavy work.
     let client = device_client(eCapture, device)?;
     let format = WAVEFORMATEX {
         wFormatTag: WAVE_FORMAT_PCM as u16,

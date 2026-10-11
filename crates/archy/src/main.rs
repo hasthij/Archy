@@ -76,6 +76,12 @@ struct App {
     /// until it closes, so one bad window doesn't stop recording other games.
     failed_window: Option<isize>,
     volumes: TrackVolumes,
+    /// When the voice helper was last (re)started, to space out restarts.
+    voice_started: Option<std::time::Instant>,
+    /// Seconds of a clip requested while another was saving (0 = none).
+    queued: Arc<std::sync::atomic::AtomicU32>,
+    /// When "Voice clipping is off" was last shown, so a broken mic doesn't spam.
+    voice_warned: std::cell::Cell<Option<std::time::Instant>>,
 }
 
 thread_local! {
@@ -408,6 +414,7 @@ impl App {
             return;
         }
         self.voice = None; // stop the old listener before starting a new one
+        self.voice_started = Some(std::time::Instant::now());
         match voice::VoiceListener::start(&wanted, self.window.0 as isize, WM_VOICE) {
             Ok(v) => self.voice = Some(v),
             Err(e) => log(&format!("voice: couldn't start the voice helper: {e}")),
@@ -418,7 +425,14 @@ impl App {
     fn heard(&self, index: usize, code: isize) {
         if index == voice::VOICE_ERROR {
             let why = voice::explain_code(code);
-            notify(self.window.0 as isize, "Voice clipping is off", &why, true);
+            log(&format!("voice: stopped: {why}"));
+            // The helper is restarted automatically (see `revive_voice`); warn at
+            // most every 5 minutes so a missing mic doesn't spam notifications.
+            let recent = self.voice_warned.get().is_some_and(|t| t.elapsed().as_secs() < 300);
+            if !recent {
+                self.voice_warned.set(Some(std::time::Instant::now()));
+                notify(self.window.0 as isize, "Voice clipping paused", &format!("{why} Archy keeps retrying."), true);
+            }
             return;
         }
         let Some(phrase) = self.settings.voice_phrases.get(index) else {
@@ -441,8 +455,25 @@ impl App {
     }
 
     /// Starts or stops recording to follow the game. Runs every 2 s.
+    /// Restarts the voice helper if it stopped (mic unplugged/changed, Discord
+    /// switching devices, engine crash). It used to stay dead until Archy restarted.
+    fn revive_voice(&mut self) {
+        let Some(v) = self.voice.as_mut() else { return };
+        if !v.exited() {
+            return;
+        }
+        if self.voice_started.is_some_and(|t| t.elapsed().as_secs() < 10) {
+            return; // space out restarts while a mic is missing
+        }
+        log("voice: listener stopped; restarting it");
+        self.voice = None;
+        self.voice_config = None;
+        self.sync_voice();
+    }
+
     fn watch(&mut self) {
         self.pick_up_settings();
+        self.revive_voice();
         if let Some(s) = &self.session {
             let ended = !watch::alive(s.hwnd) || s.recorder.status() != RecorderStatus::Recording;
             if !ended {
@@ -541,7 +572,11 @@ impl App {
             return;
         };
         if self.saving.swap(true, Ordering::AcqRel) {
-            return; // a save is already running
+            // A save is running: do this one right after it, instead of dropping
+            // it (a second "Archer clip that" or F8 used to do nothing).
+            self.queued.fetch_max(seconds, Ordering::AcqRel);
+            log("clip request queued: a save is still running");
+            return;
         }
         let recorder = session.recorder.clone();
         let folder = self.settings.save_folder.clone();
@@ -551,47 +586,61 @@ impl App {
         let chime = self.settings.sound_on_save;
         let chime_volume = self.settings.clip_sound_volume;
         let saving = self.saving.clone();
+        let queued = self.queued.clone();
         std::thread::spawn(move || {
             archy_core::eco::boost_current_thread();
-            let _ = std::fs::create_dir_all(&folder);
-            let path = clip::new_path(&folder, &game);
-            match recorder.save_clip(seconds, &path) {
-                Ok(c) => {
-                    let copied = copy && archy_core::clipboard::copy_file(&c.path);
-                    log(&format!(
-                        "saved {} ({:.1} s, {:.1} MB, {} ms)",
-                        c.path.display(),
-                        c.seconds,
-                        c.bytes as f64 / 1e6,
-                        c.save_time.as_millis()
-                    ));
-                    if chime {
-                        play(CLIP_WAV, chime_volume);
-                    }
-                    if show {
-                        let mb = c.bytes as f64 / 1e6;
-                        let mut extra = if copied {
-                            " · copied, paste it anywhere".to_string()
-                        } else {
-                            String::new()
-                        };
-                        if mb > 10.0 {
-                            extra.push_str(" · over Discord's 10 MB: use Discord copy in Archy");
+            let mut seconds = seconds;
+            loop {
+                let _ = std::fs::create_dir_all(&folder);
+                let path = clip::new_path(&folder, &game);
+                match recorder.save_clip(seconds, &path) {
+                    Ok(c) => {
+                        let copied = copy && archy_core::clipboard::copy_file(&c.path);
+                        log(&format!(
+                            "saved {} ({:.1} s, {:.1} MB, {} ms)",
+                            c.path.display(),
+                            c.seconds,
+                            c.bytes as f64 / 1e6,
+                            c.save_time.as_millis()
+                        ));
+                        if chime {
+                            play(CLIP_WAV, chime_volume);
                         }
-                        notify(
-                            window,
-                            &format!("Clip saved · last {:.0} s", c.seconds),
-                            &format!("{mb:.1} MB{extra}"),
-                            false,
-                        );
+                        if show {
+                            let mb = c.bytes as f64 / 1e6;
+                            let mut extra = if copied {
+                                " · copied, paste it anywhere".to_string()
+                            } else {
+                                String::new()
+                            };
+                            if mb > 10.0 {
+                                extra.push_str(" · over Discord's 10 MB: use Discord copy in Archy");
+                            }
+                            notify(
+                                window,
+                                &format!("Clip saved · last {:.0} s", c.seconds),
+                                &format!("{mb:.1} MB{extra}"),
+                                false,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log(&format!("save failed: {}", e.message()));
+                        notify(window, "Clip not saved", &e.message(), true);
                     }
                 }
-                Err(e) => {
-                    log(&format!("save failed: {}", e.message()));
-                    notify(window, "Clip not saved", &e.message(), true);
+                if let next @ 1.. = queued.swap(0, Ordering::AcqRel) {
+                    seconds = next;
+                    continue;
+                }
+                saving.store(false, Ordering::Release);
+                // A request that arrived while finishing up.
+                match queued.swap(0, Ordering::AcqRel) {
+                    0 => break,
+                    late if !saving.swap(true, Ordering::AcqRel) => seconds = late,
+                    _ => break,
                 }
             }
-            saving.store(false, Ordering::Release);
         });
     }
 
@@ -904,6 +953,9 @@ fn main() {
         dot_shown: false,
         failed_window: None,
         volumes: TrackVolumes::default(),
+        voice_started: None,
+        queued: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        voice_warned: std::cell::Cell::new(None),
     };
     app.volumes.update(&app.settings);
     app.register_hotkeys();

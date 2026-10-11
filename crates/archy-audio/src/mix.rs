@@ -141,6 +141,7 @@ pub fn run(
     on_packet: &mut dyn FnMut(AudioPacket),
 ) -> Result<()> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
+    crate::audio_thread();
     let sys_client = device_client(eRender, output.as_deref())?;
     let mic_client = device_client(eCapture, mic.as_deref())?;
     let sys = open(&sys_client, true)?;
