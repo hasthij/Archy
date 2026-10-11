@@ -110,7 +110,11 @@ const playIcon = () => {
 };
 
 function clipCard(c) {
-  const video = el("video", { preload: "metadata", muted: true, src: fileSrc(c.path) + "#t=0.5" });
+  // The file loads only when the card scrolls into view: with every card
+  // loading at once, dozens of big 1080p clips were decoded on each redraw.
+  const video = el("video", { preload: "none", muted: true });
+  video.dataset.src = fileSrc(c.path) + "#t=0.5";
+  thumbObserver.observe(video);
   let confirming = false;
   const del = el("button", { class: "btn danger", text: "Delete", "aria-label": `Move ${c.name} to Recycle Bin` });
   del.addEventListener("click", async () => {
@@ -753,6 +757,17 @@ async function checkUpdate() {
     el("button", { class: "btn", text: "Skip this version", onclick: () => { save({ skipped_version: u.version }, `Won't ask about ${u.version} again`); banner.remove(); } }));
   $("#status").before(banner);
 }
+
+// Loads a clip's thumbnail once its card is (nearly) visible.
+const thumbObserver = new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    const v = e.target;
+    thumbObserver.unobserve(v);
+    v.preload = "metadata";
+    v.src = v.dataset.src;
+  }
+}, { rootMargin: "200px" });
 
 // ---------- start ----------
 (async function start() {

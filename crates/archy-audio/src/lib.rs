@@ -67,6 +67,35 @@ impl Default for Volumes {
     }
 }
 
+/// Audio threads must never be starved: Archy's process runs low-priority and
+/// throttled (efficiency mode), and on a busy CPU (a 4-core laptop running a
+/// game) a capture thread that wakes late lets Windows' buffer overflow, which
+/// is heard as choppy, garbled audio. This puts the calling thread in Windows'
+/// "Audio" scheduling class (MMCSS) and exempts it from power throttling.
+pub(crate) fn audio_thread() {
+    use windows::core::w;
+    use windows::Win32::System::Threading::{
+        AvSetMmThreadCharacteristicsW, GetCurrentThread, SetThreadInformation,
+        ThreadPowerThrottling, THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE,
+    };
+    unsafe {
+        let mut index = 0u32;
+        let _ = AvSetMmThreadCharacteristicsW(w!("Audio"), &mut index);
+        let state = THREAD_POWER_THROTTLING_STATE {
+            Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        let _ = SetThreadInformation(
+            GetCurrentThread(),
+            ThreadPowerThrottling,
+            &state as *const _ as *const _,
+            std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+        );
+    }
+}
+
 /// Rounds off peaks instead of hard clipping (louder than 100% would crackle).
 pub(crate) fn soft_limit(x: f32) -> i16 {
     let s = x / 32768.0;

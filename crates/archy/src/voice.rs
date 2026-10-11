@@ -63,6 +63,16 @@ impl VoiceListener {
     }
 }
 
+impl VoiceListener {
+    /// Whether the helper has stopped (mic unplugged or changed, engine crash).
+    pub fn exited(&mut self) -> bool {
+        match self.child.as_mut() {
+            Some(c) => !matches!(c.try_wait(), Ok(None)),
+            None => true,
+        }
+    }
+}
+
 impl Drop for VoiceListener {
     /// Ends the helper at once, without waiting on it.
     fn drop(&mut self) {
