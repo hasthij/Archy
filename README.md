@@ -124,7 +124,9 @@ Archy writes a log to `%APPDATA%\Archy\archy.log`. Please include it when you [o
 Archy works entirely on your PC.
 - There's no account, no server, no telemetry and no analytics.
 - Voice clipping uses a small on-device speech model that listens only for your phrases. Audio is never stored or sent.
-- The only time Archy goes online is during install, to download the voice engine from the [sherpa-onnx GitHub releases](https://github.com/k2-fsa/sherpa-onnx/releases). Each file is checked against a fixed SHA-256 fingerprint before use.
+- Archy goes online in only two cases:
+  - **During install**, to download the voice engine from the [sherpa-onnx GitHub releases](https://github.com/k2-fsa/sherpa-onnx/releases). Each file is checked against a fixed SHA-256 fingerprint before use.
+  - **When Archy starts**, to ask [Archy's GitHub releases](https://github.com/hasthij/Archy/releases) whether a newer version exists. Nothing about you or your PC is sent beyond a normal web request. An update is only downloaded from github.com, is checked against GitHub's SHA-256 fingerprint when one is listed, and always asks you before installing. Turn this off in **General → Check for updates** and Archy never goes online after install.
 
 ## Building from source
 
