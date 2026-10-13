@@ -379,36 +379,13 @@ impl App {
 
     /// Starts, restarts or stops the voice listener to match settings and pause state.
     fn sync_voice(&mut self) {
-        let phrases: Vec<String> = self
-            .settings
-            .voice_phrases
-            .iter()
-            .map(|p| p.text.clone())
-            .filter(|t| !t.trim().is_empty())
-            .collect();
-        if !self.settings.voice_enabled || self.paused || phrases.is_empty() {
-            self.voice = None;
-            self.voice_config = None;
-            return;
-        }
-        let wanted = voice::VoiceConfig {
-            phrases,
-            mic: self.settings.mic_device.clone(),
-            tuning: match (self.settings.voice_sensitivity, &self.settings.voice_tuning) {
-                (0, Some(t)) => archy_voice::Tuning { score: t.score, paths: t.paths, threshold: t.threshold },
-                (s, _) => archy_voice::Tuning::preset(s),
-            },
-            // Learned takes belong to the phrase that was calibrated, if it's still there.
-            learned: match &self.settings.voice_tuning {
-                Some(t) => self
-                    .settings
-                    .voice_phrases
-                    .iter()
-                    .position(|p| p.text == t.phrase)
-                    .map(|i| t.learned.iter().map(|l| (i, l.clone())).collect())
-                    .unwrap_or_default(),
-                None => Vec::new(),
-            },
+        let wanted = match voice::config(&self.settings) {
+            Some(c) if self.settings.voice_enabled && !self.paused => c,
+            _ => {
+                self.voice = None;
+                self.voice_config = None;
+                return;
+            }
         };
         if self.voice.is_some() && self.voice_config.as_ref() == Some(&wanted) {
             return;
@@ -499,7 +476,7 @@ impl App {
         let Some(fg) = watch::foreground() else {
             return;
         };
-        if !fg.is_game(&self.settings.games, self.settings.record_fullscreen_apps) {
+        if !fg.is_game(&self.settings.games, self.settings.record_fullscreen_apps, &self.settings.never_record) {
             return;
         }
         if self.failed_window == Some(fg.hwnd.0 as isize) {
@@ -518,13 +495,43 @@ impl App {
             Target::Window(fg.hwnd)
         };
         let game = watch::game_name(&fg.exe);
-        let mut started = Recorder::start(recorder_config(&self.settings, target, fg.pid, &self.volumes));
-        // Some games can't be captured as a window (exclusive fullscreen, protected
-        // windows): record the screen the game is on instead.
-        if let (Err(e), Target::Window(_)) = (&started, target) {
-            log(&format!("window capture of {game} failed ({}); recording its screen instead", e.message()));
-            let monitor = unsafe { MonitorFromWindow(fg.hwnd, MONITOR_DEFAULTTONEAREST) };
-            started = Recorder::start(recorder_config(&self.settings, Target::Monitor(monitor), fg.pid, &self.volumes));
+        // Fallbacks, in order: some hardware encoders (or their drivers) refuse
+        // 120/144 fps, so try 60 on the same window; some games can't be captured
+        // as a window at all (exclusive fullscreen, protected windows), so then
+        // record the screen the game is on.
+        let mut at60 = self.settings.clone();
+        at60.fps = 60;
+        let screen = Target::Monitor(unsafe { MonitorFromWindow(fg.hwnd, MONITOR_DEFAULTTONEAREST) });
+        let mut attempts = vec![(&self.settings, target)];
+        if self.settings.fps > 60 {
+            attempts.push((&at60, target));
+        }
+        if let Target::Window(_) = target {
+            attempts.push((&self.settings, screen));
+            if self.settings.fps > 60 {
+                attempts.push((&at60, screen));
+            }
+        }
+        let mut started = Err(windows::core::Error::empty());
+        for (i, (s, t)) in attempts.into_iter().enumerate() {
+            if let Err(e) = &started {
+                if i > 0 {
+                    let how = if matches!(t, Target::Monitor(_)) { "its screen" } else { "the window" };
+                    log(&format!("recording {game} failed ({}); trying {how} at {} fps", e.message(), s.fps));
+                }
+            }
+            started = Recorder::start(recorder_config(s, t, fg.pid, &self.volumes));
+            if started.is_ok() {
+                if s.fps < self.settings.fps {
+                    notify(
+                        self.window.0 as isize,
+                        "Recording at 60 fps",
+                        &format!("Your graphics chip couldn't record {} fps, so Archy uses 60 for this game.", self.settings.fps),
+                        true,
+                    );
+                }
+                break;
+            }
         }
         match started {
             Ok(rec) => {
@@ -809,6 +816,8 @@ fn recording_changed(a: &Settings, b: &Settings) -> bool {
         || a.capture_monitor != b.capture_monitor
         || a.encoder_gpu != b.encoder_gpu
         || a.buffer_seconds() != b.buffer_seconds()
+        // So excluding the app being recorded stops it right away.
+        || a.never_record != b.never_record
 }
 
 /// Opens the Archy window, or brings it to the front if it is already open.
@@ -880,6 +889,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--voice-calibrate") {
         voice::calibrate_main(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--voice-test") {
+        voice::test_main();
         return;
     }
     if args.first().map(String::as_str) == Some("--voice-host") {

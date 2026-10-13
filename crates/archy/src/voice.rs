@@ -35,6 +35,40 @@ pub struct VoiceConfig {
     pub learned: Vec<(usize, String)>,
 }
 
+/// What to listen for, from the settings (`None` when there are no phrases).
+/// Shared by the tray's listener and the voice test, so the test hears exactly
+/// what the tray would.
+pub fn config(s: &archy_core::settings::Settings) -> Option<VoiceConfig> {
+    let phrases: Vec<String> = s
+        .voice_phrases
+        .iter()
+        .map(|p| p.text.clone())
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    if phrases.is_empty() {
+        return None;
+    }
+    let base = match (s.voice_sensitivity, &s.voice_tuning) {
+        (0, Some(t)) => archy_voice::Tuning { score: t.score, paths: t.paths, threshold: t.threshold },
+        (v, _) => archy_voice::Tuning::preset(v),
+    };
+    Some(VoiceConfig {
+        phrases,
+        mic: s.mic_device.clone(),
+        tuning: base.adjusted(s.voice_fine_tune),
+        // Learned takes belong to the phrase that was calibrated, if it's still there.
+        learned: match &s.voice_tuning {
+            Some(t) => s
+                .voice_phrases
+                .iter()
+                .position(|p| p.text == t.phrase)
+                .map(|i| t.learned.iter().map(|l| (i, l.clone())).collect())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        },
+    })
+}
+
 impl VoiceListener {
     /// Starts the helper; when phrase `i` is heard it posts `message` with
     /// WPARAM = i to `window` (or WPARAM = VOICE_ERROR on failure).
@@ -179,32 +213,103 @@ pub fn explain_code(code: isize) -> String {
     }
 }
 
+// ---- Test (`archy.exe --voice-test`) ----
+//
+// Listens with the saved settings and reports every phrase it hears, so the user
+// can read a practice paragraph and see what Archy catches and what sets it off
+// by accident. Runs until the Archy window ends it. JSON lines: {"step":"ready"},
+// {"step":"heard","phrase":i}, {"step":"retuned"} (settings changed, e.g. the
+// sensitivity slider; applies within a second), {"step":"error","message":...}.
+// The calibration marker is kept fresh the whole time so the tray doesn't save
+// a clip for every practice phrase.
+
+pub fn test_main() {
+    let marker = archy_core::settings::calibration_marker();
+    if let Err(e) = voice_test(&marker) {
+        emit(serde_json::json!({ "step": "error", "message": e }));
+    }
+    let _ = std::fs::remove_file(&marker);
+}
+
+fn voice_test(marker: &std::path::Path) -> Result<(), String> {
+    use archy_core::settings::Settings;
+    use serde_json::json;
+    let dir = archy_voice::find_dir().ok_or("the voice files are missing (reinstall Archy to get them)")?;
+    normal_priority();
+    let spot = |c: &VoiceConfig| archy_voice::Spotter::new(&dir, &c.phrases, &c.learned, c.tuning);
+    let mut current = config(&Settings::load().0).ok_or("add a phrase first")?;
+    let mut spotter = spot(&current)?;
+    let mic = (!current.mic.is_empty()).then(|| current.mic.clone());
+    let _ = std::fs::write(marker, b"");
+    let mut modified = Settings::modified();
+    let mut checked = std::time::Instant::now();
+    // Normally the window ends this process; if the window itself is gone (its
+    // end of the output pipe closed), stop, or the marker would keep voice
+    // clipping silenced.
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let mut samples: Vec<f32> = Vec::new();
+    emit(json!({ "step": "ready" }));
+    archy_audio::listen_microphone(mic.as_deref(), archy_voice::SAMPLE_RATE, &stop, &mut |pcm| {
+        if checked.elapsed().as_secs() >= 1 {
+            checked = std::time::Instant::now();
+            if !emit(json!({ "step": "listening" })) {
+                flag.store(true, Ordering::Release);
+                return;
+            }
+            let _ = std::fs::write(marker, b"");
+            let now = Settings::modified();
+            if now != modified {
+                modified = now;
+                // Only a change to what's listened for counts (saving a test
+                // result also touches the file).
+                if let Some(c) = config(&Settings::load().0).filter(|c| *c != current) {
+                    if let Ok(s) = spot(&c) {
+                        spotter = s;
+                        current = c;
+                        emit(json!({ "step": "retuned" }));
+                    }
+                }
+            }
+        }
+        samples.clear();
+        samples.extend(pcm.iter().map(|&s| s as f32 / 32768.0));
+        if let Some(i) = spotter.accept(&samples) {
+            emit(json!({ "step": "heard", "phrase": i }));
+        }
+    })
+    .map_err(|e| format!("couldn't open your microphone: {}", e.message()))
+}
+
 // ---- Calibration (`archy.exe --voice-calibrate <mic|-> <phrase>`) ----
 //
-// Records the user saying their phrase after each prompt, then talking
-// normally, and finds the detector settings that catch them best without
-// firing on normal talk. Progress goes to stdout as JSON lines for the Archy
-// window: {"step":"ready"}, {"step":"say","n":1,"of":5}, {"step":"talk","secs":15},
+// The user paces it: the Archy window sends commands on stdin and this process
+// records exactly what they say, so nobody races a timer.
+//   "take"  start recording the phrase      "talk" start recording a look-alike sentence
+//   "stop"  end the current recording       "undo" drop the last take
+//   "analyze"  find the best setting (then the process ends)
+// Output, as JSON lines: {"step":"ready"}, {"step":"level","v":0..1} (~10 a second,
+// for the mic meter), {"step":"take","n":k,"heard":bool} (each take checked at
+// once with the Balanced setting), {"step":"talked","secs":s}, {"step":"undone","n":k},
 // {"step":"analyzing"}, then {"step":"done",...} or {"step":"error","message":...}.
 
-const PROMPTS: usize = 5;
-const FIRST_PROMPT: f32 = 2.0;
-const PROMPT_EVERY: f32 = 4.0;
-const TALK_SECS: f32 = 15.0;
+use archy_voice::{CALIBRATION_LEAD as LEAD, CALIBRATION_TAIL as TAIL};
+/// A take longer than this is cut (a held button, not a phrase).
+const MAX_TAKE: f32 = 6.0;
 
-fn emit(v: serde_json::Value) {
+/// Writes one progress line; false once nobody is reading any more.
+fn emit(v: serde_json::Value) -> bool {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "{v}");
-    let _ = out.flush();
+    writeln!(out, "{v}").and_then(|_| out.flush()).is_ok()
 }
 
 pub fn calibrate_main(args: &[String]) {
     let marker = archy_core::settings::calibration_marker();
     let _ = std::fs::write(&marker, b"");
-    let result = calibrate(args);
+    let result = calibrate(args, &marker);
     let _ = std::fs::remove_file(&marker);
-    match result {
+    let _ = match result {
         Ok(c) => emit(serde_json::json!({
             "step": "done",
             "hits": c.hits, "prompts": c.prompts,
@@ -212,10 +317,15 @@ pub fn calibrate_main(args: &[String]) {
             "learned": c.learned,
         })),
         Err(e) => emit(serde_json::json!({ "step": "error", "message": e })),
-    }
+    };
 }
 
-fn calibrate(args: &[String]) -> Result<archy_voice::Calibration, String> {
+enum Recording {
+    Take,
+    Talk,
+}
+
+fn calibrate(args: &[String], marker: &std::path::Path) -> Result<archy_voice::Calibration, String> {
     use serde_json::json;
     let (Some(mic), Some(phrase)) = (args.first(), args.get(1)) else {
         return Err("bad arguments".into());
@@ -223,6 +333,7 @@ fn calibrate(args: &[String]) -> Result<archy_voice::Calibration, String> {
     let mic = (mic != "-").then(|| mic.clone());
     let dir = archy_voice::find_dir().ok_or("the voice files are missing (reinstall Archy to get them)")?;
     normal_priority();
+    let rate = archy_voice::SAMPLE_RATE as f32;
 
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel::<Vec<i16>>();
@@ -233,54 +344,89 @@ fn calibrate(args: &[String]) -> Result<archy_voice::Calibration, String> {
         })
         .map_err(|e| e.message())
     });
-    // The clock starts with the first audio, so prompts line up with the recording.
-    let first = rx
-        .recv_timeout(std::time::Duration::from_secs(3))
+    // Commands from the window, one per line.
+    let (cmd_tx, commands) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if cmd_tx.send(line.trim().to_string()).is_err() {
+                break;
+            }
+        }
+        let _ = cmd_tx.send("quit".into()); // the window went away
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(3))
         .map_err(|_| "couldn't hear anything from your microphone")?;
-    let start = std::time::Instant::now();
-    let mut audio: Vec<i16> = first;
     emit(json!({ "step": "ready" }));
-    let total = FIRST_PROMPT + PROMPT_EVERY * PROMPTS as f32 + TALK_SECS;
-    let mut prompts = Vec::new();
-    let mut next = 0;
-    let mut talk_sent = false;
-    let talk_start = FIRST_PROMPT + PROMPT_EVERY * PROMPTS as f32;
-    loop {
-        let now = start.elapsed().as_secs_f32();
-        if now >= total {
-            break;
-        }
-        if next < PROMPTS && now >= FIRST_PROMPT + PROMPT_EVERY * next as f32 {
-            // Prompt time on the recording's own clock (samples received so far).
-            prompts.push(audio.len() as f32 / archy_voice::SAMPLE_RATE as f32);
-            next += 1;
-            emit(json!({ "step": "say", "n": next, "of": PROMPTS }));
-        }
-        if !talk_sent && now >= talk_start {
-            talk_sent = true;
-            emit(json!({ "step": "talk", "secs": TALK_SECS }));
-        }
-        // Wait for the next buffer (or 20 ms), then take whatever else is queued.
-        // (Draining with a timeout never ended: a mic delivers every ~10 ms.)
+
+    let mut takes: Vec<Vec<f32>> = Vec::new();
+    let mut talk: Vec<f32> = Vec::new();
+    let mut current: Option<(Recording, Vec<f32>)> = None;
+    let mut level_at = std::time::Instant::now();
+    let mut peak = 0f32;
+    let to_f32 = |pcm: &[i16]| pcm.iter().map(|&s| s as f32 / 32768.0).collect::<Vec<f32>>();
+    let result = loop {
         if let Ok(pcm) = rx.recv_timeout(std::time::Duration::from_millis(20)) {
-            audio.extend(pcm);
+            let samples = to_f32(&pcm);
+            peak = samples.iter().fold(peak, |m, s| m.max(s.abs()));
+            if let Some((_, buf)) = current.as_mut() {
+                if (buf.len() as f32) < MAX_TAKE * rate {
+                    buf.extend(samples);
+                }
+            }
         }
-        while let Ok(pcm) = rx.try_recv() {
-            audio.extend(pcm);
+        if level_at.elapsed().as_millis() >= 100 {
+            level_at = std::time::Instant::now();
+            // Also keeps the marker fresh, so the tray ignores practice phrases.
+            let _ = std::fs::write(marker, b"");
+            emit(json!({ "step": "level", "v": peak.min(1.0) }));
+            peak = 0.0;
         }
-    }
+        let Ok(cmd) = commands.try_recv() else { continue };
+        match cmd.as_str() {
+            "take" => current = Some((Recording::Take, Vec::new())),
+            "talk" => current = Some((Recording::Talk, Vec::new())),
+            "stop" => match current.take() {
+                Some((Recording::Take, buf)) => {
+                    let heard = archy_voice::heard_in(&dir, phrase, &padded(&buf, rate), archy_voice::Tuning::preset(50))
+                        .unwrap_or(false);
+                    takes.push(buf);
+                    emit(json!({ "step": "take", "n": takes.len(), "heard": heard }));
+                }
+                Some((Recording::Talk, buf)) => {
+                    talk.extend(std::iter::repeat_n(0.0, (0.3 * rate) as usize));
+                    talk.extend(buf);
+                    emit(json!({ "step": "talked", "secs": talk.len() as f32 / rate }));
+                }
+                None => {}
+            },
+            "undo" => {
+                takes.pop();
+                emit(json!({ "step": "undone", "n": takes.len() }));
+            }
+            "analyze" => break Ok(()),
+            "quit" => break Err("stopped".to_string()),
+            _ => {}
+        }
+    };
     stop.store(true, Ordering::Release);
     recorder.join().map_err(|_| "the microphone stopped")??;
-    while let Ok(pcm) = rx.try_recv() {
-        audio.extend(pcm);
+    result?;
+    if takes.is_empty() {
+        return Err("record the phrase at least once first".into());
     }
-    emit(json!({ "step": "analyzing" }));
-    let audio: Vec<f32> = audio.iter().map(|&s| s as f32 / 32768.0).collect();
-    let peak = audio.iter().fold(0f32, |m, s| m.max(s.abs()));
-    if peak < 0.004 {
+    let loudest = takes.iter().flatten().fold(0f32, |m, s| m.max(s.abs()));
+    if loudest < 0.004 {
         return Err("your microphone was almost silent. Check the microphone picked above, or turn up its input level.".into());
     }
-    let talk_from = prompts.last().copied().unwrap_or(0.0) + PROMPT_EVERY;
-    let talk = (talk_from, audio.len() as f32 / archy_voice::SAMPLE_RATE as f32);
-    archy_voice::calibrate(&dir, phrase, &audio, &prompts, PROMPT_EVERY, talk)
+    emit(json!({ "step": "analyzing" }));
+    archy_voice::calibrate_takes(&dir, phrase, &takes, &talk)
+}
+
+/// A take with silence around it, so the detector hears it start and finish.
+fn padded(take: &[f32], rate: f32) -> Vec<f32> {
+    let mut v = vec![0.0; (LEAD * rate) as usize];
+    v.extend_from_slice(take);
+    v.extend(std::iter::repeat_n(0.0, (TAIL * rate) as usize));
+    v
 }

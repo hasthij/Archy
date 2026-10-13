@@ -6,6 +6,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod editor;
+
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -13,7 +15,7 @@ use archy_core::presets::PRESETS;
 use archy_core::settings::Settings;
 use archy_core::status::Status;
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use windows::core::{w, PCWSTR};
 use windows::core::BOOL;
 use windows::Win32::Foundation::LPARAM;
@@ -27,7 +29,7 @@ use windows::Win32::System::Threading::{
     CreateMutexW, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Shell::{
-    FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, SHFileOperationW,
+    FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, IShellItem, SHCreateItemFromParsingName, SHFileOperationW,
     FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FO_DELETE,
     SHFILEOPSTRUCTW, SIGDN_FILESYSPATH,
 };
@@ -390,12 +392,126 @@ async fn pick_folder(window: tauri::WebviewWindow) -> Option<String> {
 async fn discord_copy(path: String) -> Result<String, String> {
     let src = clip_path(&path)?;
     let dst = archy_core::discord::copy_path(&src);
-    let info = std::thread::spawn(move || archy_core::discord::make_copy(&src, &dst, 10_000_000))
-        .join()
+    let info = tauri::async_runtime::spawn_blocking(move || archy_core::discord::make_copy(&src, &dst, 10_000_000))
+        .await
         .map_err(|_| "Discord copy crashed".to_string())?
         .map_err(|e| e.message())?;
     archy_core::clipboard::copy_file(&info.path);
     Ok(info.path.to_string_lossy().into_owned())
+}
+
+/// Length, size and audio track names of a clip, for the editor.
+#[tauri::command]
+async fn clip_info(path: String) -> Result<editor::ClipInfo, String> {
+    let src = clip_path(&path)?;
+    tauri::async_runtime::spawn_blocking(move || editor::info(&src)).await.map_err(|_| "couldn't read the clip".to_string())?
+}
+
+/// Each audio track as its own file, for the editor's live volume preview.
+#[tauri::command]
+async fn editor_tracks(app: AppHandle, path: String, count: usize) -> Result<Vec<String>, String> {
+    let src = clip_path(&path)?;
+    let tracks = tauri::async_runtime::spawn_blocking(move || editor::preview_tracks(&src, count))
+        .await
+        .map_err(|_| "couldn't prepare the audio tracks".to_string())??;
+    if let Some(dir) = tracks.first().and_then(|t| Path::new(t).parent()) {
+        allow_folder(&app, dir);
+    }
+    Ok(tracks)
+}
+
+/// Whether the editor's video tools (FFmpeg) are installed.
+#[tauri::command]
+fn editor_ready() -> bool {
+    editor::tools_dir().is_some()
+}
+
+/// Where the user chose to save the next export ("Save as" dialog). Exports are
+/// only ever written there or to temp, never to a path the page makes up.
+static EXPORT_TARGET: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Asks where to save an export ("Save as", starting in the clips folder with a
+/// suggested name). `None` if the user cancels.
+#[tauri::command]
+async fn choose_export_path(window: tauri::WebviewWindow, path: String, format: String) -> Option<String> {
+    let src = clip_path(&path).ok()?;
+    let owner = window.hwnd().ok().map(|h| h.0 as isize);
+    let gif = format == "gif";
+    let stem = src.file_stem()?.to_string_lossy().into_owned();
+    let folder = src.parent()?.to_path_buf();
+    let chosen = tauri::async_runtime::spawn_blocking(move || unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dialog: IFileSaveDialog = CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let wide = |t: &str| t.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let (label, pattern, ext) = if gif { ("GIF", "*.gif", "gif") } else { ("MP4 video", "*.mp4", "mp4") };
+        let (label, pattern, ext) = (wide(label), wide(pattern), wide(ext));
+        let types = [windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC {
+            pszName: PCWSTR(label.as_ptr()),
+            pszSpec: PCWSTR(pattern.as_ptr()),
+        }];
+        let _ = dialog.SetFileTypes(&types);
+        let _ = dialog.SetDefaultExtension(PCWSTR(ext.as_ptr()));
+        let name = wide(&format!("{stem} ({}).{}", if gif { "GIF" } else { "edit" }, if gif { "gif" } else { "mp4" }));
+        let _ = dialog.SetFileName(PCWSTR(name.as_ptr()));
+        let _ = dialog.SetTitle(w!("Save the export as"));
+        let start = wide(&folder.to_string_lossy());
+        if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(start.as_ptr()), None) {
+            let _ = dialog.SetFolder(&item);
+        }
+        dialog.Show(owner.map(|h| HWND(h as *mut _))).ok()?;
+        let item = dialog.GetResult().ok()?;
+        let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok();
+        CoTaskMemFree(Some(name.0 as *const _));
+        path
+    })
+    .await
+    .ok()
+    .flatten()?;
+    if let Ok(mut t) = EXPORT_TARGET.lock() {
+        *t = Some(PathBuf::from(&chosen));
+    }
+    Some(chosen)
+}
+
+/// Exports an edit as MP4 or GIF: to the path picked with `choose_export_path`,
+/// or copied to the clipboard. Returns the new file's path.
+#[tauri::command]
+async fn export_clip(app: AppHandle, mut request: editor::ExportRequest) -> Result<String, String> {
+    let src = clip_path(&request.path)?;
+    if !request.to_clipboard {
+        let picked = EXPORT_TARGET.lock().ok().and_then(|mut t| t.take());
+        match (&request.save_to, picked) {
+            (Some(want), Some(picked)) if Path::new(want) == picked => {}
+            _ => return Err("pick where to save it first".into()),
+        }
+    } else {
+        request.save_to = None;
+    }
+    let to_clipboard = request.to_clipboard;
+    let out = tauri::async_runtime::spawn_blocking(move || editor::export(&src, &request, &|p| { let _ = app.emit("export-progress", p); }))
+        .await
+        .map_err(|_| "the export crashed".to_string())??;
+    if to_clipboard && !archy_core::clipboard::copy_file(&out) {
+        return Err("exported, but the clipboard couldn't be used".into());
+    }
+    if !to_clipboard {
+        // Show where it went.
+        let _ = std::process::Command::new("explorer").arg(format!("/select,{}", out.display())).spawn();
+    }
+    Ok(out.to_string_lossy().into_owned())
+}
+
+/// The version of this Archy (shown in the sidebar and General).
+#[tauri::command]
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Stops the running export; nothing is left behind.
+#[tauri::command]
+fn cancel_export() {
+    editor::CANCEL.store(true, std::sync::atomic::Ordering::Release);
 }
 
 /// Programs with a visible window right now, for "add from running apps".
@@ -446,8 +562,8 @@ fn running_apps() -> Vec<AppView> {
 /// Microphones (`input`) or output devices for the device pickers.
 #[tauri::command]
 async fn audio_devices(input: bool) -> Vec<DeviceView> {
-    std::thread::spawn(move || archy_audio::list_devices(input))
-        .join()
+    tauri::async_runtime::spawn_blocking(move || archy_audio::list_devices(input))
+        .await
         .unwrap_or_default()
         .into_iter()
         .map(|d| DeviceView {
@@ -492,19 +608,52 @@ async fn calibrate_voice(
     mic: String,
     progress: tauri::ipc::Channel<serde_json::Value>,
 ) -> Result<(), String> {
+    let mic = if mic.is_empty() { "-".to_string() } else { mic };
+    voice_child(vec!["--voice-calibrate".into(), mic, phrase], progress, "the calibration").await
+}
+
+/// Where commands for the running calibration go ("take", "stop", "analyze"...).
+static VOICE_INPUT: std::sync::Mutex<Option<std::process::ChildStdin>> = std::sync::Mutex::new(None);
+
+/// Sends one command to the running calibration (see the tray's voice.rs).
+#[tauri::command]
+fn calibration_input(command: String) -> Result<(), String> {
+    use std::io::Write;
+    let mut input = VOICE_INPUT.lock().map_err(|e| e.to_string())?;
+    let pipe = input.as_mut().ok_or("the calibration isn't running")?;
+    writeln!(pipe, "{}", command.trim()).and_then(|_| pipe.flush()).map_err(|_| "the calibration stopped".to_string())
+}
+
+/// Runs the voice test (`archy.exe --voice-test`): every phrase the tray's
+/// settings would hear is passed to the page until `stop_calibration` ends it.
+#[tauri::command]
+async fn test_voice(progress: tauri::ipc::Channel<serde_json::Value>) -> Result<(), String> {
+    voice_child(vec!["--voice-test".into()], progress, "the voice test").await
+}
+
+/// Runs archy.exe with `args` in the CALIBRATION slot (so Stop can end it) and
+/// forwards its JSON lines to the page.
+async fn voice_child(
+    args: Vec<String>,
+    progress: tauri::ipc::Channel<serde_json::Value>,
+    what: &'static str,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::BufRead;
         use std::os::windows::process::CommandExt;
         let mut exe = std::env::current_exe().map_err(|e| e.to_string())?;
         exe.set_file_name("archy.exe");
-        let mic = if mic.is_empty() { "-".to_string() } else { mic };
         let mut child = std::process::Command::new(&exe)
-            .args(["--voice-calibrate", &mic, &phrase])
+            .args(&args)
             .stdout(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::piped())
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .spawn()
             .map_err(|e| format!("{}: {e}", exe.display()))?;
-        let stdout = child.stdout.take().ok_or("no output from the calibration")?;
+        let stdout = child.stdout.take().ok_or(format!("no output from {what}"))?;
+        if let Ok(mut input) = VOICE_INPUT.lock() {
+            *input = child.stdin.take();
+        }
         if let Ok(mut c) = CALIBRATION.lock() {
             if let Some(mut old) = c.replace(child) {
                 let _ = old.kill();
@@ -522,7 +671,7 @@ async fn calibrate_voice(
             None => true,
         };
         if !finished {
-            return Err(if stopped { "stopped".into() } else { "the calibration stopped unexpectedly (see archy.log)".into() });
+            return Err(if stopped { "stopped".into() } else { format!("{what} stopped unexpectedly (see archy.log)") });
         }
         Ok(())
     })
@@ -543,6 +692,16 @@ fn main() {
         }
     }
     tauri::Builder::default()
+        // Closing Archy mid-export would throw the export away: ask the page to
+        // explain instead (it offers Cancel export).
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if editor::BUSY.load(std::sync::atomic::Ordering::Acquire) {
+                    api.prevent_close();
+                    let _ = window.emit("export-busy", ());
+                }
+            }
+        })
         .setup(|app| {
             allow_folder(app.handle(), &Settings::load().0.save_folder);
             // Opening Archy from the Start menu also makes sure the recorder is running.
@@ -563,10 +722,19 @@ fn main() {
             open_clips_folder,
             pick_folder,
             discord_copy,
+            clip_info,
+            editor_tracks,
+            editor_ready,
+            export_clip,
+            choose_export_path,
+            cancel_export,
+            app_version,
             audio_devices,
             running_apps,
             start_recorder,
             calibrate_voice,
+            test_voice,
+            calibration_input,
             stop_calibration,
             read_log,
             open_log_folder,

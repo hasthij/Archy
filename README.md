@@ -28,7 +28,7 @@
 1. Download **Archy-Setup.exe** from the [latest release](https://github.com/hasthij/Archy/releases/latest).
 2. Run it. It installs just for you, so it doesn't need admin rights.
    - **Windows SmartScreen may warn you** because the installer isn't code-signed yet. Click **More info**, then **Run anyway**.
-3. Setup downloads the voice engine, about 24 MB. It can look paused for up to 30 seconds while this happens.
+3. Setup downloads the voice engine (about 24 MB) and the clip editor's video tools (FFmpeg, about 100 MB). It can look paused for a minute or two while this happens.
 4. If Windows is missing something Archy needs, Setup tells you and opens the right page. You make the change yourself; **Archy never changes Windows settings on its own.** It checks for:
    - microphone access for desktop apps,
    - Microsoft Edge WebView2, which the settings window uses (built into Windows 11),
@@ -88,7 +88,7 @@ You can change every hotkey, every phrase and the clip lengths in Archy.
 Each setting in Archy explains what it's best for. The main ones:
 
 - **Quality:** Discord (10 MB), 360p up to 1440p. **720p** is the recommended balance.
-- **Frame rate:** 24 to 90 fps. **60** is recommended; lower is less work for weak PCs.
+- **Frame rate:** 24 to 144 fps. **60** is recommended; lower is less work for weak PCs. 120 and 144 need a monitor that fast; if your graphics chip can't record that fast, Archy uses 60.
 - **Capture:** *Window* (only the game, popups never appear) or *Screen* (whole monitor, for games that can't be captured as a window; pick which screen, like a screenshare).
 - **Audio tracks:** turn each track on or off, pick the speakers or headphones to record from, and set the audio bitrate.
 - **Efficiency mode:** keeps Archy on efficiency cores at low priority, so your game keeps the fast cores. On by default.
@@ -125,7 +125,7 @@ Archy works entirely on your PC.
 - There's no account, no server, no telemetry and no analytics.
 - Voice clipping uses a small on-device speech model that listens only for your phrases. Audio is never stored or sent.
 - Archy goes online in only two cases:
-  - **During install**, to download the voice engine from the [sherpa-onnx GitHub releases](https://github.com/k2-fsa/sherpa-onnx/releases). Each file is checked against a fixed SHA-256 fingerprint before use.
+  - **During install**, to download the voice engine from the [sherpa-onnx GitHub releases](https://github.com/k2-fsa/sherpa-onnx/releases) and the clip editor's FFmpeg from [Gyan's FFmpeg builds on GitHub](https://github.com/GyanD/codexffmpeg/releases). Each file is checked against a fixed SHA-256 fingerprint before use.
   - **When Archy starts**, to ask [Archy's GitHub releases](https://github.com/hasthij/Archy/releases) whether a newer version exists. Nothing about you or your PC is sent beyond a normal web request. An update is only downloaded from github.com, is checked against GitHub's SHA-256 fingerprint when one is listed, and always asks you before installing. Turn this off in **General → Check for updates** and Archy never goes online after install.
 
 ## Building from source
@@ -154,6 +154,7 @@ The first command builds the tray recorder and the settings window. The second p
 
 ## Credits
 
+- The clip editor uses [FFmpeg](https://ffmpeg.org/) (GPL-3.0 build by [Gyan Doshi](https://www.gyan.dev/ffmpeg/builds/)), run as a separate program.
 - Voice clipping uses [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) and its gigaspeech keyword-spotting model (Apache-2.0), running on [ONNX Runtime](https://onnxruntime.ai/) (MIT).
 - The window is built with [Tauri](https://tauri.app/).
 

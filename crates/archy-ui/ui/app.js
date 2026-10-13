@@ -139,6 +139,8 @@ function clipCard(c) {
           try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); }
           catch (e) { toast(String(e)); }
         } }),
+        el("button", { class: "btn", text: "Edit", onclick: () => openEditor(c) }),
+        el("button", { class: "btn", text: "GIF", title: "Make a GIF from this clip", onclick: () => openEditor(c, { format: "gif" }) }),
         el("button", { class: "btn", text: "Folder", onclick: () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e))) }),
         del)));
 }
@@ -161,7 +163,9 @@ function discordButton(c) {
   return b;
 }
 
+let playing = null;
 function play(c) {
+  playing = c;
   $("#player-title").textContent = c.name;
   const v = $("#player-video");
   v.src = fileSrc(c.path);
@@ -176,6 +180,7 @@ function closePlayer() {
   $("#player").hidden = true;
 }
 $("#player-close").addEventListener("click", closePlayer);
+$("#player-edit").addEventListener("click", () => { if (playing) openEditor(playing); });
 $("#player").addEventListener("click", (e) => { if (e.target.id === "player") closePlayer(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#player").hidden) closePlayer(); });
 
@@ -261,14 +266,16 @@ function qualityDef() {
 const RECORDING = () => [
   qualityDef(),
   { key: "fps", name: "Frame rate", rec: 60,
-    what: "Frames per second in your clips (24–90). Archy only takes this many even if your game runs at 240, so lower saves real work.",
+    what: "Frames per second in your clips (24–144). Archy only takes this many even if your game runs at 240, so lower saves real work. A clip can't be smoother than your monitor: 120 and 144 need a monitor that runs that fast.",
     options: [
       { value: 24, label: "24", best: "A film-like look with the lowest load. Fast games look choppy.", f: 0, q: 1, z: 0 },
       { value: 30, label: "30", best: "Weak laptops or slow-paced games. Half the work of 60.", f: 0, q: 1, z: 0 },
       { value: 45, label: "45", best: "A middle ground for integrated graphics that struggle with 60.", f: 1, q: 2, z: 1 },
       { value: 60, label: "60", best: "Most people. Smooth motion; what YouTube and Discord play best.", f: 1, q: 2, z: 2 },
       { value: 75, label: "75", best: "High-refresh players who want slightly smoother clips.", f: 2, q: 3, z: 2 },
-      { value: 90, label: "90", best: "Maximum smoothness for fast shooters. The most work and biggest files.", f: 2, q: 3, z: 3 },
+      { value: 90, label: "90", best: "Very smooth clips for fast shooters, on a high-refresh monitor.", f: 2, q: 3, z: 3 },
+      { value: 120, label: "120", best: "120 Hz monitors and slow-motion edits. Same file size per second as 60, so each frame is a little softer; pick 1080p or higher to keep it sharp.", f: 3, q: 3, z: 3 },
+      { value: 144, label: "144", best: "144 Hz monitors: clips look exactly as smooth as you played. The most work for your graphics chip; skip it on laptops that struggle at 60.", f: 3, q: 3, z: 3 },
     ] },
   { key: "codec", name: "Video format", rec: "h264",
     what: "How clips are compressed. All formats cost the same FPS (the GPU's video chip does the work); newer ones look better at the same size but play in fewer places.",
@@ -363,43 +370,47 @@ function screenPicker() {
       el("p", { class: "sub", text: "If the screen is unplugged, Archy records the screen the game is on instead." })));
 }
 
-function renderGames() {
-  const box = $("#games-settings");
-  const input = el("input", { class: "input", placeholder: "Game file name, e.g. VALORANT-Win64-Shipping.exe", "aria-label": "Add a game" });
-  const add = () => {
-    const name = input.value.trim();
-    if (!name) return;
-    if (!settings.games.some((g) => g.toLowerCase() === name.toLowerCase())) save({ games: [...settings.games, name] }, `Added ${name}`);
-    input.value = "";
-  };
+/// A list of program file names with "pick from open apps" and "type a name".
+function appListCard(key, title, about, placeholder) {
+  const list = settings[key];
+  const has = (exe) => list.some((g) => g.toLowerCase() === exe.toLowerCase());
+  const addName = (name) => { if (name && !has(name)) save({ [key]: [...list, name] }, `Added ${name}`); };
+  const input = el("input", { class: "input", placeholder, "aria-label": `Add to ${title}` });
+  const add = () => { addName(input.value.trim()); input.value = ""; };
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
-  const running = el("select", { class: "input", "aria-label": "Running apps" }, el("option", { value: "", text: "Pick from apps that are open now…" }));
+  const running = el("select", { class: "input", "aria-label": `Running apps for ${title}` }, el("option", { value: "", text: "Pick from apps that are open now…" }));
   const loadRunning = async () => {
     const apps = await invoke("running_apps").catch(() => []);
     running.replaceChildren(el("option", { value: "", text: apps.length ? "Pick from apps that are open now…" : "No apps found" }),
       ...apps.map((a) => el("option", { value: a.exe, text: `${a.title}  (${a.exe})` })));
   };
   running.addEventListener("focus", loadRunning);
-  running.addEventListener("change", () => {
-    const exe = running.value;
-    if (exe && !settings.games.some((g) => g.toLowerCase() === exe.toLowerCase())) save({ games: [...settings.games, exe] }, `Added ${exe}`);
-  });
+  running.addEventListener("change", () => addName(running.value));
   loadRunning();
-  box.replaceChildren(
-    el("div", { class: "card" },
-      el("h3", { text: "Always record these" }),
-      el("p", { class: "sub", text: "The program file of each game. Archy starts recording when one is in front." }),
-      el("div", { class: "chips", style: "margin:14px 0" }, settings.games.map((g) =>
-        el("span", { class: "tag" }, g, el("button", { "aria-label": `Remove ${g}`, text: "×", onclick: () => save({ games: settings.games.filter((x) => x !== g) }, `Removed ${g}`) })))),
-      el("div", { class: "field" }, running, el("button", { class: "btn", text: "Refresh", onclick: loadRunning })),
-      el("p", { class: "sub", style: "margin:12px 0 6px", text: "Or type the program's file name:" }),
-      el("div", { class: "field" }, input, el("button", { class: "btn", text: "Add", onclick: add }))),
+  return el("div", { class: "card" },
+    el("h3", { text: title }),
+    el("p", { class: "sub", text: about }),
+    el("div", { class: "chips", style: "margin:14px 0" }, list.length ? list.map((g) =>
+      el("span", { class: "tag" }, g, el("button", { "aria-label": `Remove ${g}`, text: "×", onclick: () => save({ [key]: list.filter((x) => x !== g) }, `Removed ${g}`) })))
+      : el("span", { class: "sub", text: "Nothing here yet." })),
+    el("div", { class: "field" }, running, el("button", { class: "btn", text: "Refresh", onclick: loadRunning })),
+    el("p", { class: "sub", style: "margin:12px 0 6px", text: "Or type the program's file name:" }),
+    el("div", { class: "field" }, input, el("button", { class: "btn", text: "Add", onclick: add })));
+}
+
+function renderGames() {
+  $("#games-settings").replaceChildren(
+    appListCard("games", "Always record these", "The program file of each game. Archy starts recording when one is in front.",
+      "Game file name, e.g. VALORANT-Win64-Shipping.exe"),
     settingCard({ key: "record_fullscreen_apps", name: "Other fullscreen apps", rec: true,
       what: "Also record anything else running fullscreen (browsers, Discord and video players are ignored).",
       options: [
         { value: true, label: "On", best: "Catching games that aren't on your list without setting anything up." },
         { value: false, label: "Off", best: "Only ever recording the games listed above." },
-      ] }));
+      ] }),
+    appListCard("never_record", "Never record these",
+      "Apps Archy should leave alone, even when they're fullscreen or in front: a video player, a launcher, a work app. This list wins over the one above.",
+      "Program file name, e.g. Netflix.exe"));
 }
 
 function renderStorage() {
@@ -556,8 +567,20 @@ function volumeRow(key, label, desc) {
       el("p", { class: "sub", text: "0% is silent, 100% is normal, up to 200%. Double-click to reset." })));
 }
 
+let appVersion = "";
+function aboutCard() {
+  return el("div", { class: "card about-card" },
+    el("div", {}, el("h3", { text: `Archy v${appVersion}` }),
+      el("p", { class: "sub", text: "The version installed on this PC. Archy checks GitHub for a newer one when it starts, if \"Check for updates\" is on." })),
+    el("button", { class: "btn", text: "Check now", onclick: async () => {
+      try { const u = await invoke("check_update"); toast(u ? `Archy ${u.version} is available` : "You have the latest version"); if (u) checkUpdate(); }
+      catch (e) { toast(String(e)); }
+    } }));
+}
+
 function renderGeneral() {
   $("#general-settings").replaceChildren(
+    aboutCard(),
     onOff("notify_on_save", "Notification when a clip saves", "A small Windows notification with the clip's length and size.",
       "Knowing the clip saved without leaving the game.", "No pop-ups at all; check the library instead."),
     onOff("sound_on_save", "Sound when a clip saves", "Archy's short two-note chime.",
@@ -640,34 +663,289 @@ function renderVoice() {
         { value: 50, label: "Balanced", best: "Most setups, if you haven't calibrated." },
         { value: 80, label: "Loose", best: "Quiet rooms or a soft voice, if Balanced misses you. May clip on similar-sounding words." },
       ] }),
+    fineTuneCard(),
+    voiceTestCard(),
     onOff("sound_on_voice", "Sound when a phrase is heard", "A soft blip the moment Archy hears you, before the clip finishes saving.",
       "Knowing Archy heard you.", "Silent voice clipping."),
     volumeRow("voice_sound_volume", "Voice ping volume", "How loud the blip is when Archy hears your phrase."));
 }
 
+// ---------- voice fine-tuning and test ----------
+function fineTuneLabel(v) {
+  if (v === 0) return "No change";
+  const how = Math.abs(v) <= 15 ? "A little" : Math.abs(v) <= 35 ? "" : "Much";
+  const text = `${how} ${v < 0 ? "stricter" : "looser"}`.trim();
+  return text[0].toUpperCase() + text.slice(1) + ` (${v > 0 ? "+" : ""}${v})`;
+}
+
+function fineTuneSlider() {
+  const out = el("span", { class: "ed-vol", text: fineTuneLabel(settings.voice_fine_tune) });
+  const range = el("input", { type: "range", min: "-50", max: "50", step: "5", value: String(settings.voice_fine_tune), "aria-label": "Voice fine-tune" });
+  range.addEventListener("input", () => (out.textContent = fineTuneLabel(Number(range.value))));
+  range.addEventListener("change", () => save({ voice_fine_tune: Number(range.value) }, "Sensitivity saved"));
+  return el("div", { class: "ed-slider voice-slider" },
+    el("div", { class: "voice-ends" },
+      el("span", { text: "Stricter: fewer accidental clips" }), el("span", { text: "Looser: hears you more easily" })),
+    range, el("div", { class: "voice-value" }, out));
+}
+
+function fineTuneCard() {
+  return el("div", { class: "card" },
+    el("h3", { text: "Fine-tune sensitivity" }),
+    el("p", { class: "sub", text: "Adjusts the choice above in small steps. If Archy clips when you didn't ask, slide toward Stricter; if it misses you, toward Looser. The test below shows the effect right away." }),
+    fineTuneSlider(),
+    savedTestNote());
+}
+
+// The practice paragraph, one sentence at a time: the phrase 3 times, between
+// sentences full of words that sound a bit like it, which shouldn't trigger.
+function testSteps(phrase) {
+  return [
+    ["Okay, let's start this round. Watch the left side, they always rush there.", false],
+    [phrase + ".", true],
+    ["That was a clean shot. The archer on the hill keeps clipping the wall, so stay low.", false],
+    [phrase + ".", true],
+    ["Nice, I'll archive that later. Remember to reload before you peek, and keep talking.", false],
+    [phrase + "!", true],
+  ];
+}
+
+// step: sentence being read; hits[i]: times it went off during sentence i.
+let vtest = { running: false, step: 0, hits: [], stepAt: 0, line: "", note: "", done: false };
+
+function testScore() {
+  const steps = testSteps("");
+  let caught = 0, expected = 0, falseAlarms = 0;
+  steps.forEach(([, isPhrase], i) => {
+    const h = vtest.hits[i] || 0;
+    if (isPhrase) { expected++; if (h > 0) caught++; } else falseAlarms += h;
+  });
+  return { caught, expected, false_alarms: falseAlarms };
+}
+
+/// How much to trust a test result: [level, word, advice].
+function confidence(r) {
+  if (r.false_alarms === 0 && r.caught === r.expected) return ["good", "High", "Every phrase caught and nothing set it off by accident. You're set."];
+  if (r.false_alarms === 0 && r.caught >= r.expected - 1) return ["ok", "OK", "It missed one. Slide a little toward Looser and test again, or keep it if accidental clips worry you more."];
+  if (r.false_alarms > 0) return ["bad", "Low", "It went off on sentences without your phrase. Slide toward Stricter and test again."];
+  return ["bad", "Low", "It missed most of your phrases. Slide toward Looser (or calibrate again) and test again."];
+}
+
+function savedTestNote() {
+  const r = settings.voice_test;
+  if (!r) return el("p", { class: "sub", text: "No test saved yet. Run the test below to see how much you can trust this setting." });
+  const [level, word, advice] = confidence(r);
+  const stale = r.sensitivity !== settings.voice_sensitivity || r.fine_tune !== settings.voice_fine_tune;
+  return el("div", { class: `voice-confidence ${stale ? "stale" : level}` },
+    el("b", { text: `Confidence: ${word}` }),
+    el("span", { text: ` · caught ${r.caught} of ${r.expected}, ${r.false_alarms} false alarm${r.false_alarms === 1 ? "" : "s"} · tested ${when(r.when)}` }),
+    el("p", { class: "sub", text: stale ? "You've changed the sensitivity since this test. Test again to check the new setting." : advice }));
+}
+
+function voiceTestCard() {
+  const phrase = settings.voice_phrases[0]?.text || "";
+  const calibrated = settings.voice_sensitivity === 0 && settings.voice_tuning;
+  const steps = testSteps(phrase);
+  const kids = [
+    el("h3", { text: "Test it" }),
+    el("p", { class: "sub", text: (calibrated ? "" : "Calibrate first (above) for the best starting point. ") +
+      "Read each sentence out loud at your normal gaming volume, then press Next. Three of them are your phrase; the others have similar-sounding words that shouldn't set it off. No clips are saved while testing." }),
+  ];
+  if (vtest.running || vtest.done) {
+    kids.push(el("ol", { class: "voice-steps" }, steps.map(([text, isPhrase], i) => {
+      const h = vtest.hits[i] || 0;
+      const past = vtest.done || i < vtest.step;
+      const mark = !past ? "" : isPhrase ? (h ? "✓ caught" : "✗ missed") : (h ? `✗ went off${h > 1 ? ` ${h}×` : ""}` : "✓ quiet");
+      const ok = isPhrase ? h > 0 : h === 0;
+      return el("li", { class: (i === vtest.step && !vtest.done ? "now " : "") + (isPhrase ? "phrase " : "") + (past ? (ok ? "ok" : "bad") : "") },
+        el("span", { text }), mark ? el("small", { text: mark }) : null);
+    })));
+  }
+  if (vtest.line) kids.push(el("div", { class: "voice-line", text: vtest.line }));
+  if (vtest.done) {
+    const r = testScore();
+    const [level, word, advice] = confidence(r);
+    kids.push(el("div", { class: `voice-confidence ${level}` },
+      el("b", { text: `Confidence: ${word}` }),
+      el("span", { text: ` · caught ${r.caught} of ${r.expected}, ${r.false_alarms} false alarm${r.false_alarms === 1 ? "" : "s"}` }),
+      el("p", { class: "sub", text: advice })));
+  }
+  if (vtest.note) kids.push(el("p", { class: "sub", text: vtest.note }));
+  if (vtest.running || vtest.done) kids.push(fineTuneSlider());
+  const buttons = [];
+  if (vtest.running && !vtest.done) {
+    buttons.push(el("button", { class: "btn primary", text: vtest.step === steps.length - 1 ? "Finish" : "Next", onclick: nextTestStep }),
+      el("button", { class: "btn", text: "Start over", onclick: restartTest }),
+      el("button", { class: "btn", text: "Stop", onclick: stopVoiceTest }));
+  } else if (vtest.done) {
+    buttons.push(el("button", { class: "btn primary", text: "Save result", onclick: saveTestResult }),
+      el("button", { class: "btn", text: "Test again", onclick: () => (vtest.running ? restartTest() : runVoiceTest()) }));
+    if (vtest.running) buttons.push(el("button", { class: "btn", text: "Stop", onclick: stopVoiceTest }));
+  } else {
+    buttons.push(el("button", { class: "btn primary", text: "Start test", disabled: !phrase || calib.running ? "" : null, onclick: runVoiceTest }));
+  }
+  kids.push(el("div", { class: "field", style: "margin-top:12px" }, buttons));
+  return el("div", { class: "card" }, ...kids);
+}
+
+function nextTestStep() {
+  const last = testSteps("").length - 1;
+  if (vtest.step >= last) { finishTest(); return; }
+  vtest.step++;
+  vtest.stepAt = performance.now();
+  vtest.line = "";
+  renderVoice();
+}
+
+function finishTest() {
+  vtest.done = true;
+  vtest.line = "";
+  renderVoice();
+}
+
+function restartTest() {
+  vtest = { ...vtest, step: 0, hits: [], stepAt: performance.now(), line: "Listening. Read the first sentence.", note: "", done: false };
+  renderVoice();
+}
+
+function saveTestResult() {
+  const r = testScore();
+  save({ voice_test: { ...r, sensitivity: settings.voice_sensitivity, fine_tune: settings.voice_fine_tune, when: Date.now() } }, "Test result saved");
+  vtest.note = "Saved. It shows next to the sensitivity slider above.";
+}
+
+async function runVoiceTest() {
+  if (vtest.running || calib.running) return;
+  vtest = { running: true, step: 0, hits: [], stepAt: performance.now(), line: "Starting the microphone…", note: "", done: false };
+  renderVoice();
+  const progress = new tauri.core.Channel();
+  progress.onmessage = (m) => {
+    if (m.step === "ready") { vtest.line = "Listening. Read the first sentence."; renderVoice(); }
+    else if (m.step === "heard") {
+      if (vtest.done) return;
+      // A phrase is heard a moment after it's said: right after Next, it belongs
+      // to the sentence just finished if that was the phrase and it had no hit yet.
+      let i = vtest.step;
+      const steps = testSteps("");
+      if (i > 0 && performance.now() - vtest.stepAt < 1500 && steps[i - 1][1] && !vtest.hits[i - 1]) i -= 1;
+      vtest.hits[i] = (vtest.hits[i] || 0) + 1;
+      vtest.line = steps[i][1] ? "Heard it ✓" : "It went off, but that sentence didn't have your phrase";
+      renderVoice();
+    } else if (m.step === "retuned") {
+      vtest = { ...vtest, step: 0, hits: [], stepAt: performance.now(), done: false, note: "", line: "New sensitivity in use. Read from the first sentence again." };
+      renderVoice();
+    } else if (m.step === "error") { vtest.running = false; vtest.line = "The test couldn't run"; vtest.note = m.message; renderVoice(); }
+  };
+  try { await invoke("test_voice", { progress }); }
+  catch (e) { if (vtest.running && String(e) !== "stopped") { vtest.line = "The test stopped"; vtest.note = String(e); } }
+  vtest.running = false;
+  renderVoice();
+}
+
+async function stopVoiceTest() {
+  vtest.running = false;
+  try { await invoke("stop_calibration"); } catch {}
+  if (!vtest.done) vtest = { running: false, step: 0, hits: [], stepAt: 0, line: "", note: "", done: false };
+  renderVoice();
+}
+
 // ---------- voice calibration ----------
-// Lives outside the settings so a redraw mid-run keeps showing progress.
-let calib = { running: false, line: "", sub: "", result: null };
+// User-paced: hold a button (or Space) while saying the phrase, so there's no
+// timer to race. Each take is checked at once; then two look-alike sentences
+// show what must NOT trigger; then Archy picks the best setting.
+// Lives outside the settings so a redraw mid-run keeps its progress.
+const CAL_TAKES = 5;
+const CAL_MIN = 3;
+const CAL_SENTENCES = [
+  "The archer on the hill keeps clipping the wall, so stay low.",
+  "Nice, I'll archive that later. Remember to reload before you peek.",
+];
+let calib = { running: false, ready: false, takes: [], talked: 0, holding: false, stage: "", line: "", sub: "", result: null };
 
 function calibrationCard() {
   const phrase = settings.voice_phrases[0]?.text || "";
-  const big = el("div", { style: "font-size:20px;font-weight:600;margin:10px 0 4px", text: calib.line });
-  const sub = el("p", { class: "sub", text: calib.sub });
-  const start = el("button", { class: "btn primary", text: calib.result ? "Calibrate again" : "Calibrate",
-    disabled: !phrase ? "" : null, onclick: () => runCalibration(phrase) });
-  const stop = el("button", { class: "btn", text: "Stop", onclick: stopCalibration });
-  const restart = el("button", { class: "btn", text: "Restart", onclick: async () => { await stopCalibration(); runCalibration(phrase); } });
   const t = settings.voice_tuning;
   const learnedNote = t && t.phrase === phrase && t.learned?.length
     ? el("p", { class: "sub", text: `Archy has learned ${t.learned.length} way${t.learned.length === 1 ? "" : "s"} you say "${phrase}".` })
     : null;
-  return el("div", { class: "card" },
+  const kids = [
     el("h3", { text: "Calibrate to your voice" }),
-    el("p", { class: "sub", text: `About a minute. Archy asks you to say "${phrase}" 5 times (say it all in one go, the way you would in a game), then to talk normally for 15 s. It learns how you pronounce it and picks the setting that hears you best without clipping by accident. Uses the microphone chosen above; the recording never leaves this PC and is thrown away afterwards.` }),
+    el("p", { class: "sub", text: `About a minute, at your own pace. 1) Hold the button and say "${phrase}", 5 times. 2) Hold it and read two sentences that sound a bit like it. Archy then picks the setting that hears you best without going off by accident. Uses the microphone chosen above; nothing leaves this PC.` }),
     learnedNote,
-    calib.line ? big : null, calib.sub ? sub : null,
-    el("div", { class: "field", style: "margin-top:12px" }, calib.running ? [stop, restart] : start));
+  ];
+  if (calib.running) kids.push(...calibrationSteps(phrase));
+  if (calib.line) kids.push(el("div", { class: "calib-line", text: calib.line }));
+  if (calib.sub) kids.push(el("p", { class: "sub", text: calib.sub }));
+  kids.push(el("div", { class: "field", style: "margin-top:12px" }, calib.running
+    ? el("button", { class: "btn", text: "Stop", onclick: stopCalibration })
+    : el("button", { class: "btn primary", text: calib.result ? "Calibrate again" : "Start calibrating", disabled: !phrase || vtest.running ? "" : null, onclick: () => runCalibration(phrase) })));
+  return el("div", { class: "card" }, ...kids);
 }
+
+function calibrationSteps(phrase) {
+  const out = [];
+  // Live mic meter, updated in place (not by redrawing the page).
+  calib.meter = el("i");
+  out.push(el("div", { class: "calib-meter-row" }, el("span", { text: "Mic" }), el("div", { class: "calib-meter" }, calib.meter)));
+  if (!calib.ready) { out.push(el("p", { class: "sub", text: "Starting the microphone…" })); return out; }
+  if (calib.stage === "analyzing") return out;
+  const talking = calib.stage === "talk";
+  const done = calib.takes.length;
+  out.push(el("div", { class: "calib-step" + (talking ? " past" : "") },
+    el("b", { text: `1. Say "${phrase}"` }),
+    el("div", { class: "calib-dots" }, Array.from({ length: CAL_TAKES }, (_, i) => el("span", {
+      class: i < done ? (calib.takes[i] ? "ok" : "miss") : "",
+      text: i < done ? (calib.takes[i] ? "✓" : "✗") : String(i + 1),
+      title: i < done ? (calib.takes[i] ? "Heard" : "Not heard at the Balanced setting") : "",
+    })))));
+  if (talking) {
+    const n = Math.min(calib.talked, CAL_SENTENCES.length - 1);
+    out.push(el("div", { class: "calib-step" },
+      el("b", { text: `2. Read this sentence (${calib.talked + 1} of ${CAL_SENTENCES.length})` }),
+      el("p", { class: "calib-sentence", text: CAL_SENTENCES[n] })));
+  }
+  const hold = el("button", { class: "btn primary calib-hold" + (calib.holding ? " on" : ""),
+    text: calib.holding ? "Listening… let go when you're done" : talking ? "Hold to read it (or hold Space)" : "Hold to say it (or hold Space)" });
+  hold.addEventListener("pointerdown", (e) => { hold.setPointerCapture(e.pointerId); holdStart(hold); });
+  hold.addEventListener("pointerup", () => holdEnd(hold));
+  hold.addEventListener("pointercancel", () => holdEnd(hold));
+  const row = [hold];
+  if (!talking && done) row.push(el("button", { class: "btn", text: "Redo last", onclick: () => invoke("calibration_input", { command: "undo" }).catch(() => {}) }));
+  if (!talking && done >= CAL_MIN && done < CAL_TAKES) row.push(el("button", { class: "btn", text: "That's enough, next", onclick: () => { calib.stage = "talk"; calib.line = ""; calib.sub = ""; renderVoice(); } }));
+  out.push(el("div", { class: "field calib-actions" }, row));
+  return out;
+}
+
+function holdStart(button) {
+  if (!calib.running || !calib.ready || calib.holding || calib.stage === "analyzing") return;
+  calib.holding = true;
+  button.classList.add("on");
+  button.textContent = "Listening… let go when you're done";
+  invoke("calibration_input", { command: calib.stage === "talk" ? "talk" : "take" }).catch(() => {});
+}
+
+function holdEnd(button) {
+  if (!calib.holding) return;
+  calib.holding = false;
+  button?.classList.remove("on");
+  invoke("calibration_input", { command: "stop" }).catch(() => {});
+}
+
+// Space works like the button while calibrating (not while typing).
+// Every Space press is swallowed while calibrating: a held key repeats, and each
+// repeat would otherwise scroll the page (or "click" whatever button has focus).
+const calibSpace = (e) => e.code === "Space" && calib.running && view === "audio"
+  && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
+document.addEventListener("keydown", (e) => {
+  if (!calibSpace(e)) return;
+  e.preventDefault();
+  if (!e.repeat) holdStart(document.querySelector(".calib-hold") || { classList: { add() {} }, set textContent(_) {} });
+});
+document.addEventListener("keyup", (e) => {
+  if (!calibSpace(e)) return;
+  e.preventDefault();
+  holdEnd(document.querySelector(".calib-hold"));
+});
 
 function showCalib(line, sub = "") {
   calib.line = line;
@@ -682,30 +960,40 @@ async function stopCalibration() {
 
 async function runCalibration(phrase) {
   if (calib.running) return;
-  calib = { running: true, cancelled: false, line: "Starting the microphone…", sub: "", result: null };
+  calib = { running: true, cancelled: false, ready: false, takes: [], talked: 0, holding: false, stage: "takes", line: "", sub: "", result: null };
   renderVoice();
-  let countdown;
   const progress = new tauri.core.Channel();
   progress.onmessage = (m) => {
-    clearInterval(countdown);
-    if (m.step === "ready") showCalib("Get ready…", `Say "${phrase}" each time Archy asks.`);
-    else if (m.step === "say") showCalib(`Say: "${phrase}"`, `${m.n} of ${m.of}. Say it the way you would in a game.`);
-    else if (m.step === "talk") {
-      let left = m.secs;
-      const tick = () => showCalib("Now just talk normally (or play)", `Don't say the phrase. ${left} s left…`);
-      tick();
-      countdown = setInterval(() => { left = Math.max(0, left - 1); tick(); }, 1000);
-    } else if (m.step === "analyzing") showCalib("Learning how you say it…", "Testing settings on your recording. About 30 seconds; you can play meanwhile.");
+    if (m.step === "level") {
+      if (calib.meter) calib.meter.style.width = `${Math.round(Math.min(1, m.v * 3) * 100)}%`;
+      return;
+    }
+    if (m.step === "ready") { calib.ready = true; showCalib("", "Hold the button, say your phrase the way you would in a game, then let go."); }
+    else if (m.step === "take") {
+      calib.takes[m.n - 1] = m.heard;
+      calib.takes.length = m.n;
+      if (m.n >= CAL_TAKES) { calib.stage = "talk"; showCalib("", "Now two sentences that shouldn't set it off. Read each one normally."); }
+      else showCalib(m.heard ? `Heard it (${m.n} of ${CAL_TAKES})` : `Take ${m.n} saved`,
+        m.heard ? "" : "Not heard at the Balanced setting yet. That's fine: calibration learns how you say it. Keep going.");
+    } else if (m.step === "undone") { calib.takes.length = m.n; showCalib("Last take removed", ""); }
+    else if (m.step === "talked") {
+      calib.talked += 1;
+      if (calib.talked >= CAL_SENTENCES.length) {
+        calib.stage = "analyzing";
+        invoke("calibration_input", { command: "analyze" }).catch(() => {});
+      }
+      renderVoice();
+    } else if (m.step === "analyzing") showCalib("Finding your setting…", "Testing settings on your recording. About 30 seconds; you can play meanwhile.");
     else if (m.step === "error") { calib.running = false; showCalib("Calibration didn't finish", m.message); }
     else if (m.step === "done") {
       calib.running = false;
       calib.result = m;
-      if (m.hits >= 3) {
+      if (m.hits >= Math.min(CAL_MIN, m.prompts)) {
         const learned = m.learned?.length ? ` Learned ${m.learned.length} way${m.learned.length === 1 ? "" : "s"} you say it.` : "";
-        showCalib(`Done: caught ${m.hits} of ${m.prompts}`, `No false alarms while you talked.${learned} Archy uses this now (Sensitivity: Calibrated).`);
-        save({ voice_sensitivity: 0, voice_tuning: { score: m.score, paths: m.paths, threshold: m.threshold, hits: m.hits, prompts: m.prompts, phrase, learned: m.learned || [] } }, "Voice calibrated");
+        showCalib(`Done: caught ${m.hits} of ${m.prompts}`, `No false alarms on the look-alike sentences.${learned} Archy uses this now (Sensitivity: Calibrated). Run the test below to check it.`);
+        save({ voice_sensitivity: 0, voice_fine_tune: 0, voice_tuning: { score: m.score, paths: m.paths, threshold: m.threshold, hits: m.hits, prompts: m.prompts, phrase, learned: m.learned || [] } }, "Voice calibrated");
       } else {
-        showCalib(`Only caught ${m.hits} of ${m.prompts}`, "Nothing was changed. Try again closer to the mic, check the microphone picked above, or use a phrase with clearer, longer words.");
+        showCalib(`Only caught ${m.hits} of ${m.prompts}`, "Nothing was changed. Check the mic meter moves when you talk, hold the button for the whole phrase, and say it clearly. A phrase with longer, clearer words also helps.");
       }
     }
   };
@@ -716,7 +1004,6 @@ async function runCalibration(phrase) {
     if (calib.cancelled) showCalib("", "");
     else showCalib("Calibration didn't finish", String(e));
   }
-  clearInterval(countdown);
 }
 
 function renderAll() {
@@ -777,6 +1064,8 @@ const thumbObserver = new IntersectionObserver((entries) => {
     document.body.prepend(el("p", { class: "empty", text: "Open this page from the Archy app. " + e }));
     return;
   }
+  try { appVersion = await invoke("app_version"); } catch {}
+  $("#app-version").textContent = appVersion ? `Archy v${appVersion}` : "";
   renderAll();
   refreshStatus();
   loadClips();

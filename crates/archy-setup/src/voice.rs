@@ -72,7 +72,7 @@ pub fn install(dir: &Path) -> Result<(), String> {
 }
 
 /// Downloads with Windows' own curl.exe (built in since Windows 10 1803).
-fn fetch(url: &str, sha256: &str, work: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+pub(crate) fn fetch(url: &str, sha256: &str, work: &Path, name: &str) -> Result<std::path::PathBuf, String> {
     let path = work.join(name);
     let status = tool("curl.exe")
         .args(["-fsSL", "--retry", "2", "--connect-timeout", "20", "-o"])

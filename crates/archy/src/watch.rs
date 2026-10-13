@@ -60,7 +60,11 @@ pub fn foreground() -> Option<Foreground> {
 }
 
 impl Foreground {
-    pub fn is_game(&self, games: &[String], any_fullscreen: bool) -> bool {
+    /// `never`: apps the user excluded; they win over everything else.
+    pub fn is_game(&self, games: &[String], any_fullscreen: bool, never: &[String]) -> bool {
+        if never.iter().any(|g| g.eq_ignore_ascii_case(&self.exe)) {
+            return false;
+        }
         if games.iter().any(|g| g.eq_ignore_ascii_case(&self.exe)) {
             return true;
         }
@@ -116,6 +120,16 @@ pub fn game_name(exe: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn never_record_wins() {
+        let fg = Foreground { hwnd: HWND::default(), exe: "Game.exe".into(), pid: 1, fullscreen: true };
+        let games = vec!["game.exe".to_string()];
+        assert!(fg.is_game(&games, true, &[]));
+        assert!(!fg.is_game(&games, true, &["GAME.EXE".to_string()]));
+        assert!(fg.is_game(&[], true, &[]), "fullscreen apps count");
+        assert!(!fg.is_game(&[], true, &["game.exe".to_string()]));
+    }
 
     #[test]
     fn friendly_names() {

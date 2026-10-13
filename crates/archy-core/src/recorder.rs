@@ -107,6 +107,14 @@ struct Shared {
     reason: Mutex<String>,
 }
 
+/// A GPU encoder that hasn't taken a single frame for this long while frames
+/// wait has hung (a driver fault); recording ends so the tray can start it again.
+const ENCODER_STALL: Duration = Duration::from_secs(10);
+/// How long to wait for the encoder to finish when recording stops. A hung
+/// driver can block it forever; Archy must never freeze waiting for it.
+const ENCODER_EXIT_WAIT: Duration = Duration::from_secs(5);
+
+
 pub struct Recorder {
     shared: Arc<Shared>,
     capture_thread: Option<JoinHandle<()>>,
@@ -274,6 +282,7 @@ impl Recorder {
         // window (e.g. a device that was idle) are left out instead of written empty.
         let mut audio: Vec<Vec<StoredPacket>> = Vec::new();
         let mut tracks: Vec<AudioTrack> = Vec::new();
+        let mut names: Vec<&str> = Vec::new();
         for a in &self.audio {
             let clip: Vec<StoredPacket> = a
                 .ring
@@ -289,6 +298,7 @@ impl Recorder {
                 continue;
             }
             audio.push(clip);
+            names.push(&a.name);
             tracks.push(AudioTrack {
                 sample_rate: a.info.sample_rate,
                 channels: a.info.channels,
@@ -332,6 +342,7 @@ impl Recorder {
             let _ = std::fs::remove_file(&partial);
             return Err(e);
         }
+        append_track_names(&partial, &names);
         std::fs::rename(&partial, path).map_err(|e| Error::new(E_FAIL, e.to_string()))?;
         Ok(ClipInfo {
             path: path.to_path_buf(),
@@ -348,6 +359,26 @@ impl Drop for Recorder {
         if let Some(t) = self.capture_thread.take() {
             let _ = t.join();
         }
+    }
+}
+
+/// Starts the track-name note at the end of a saved clip.
+pub const TRACK_NAMES_MARKER: &[u8] = b"archy-tracks:";
+
+/// Notes the audio track names ("Everything|Game|Microphone") at the end of the
+/// file, for the clip editor. It's a top-level MP4 `free` box, which every player
+/// skips. Best effort: a clip without it still plays; the editor says "Track N".
+pub fn append_track_names(path: &Path, names: &[&str]) {
+    use std::io::Write;
+    if names.is_empty() {
+        return;
+    }
+    let payload = [TRACK_NAMES_MARKER, names.join("|").as_bytes()].concat();
+    let mut bx = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+    bx.extend_from_slice(b"free");
+    bx.extend_from_slice(&payload);
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(path) {
+        let _ = f.write_all(&bx);
     }
 }
 
@@ -510,6 +541,8 @@ fn capture_loop(
     let _ = ready.send(Ok(info));
 
     let mut cadence = Cadence::new(cfg.fps);
+    // Since when every frame has found the encoder's queue full.
+    let mut backed_up: Option<Instant> = None;
     let result = loop {
         if shared.stop.load(Ordering::Acquire) || capture.is_closed() {
             break Ok(());
@@ -534,14 +567,27 @@ fn capture_loop(
         match tx.try_send(SendPtr(Input { texture, time })) {
             Ok(()) => {
                 shared.frames.fetch_add(1, Ordering::Relaxed);
+                backed_up = None;
             }
             Err(TrySendError::Full(_)) => {
                 shared.dropped.fetch_add(1, Ordering::Relaxed);
+                // The queue has stayed full the whole time: the encoder has hung.
+                if backed_up.get_or_insert_with(Instant::now).elapsed() > ENCODER_STALL {
+                    break Err(Error::new(E_FAIL, "the GPU encoder stopped responding"));
+                }
             }
             Err(TrySendError::Disconnected(_)) => break Err(Error::new(E_FAIL, "encoder stopped")),
         }
     };
     drop(tx);
+    let deadline = Instant::now() + ENCODER_EXIT_WAIT;
+    while !encoder_thread.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !encoder_thread.is_finished() {
+        // Leave a hung encoder thread behind rather than freeze the tray on it.
+        return Err(Error::new(E_FAIL, "the GPU encoder stopped responding"));
+    }
     let encoded = encoder_thread
         .join()
         .unwrap_or_else(|_| Err(Error::new(E_FAIL, "encoder panicked")));

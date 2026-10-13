@@ -15,7 +15,7 @@ pub struct Settings {
     /// "360p" | "480p" | "720p" | "1080p" | "1440p", or "discord": sized so a normal
     /// clip always fits Discord's 10 MB upload limit.
     pub quality: String,
-    /// 24-90.
+    /// 24-144.
     pub fps: u32,
     /// "h264" (plays everywhere, incl. Discord previews) | "hevc" | "av1" | "auto" (best available).
     pub codec: String,
@@ -27,6 +27,8 @@ pub struct Settings {
     pub games: Vec<String>,
     /// Also record any other app running fullscreen.
     pub record_fullscreen_apps: bool,
+    /// Executable names that are never recorded (wins over `games`).
+    pub never_record: Vec<String>,
     /// "window" (only the game; popups never appear) | "screen" (whole monitor).
     pub capture: String,
     /// Screen to record in "screen" mode (Windows' name, e.g. `\\.\DISPLAY2`);
@@ -87,6 +89,26 @@ pub struct Settings {
     pub voice_sensitivity: u32,
     /// Detector settings found by calibrating with the user's voice and mic.
     pub voice_tuning: Option<VoiceTuning>,
+    /// Fine-tuning on top of `voice_sensitivity` (or the calibration):
+    /// -50 stricter … +50 looser, 0 = as is. Set with the slider and the voice test.
+    pub voice_fine_tune: i32,
+    /// The last voice test the user saved, to show how much to trust the setting.
+    pub voice_test: Option<VoiceTestResult>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct VoiceTestResult {
+    /// Phrases caught, of how many read.
+    pub caught: u32,
+    pub expected: u32,
+    /// Times it went off on sentences without the phrase.
+    pub false_alarms: u32,
+    /// The settings it was tested with (a change makes the result stale).
+    pub sensitivity: u32,
+    pub fine_tune: i32,
+    /// When, in ms since 1970.
+    pub when: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -125,6 +147,7 @@ impl Default for Settings {
             hotkey_pause: String::new(),
             games: vec!["RobloxPlayerBeta.exe".into()],
             record_fullscreen_apps: true,
+            never_record: Vec::new(),
             capture: "window".into(),
             capture_monitor: String::new(),
             encoder_gpu: String::new(),
@@ -164,6 +187,8 @@ impl Default for Settings {
             clip_sound_volume: 100,
             voice_sound_volume: 100,
             voice_tuning: None,
+            voice_fine_tune: 0,
+            voice_test: None,
         }
     }
 }
@@ -197,7 +222,8 @@ impl Settings {
     pub fn load() -> (Self, Option<String>) {
         let path = path();
         match std::fs::read_to_string(&path) {
-            Ok(text) => match serde_json::from_str::<Settings>(&text) {
+            // Some editors save UTF-8 with a byte-order mark, which JSON parsers reject.
+            Ok(text) => match serde_json::from_str::<Settings>(text.trim_start_matches('\u{feff}')) {
                 Ok(s) => (s.clamped(), None),
                 Err(e) => (
                     Self::default(),
@@ -247,7 +273,7 @@ impl Settings {
         }
         self.clip_seconds = self.clip_seconds.clamp(5, 60);
         self.long_clip_seconds = self.long_clip_seconds.clamp(5, 60);
-        self.fps = self.fps.clamp(24, 90);
+        self.fps = self.fps.clamp(24, 144);
         self.clip_sound_volume = self.clip_sound_volume.min(200);
         for v in [
             &mut self.volume_everything,
@@ -258,6 +284,7 @@ impl Settings {
             *v = (*v).min(200);
         }
         self.voice_sound_volume = self.voice_sound_volume.min(200);
+        self.voice_fine_tune = self.voice_fine_tune.clamp(-50, 50);
         self
     }
 
