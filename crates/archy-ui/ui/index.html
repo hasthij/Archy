@@ -6,6 +6,7 @@
 <title>Archy</title>
 <link rel="stylesheet" href="app.css">
 <script src="app.js" defer></script>
+<script src="editor.js" defer></script>
 </head>
 <body>
 <div class="app">
@@ -23,6 +24,7 @@
     <button class="nav" data-view="general">General</button>
     <div class="side-foot">
       <div class="local">Everything stays on this PC.<br>No account, no uploads.</div>
+      <div class="version" id="app-version"></div>
     </div>
   </nav>
 
@@ -86,11 +88,16 @@
   <div class="player-box" role="dialog" aria-modal="true" aria-label="Clip player">
     <div class="player-bar">
       <span id="player-title"></span>
-      <button class="btn" id="player-close" aria-label="Close player">Close</button>
+      <div class="ed-row">
+        <button class="btn primary" id="player-edit">Edit</button>
+        <button class="btn" id="player-close" aria-label="Close player">Close</button>
+      </div>
     </div>
     <video id="player-video" controls></video>
   </div>
 </div>
+
+<div class="editor" id="editor" hidden></div>
 
 <div class="toast" id="toast" role="status" hidden></div>
 </body>

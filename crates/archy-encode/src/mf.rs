@@ -147,7 +147,8 @@ impl MfEncoder {
             input_id,
             output_id,
             provides_samples: info.dwFlags & provides != 0,
-            output_buffer_size: info.cbSize.max(1 << 20),
+            // At least one raw frame: a big keyframe can exceed a fixed 1 MB.
+            output_buffer_size: info.cbSize.max(1 << 20).max(cfg.width * cfg.height * 3 / 2),
             frame_duration: 10_000_000 / cfg.fps as i64,
             codec: cfg.codec,
             gop: cfg.gop.max(1),

@@ -7,6 +7,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ffmpeg;
 mod voice;
 
 use std::path::{Path, PathBuf};
@@ -181,7 +182,7 @@ fn register(dir: &Path, uninstaller: &Path) {
         reg_dword(
             key,
             "EstimatedSize",
-            ((ARCHY.len() + ARCHY_UI.len()) / 1024 + 20 * 1024) as u32, // + voice files
+            ((ARCHY.len() + ARCHY_UI.len()) / 1024 + (20 + 260) * 1024) as u32, // + voice files and FFmpeg
         );
         let _ = RegCloseKey(key);
     }
@@ -216,6 +217,8 @@ fn install() -> Result<(), String> {
     // Voice clipping's engine and model are downloaded, not bundled (~24 MB).
     // Without them everything else still works, so a failure isn't fatal.
     let voice_problem = if voice::installed(&dir) { None } else { voice::install(&dir).err() };
+    // The clip editor's FFmpeg (~100 MB download), same deal.
+    let editor_problem = if ffmpeg::installed(&dir) { None } else { ffmpeg::install(&dir).err() };
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -234,6 +237,11 @@ fn install() -> Result<(), String> {
         let _ = settings.save();
     }
 
+    if let Some(e) = &editor_problem {
+        tell(&format!("The clip editor couldn't be set up: {e}
+
+Recording and everything else work. Run Archy Setup again later to retry."), true);
+    }
     // Things Archy needs that only the user can change; Archy never changes them itself.
     if let Some(e) = &voice_problem {
         tell(&format!("Voice clipping couldn't be set up: {e}

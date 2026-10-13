@@ -177,6 +177,19 @@ impl Tuning {
             _ => Self { score: 2.0, paths: 16, threshold: 0.15 },
         }
     }
+
+    /// Fine-tuning on top of a level or a calibration: -50 (much stricter) to
+    /// +50 (much looser); 0 changes nothing. Moves all three knobs together so
+    /// one slider covers the range between "never by accident" and "hears a
+    /// whisper".
+    pub fn adjusted(self, amount: i32) -> Self {
+        let t = amount.clamp(-50, 50) as f32 / 50.0;
+        Self {
+            score: (self.score + 0.5 * t).clamp(1.0, 3.0),
+            paths: ((self.paths as f32) * (1.0 + 0.5 * t)).round().clamp(2.0, 32.0) as u32,
+            threshold: (self.threshold - 0.12 * t).clamp(0.05, 0.6),
+        }
+    }
 }
 
 pub struct Spotter {
@@ -540,6 +553,12 @@ fn detections(dir: &Path, phrase: &str, learned: &[String], audio: &[f32], tunin
     Ok(found)
 }
 
+/// Whether `phrase` is heard anywhere in 16 kHz mono `audio` (a quick check of
+/// one calibration take).
+pub fn heard_in(dir: &Path, phrase: &str, audio: &[f32], tuning: Tuning) -> Result<bool, String> {
+    Ok(!detections(dir, phrase, &[], audio, tuning)?.is_empty())
+}
+
 /// Learns how the user says `phrase` from a recording where they said it once
 /// after each of `prompts` (seconds), then just talked during `talk` (start,
 /// end). Each take is transcribed and the way they said it becomes an extra
@@ -643,6 +662,37 @@ pub fn calibrate(
         .ok_or_else(|| "it fired while you were just talking at every setting; pick a longer or more unusual phrase".into())
 }
 
+/// Silence put before each calibration take, and the least room after it, so
+/// every take sits in its own window and the detector has time to answer.
+pub const CALIBRATION_LEAD: f32 = 0.3;
+pub const CALIBRATION_TAIL: f32 = 1.5;
+
+/// Calibrates from separate takes of the phrase (each recorded while the user
+/// held a button) and `talk`, sentences that must not trigger. Every take gets
+/// an equal window (the longest take plus room for the detector to answer), so
+/// a phrase said late or heard a moment after it ends still counts.
+pub fn calibrate_takes(dir: &Path, phrase: &str, takes: &[Vec<f32>], talk: &[f32]) -> Result<Calibration, String> {
+    if takes.is_empty() {
+        return Err("record the phrase at least once first".into());
+    }
+    let rate = SAMPLE_RATE as f32;
+    let longest = takes.iter().map(Vec::len).max().unwrap_or(0) as f32 / rate;
+    let window = (CALIBRATION_LEAD + longest + CALIBRATION_TAIL).max(3.0);
+    let mut audio: Vec<f32> = Vec::new();
+    let mut prompts = Vec::new();
+    for take in takes {
+        let start = audio.len();
+        prompts.push(start as f32 / rate);
+        audio.extend(std::iter::repeat_n(0.0, (CALIBRATION_LEAD * rate) as usize));
+        audio.extend(take);
+        audio.resize(start + (window * rate) as usize, 0.0);
+    }
+    let talk_from = audio.len() as f32 / rate;
+    audio.extend(talk);
+    audio.extend(std::iter::repeat_n(0.0, (CALIBRATION_TAIL * rate) as usize));
+    calibrate(dir, phrase, &audio, &prompts, window, (talk_from, audio.len() as f32 / rate))
+}
+
 /// Bigger = less likely to fire by accident.
 fn caution(t: &Tuning) -> f32 {
     t.threshold * 10.0 - t.score - t.paths as f32 / 8.0
@@ -660,6 +710,19 @@ pub fn to_16k_mono(pcm: &[i16], out: &mut Vec<f32>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fine_tune_moves_the_right_way() {
+        let base = super::Tuning::preset(50);
+        assert_eq!(base.adjusted(0), base);
+        let looser = base.adjusted(25);
+        let stricter = base.adjusted(-25);
+        assert!(looser.threshold < base.threshold && base.threshold < stricter.threshold);
+        assert!(looser.score > base.score && looser.paths >= base.paths);
+        let extreme = base.adjusted(1000);
+        assert_eq!(extreme, base.adjusted(50));
+        assert!(extreme.threshold >= 0.05 && base.adjusted(-50).paths >= 2);
+    }
+
     #[test]
     fn resample_shape() {
         let mut out = Vec::new();

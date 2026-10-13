@@ -1,6 +1,6 @@
 [package]
 name = "archy-setup"
-version = "0.2.1"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 description = "Archy installer"
@@ -13,6 +13,7 @@ path = "src/main.rs"
 archy-core.workspace = true
 bzip2-rs = "0.1"
 tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 windows.workspace = true
 
 [build-dependencies]

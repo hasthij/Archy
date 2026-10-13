@@ -13,7 +13,7 @@ fn main() {
     archy_core::init_thread().unwrap();
     let cfg = RecorderConfig {
         target: Target::Monitor(archy_capture::primary_monitor()),
-        fps: 60,
+        fps: std::env::var("ARCHY_TEST_FPS").ok().and_then(|v| v.parse().ok()).unwrap_or(60),
         max_height: env("ARCHY_TEST_HEIGHT", 720),
         codecs: vec![Codec::H264],
         max_bitrate: env("ARCHY_TEST_MBPS", 10) * 2_000_000,
