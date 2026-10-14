@@ -35,9 +35,18 @@ function toast(msg) {
 }
 
 // ---------- navigation ----------
+// Pages under Settings (the rail's gear); Games and Voice also have rail buttons.
+const SETTINGS_PAGES = ["recording", "games", "audio", "hotkeys", "storage", "appearance", "general"];
+
 function show(name) {
   view = name;
-  document.querySelectorAll(".nav").forEach((b) => b.setAttribute("aria-current", b.dataset.view === name ? "page" : "false"));
+  const inSettings = SETTINGS_PAGES.includes(name);
+  document.querySelectorAll(".settings-nav .nav").forEach((b) => b.setAttribute("aria-current", b.dataset.view === name ? "page" : "false"));
+  // The rail lights its own button, or the gear for any other settings page.
+  const railHit = [...document.querySelectorAll(".rail-btn")].some((b) => b.dataset.view === name);
+  document.querySelectorAll(".rail-btn").forEach((b) => b.setAttribute("aria-current",
+    b.dataset.view === name || (!railHit && inSettings && b.dataset.group === "settings") ? "page" : "false"));
+  $("#settings-nav").hidden = !inSettings;
   document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== `view-${name}`));
   if (name === "clips") loadClips();
 }
@@ -48,25 +57,32 @@ async function refreshStatus() {
   let s;
   try { s = await invoke("get_status"); } catch { return; }
   const box = $("#status");
+  box.className = "status";
   box.replaceChildren();
-  const keys = settings
-    ? el("div", { class: "keys" }, "Save: ", el("b", { text: settings.hotkey_save }), ` (last ${settings.clip_seconds} s) · `, el("b", { text: settings.hotkey_save_long }), ` (last ${settings.long_clip_seconds} s)`)
-    : null;
+  const keys = $("#keys");
+  if (settings) {
+    const phrase = settings.voice_enabled && settings.voice_phrases[0] ? [el("span", { class: "sep", text: "·" }), `or say "${settings.voice_phrases[0].text}"`] : [];
+    keys.replaceChildren(
+      el("kbd", { text: settings.hotkey_save }), `last ${settings.clip_seconds} s`,
+      el("span", { class: "sep", text: "·" }),
+      el("kbd", { text: settings.hotkey_save_long }), `last ${settings.long_clip_seconds} s`, ...phrase);
+  }
   if (!s.running) {
+    box.classList.add("warn");
     box.append(
       el("span", { class: "dot warn" }),
-      el("div", { class: "what" }, el("b", { text: "Archy recorder is not running" }), el("span", { text: "Start it to record your games in the background." })),
-      el("button", { class: "btn primary", text: "Start Archy", onclick: async () => { await invoke("start_recorder").catch((e) => toast(String(e))); setTimeout(refreshStatus, 1500); } })
-    );
+      el("b", { text: "Recorder isn't running" }),
+      el("button", { class: "btn primary", text: "Start Archy", onclick: async () => { await invoke("start_recorder").catch((e) => toast(String(e))); setTimeout(refreshStatus, 1500); } }));
     return;
   }
   const states = {
-    recording: ["dot on", `Recording ${s.game}`, `Keeping the last ${settings ? settings.long_clip_seconds : 60} s in memory · ${s.detail}`],
-    waiting: ["dot", "Waiting for a game", "Recording starts by itself when a game from your list (or any fullscreen app) is open."],
-    paused: ["dot warn", "Paused", "Nothing is being recorded. Press your pause hotkey or use the tray icon to resume."],
+    recording: ["dot on", `Recording ${s.game}`, s.detail, "recording"],
+    waiting: ["dot", "Waiting for a game", "Recording starts by itself", ""],
+    paused: ["dot warn", "Paused", "Resume from the tray icon or your pause hotkey", "warn"],
   };
-  const [dot, title, line] = states[s.state] || ["dot", s.state, ""];
-  box.append(el("span", { class: dot }), el("div", { class: "what" }, el("b", { text: title }), el("span", { text: line })), keys);
+  const [dot, title, detail, kind] = states[s.state] || ["dot", s.state, "", ""];
+  if (kind) box.classList.add(kind);
+  box.append(el("span", { class: dot }), el("b", { text: title }), detail ? el("span", { class: "detail", text: detail }) : null);
 }
 
 // ---------- clips ----------
@@ -86,17 +102,46 @@ async function loadClips() {
   renderClips();
 }
 
+/// "Roblox 2026-10-11 09-29-33 (edit)" -> "Roblox".
+const gameOf = (c) => c.name.replace(/\s+\d{4}-\d\d-\d\d.*$/, "") || "Other";
+let search = "";
+
+function renderFilters() {
+  const games = [...new Set(clips.map(gameOf))].slice(0, 6);
+  const options = [["all", "All"], ["today", "Today"], ...games.map((g) => [`game:${g}`, g])];
+  if (!options.some(([v]) => v === filter)) filter = "all";
+  const key = options.map(([v]) => v).join("|") + "#" + filter;
+  const box = $("#clip-filters");
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.replaceChildren(...options.map(([v, label]) => el("button", {
+    "aria-pressed": String(v === filter), text: label,
+    onclick: () => { filter = v; renderClips(); },
+  })));
+}
+
 function renderClips() {
   const grid = $("#clips");
   const todayStr = new Date().toDateString();
-  const shown = clips.filter((c) => filter === "all" || new Date(c.modified).toDateString() === todayStr);
+  const q = search.trim().toLowerCase();
+  const shown = clips.filter((c) =>
+    (filter === "all" || (filter === "today" ? new Date(c.modified).toDateString() === todayStr : gameOf(c) === filter.slice(5)))
+    && (!q || c.name.toLowerCase().includes(q)));
+  const total = clips.reduce((n, c) => n + c.bytes, 0);
+  $("#clips-meta").textContent = `${clips.length} clip${clips.length === 1 ? "" : "s"} · ${(total / 1e9).toFixed(1)} GB · everything stays on this PC`;
+  renderFilters();
   $("#clips-empty").hidden = shown.length > 0;
+  $("#clips-empty").textContent = clips.length
+    ? "No clips match. Try another filter or search."
+    : "No clips yet. While a game is open, press your save hotkey and the last seconds land here.";
   // Keep existing cards (and their loaded thumbnails) when nothing changed.
-  const key = shown.map((c) => c.path + c.bytes).join("|");
+  const key = shown.map((c) => c.path + c.bytes).join("|") + (q || filter);
   if (grid.dataset.key === key) return;
   grid.dataset.key = key;
-  grid.replaceChildren(...shown.map(clipCard));
+  // The newest clip gets the big card when you're looking at everything.
+  grid.replaceChildren(...shown.map((c, i) => clipCard(c, i === 0 && filter === "all" && !q)));
 }
+$("#clip-search").addEventListener("input", (e) => { search = e.target.value; renderClips(); });
 
 const playIcon = () => {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -109,7 +154,7 @@ const playIcon = () => {
   return svg;
 };
 
-function clipCard(c) {
+function clipCard(c, hero = false) {
   // The file loads only when the card scrolls into view: with every card
   // loading at once, dozens of big 1080p clips were decoded on each redraw.
   const video = el("video", { preload: "none", muted: true });
@@ -127,9 +172,11 @@ function clipCard(c) {
     try { await invoke("recycle_clip", { path: c.path }); toast("Moved to Recycle Bin"); loadClips(); }
     catch (e) { toast(String(e)); }
   });
-  return el("article", { class: "clip" },
+  const fresh = Date.now() - c.modified < 10 * 60 * 1000;
+  return el("article", { class: "clip" + (hero ? " hero" : "") },
     el("button", { class: "thumb", "aria-label": `Play ${c.name}`, onclick: () => play(c) },
-      video, el("span", { class: "play" }, playIcon()), el("span", { class: "size-tag", text: MB(c.bytes) })),
+      video, el("span", { class: "play" }, playIcon()), el("span", { class: "size-tag", text: MB(c.bytes) }),
+      hero && fresh ? el("span", { class: "new-tag", text: "Just saved" }) : null),
     el("div", { class: "clip-body" },
       el("div", { class: "clip-name", title: c.name, text: c.name }),
       el("div", { class: "clip-meta", text: when(c.modified) }),
@@ -184,11 +231,6 @@ $("#player-edit").addEventListener("click", () => { if (playing) openEditor(play
 $("#player").addEventListener("click", (e) => { if (e.target.id === "player") closePlayer(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#player").hidden) closePlayer(); });
 
-document.querySelectorAll("[data-filter]").forEach((b) => b.addEventListener("click", () => {
-  filter = b.dataset.filter;
-  document.querySelectorAll("[data-filter]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
-  renderClips();
-}));
 $("#open-folder").addEventListener("click", () => invoke("open_clips_folder").catch((e) => toast(String(e))));
 
 // ---------- saving settings ----------
@@ -199,6 +241,7 @@ function save(patch, message = "Saved. Applies within 2 seconds") {
   saveTimer = setTimeout(async () => {
     try {
       settings = await invoke("save_settings", { settings });
+      applySettingsLook();
       toast(message);
       renderAll();
       refreshStatus();
@@ -1005,7 +1048,53 @@ async function runCalibration(phrase) {
   }
 }
 
+// ---------- appearance ----------
+const lookOf = (s) => ({ theme: s.theme, accent: s.accent, density: s.density, reduce_motion: s.reduce_motion });
+function applySettingsLook() { if (settings) applyLook(lookOf(settings)); }
+window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", applySettingsLook);
+
+/// Sun/moon on the rail: flips between light and dark (from "system" too).
+$("#theme-btn").addEventListener("click", () => {
+  const now = document.documentElement.dataset.theme;
+  const next = now === "dark" ? "light" : "dark";
+  settings.theme = next;
+  applySettingsLook(); // at once, before the save round-trip
+  save({ theme: next }, next === "dark" ? "Dark mode" : "Light mode");
+});
+
+function renderAppearance() {
+  const pick = (patch, msg) => { Object.assign(settings, patch); applySettingsLook(); save(patch, msg); };
+  const themeCard = (value, title, about) => el("button", {
+    class: "theme-card", role: "radio", "aria-checked": String(settings.theme === value),
+    onclick: () => pick({ theme: value }, `${title} theme`),
+  }, el("div", { class: `mini ${value}` }, value === "system" ? null : [el("div", { class: "r" }), el("div", { class: "c" }, el("i"), el("i"), el("i"), el("u"))]),
+    el("b", { text: title }), el("span", { text: about }));
+  const ACCENTS = [["blue", "Blue", "#4D8DFF"], ["violet", "Violet", "#8B7CFF"], ["teal", "Teal", "#2EC4A6"], ["orange", "Orange", "#FF9F43"]];
+  $("#appearance-settings").replaceChildren(
+    el("div", { class: "card" },
+      el("h3", { text: "Theme" }),
+      el("p", { class: "sub", style: "margin:0 0 16px", text: "System follows Windows: light or dark, whatever Windows uses. The sun/moon button on the left switches at any time." }),
+      el("div", { class: "themes", role: "radiogroup", "aria-label": "Theme" },
+        themeCard("dark", "Dark", "Easy on the eyes next to a game"),
+        themeCard("light", "Light", "Bright rooms and daytime"),
+        themeCard("system", "System", "Follows your Windows setting"))),
+    el("div", { class: "card setting" },
+      el("div", { class: "about" }, el("h3", { text: "Accent colour" }), el("p", { text: "Buttons, highlights and progress bars." })),
+      el("div", { class: "pick" }, el("div", { class: "swatches", role: "radiogroup", "aria-label": "Accent colour" },
+        ACCENTS.map(([v, name, hex]) => el("button", { class: "swatch", role: "radio", "aria-checked": String(settings.accent === v), "aria-label": name, title: name, style: `background:${hex}`,
+          onclick: () => pick({ accent: v }, `${name} accent`) }))))),
+    el("div", { class: "card setting" },
+      el("div", { class: "about" }, el("h3", { text: "Density" }), el("p", { text: "How much fits on screen at once." })),
+      el("div", { class: "pick" }, el("div", { class: "seg", role: "group", "aria-label": "Density" },
+        [["comfortable", "Comfortable"], ["compact", "Compact"]].map(([v, label]) => el("button", { "aria-pressed": String(settings.density === v), text: label, onclick: () => pick({ density: v }, `${label} spacing`) }))))),
+    el("div", { class: "card setting" },
+      el("div", { class: "about" }, el("h3", { text: "Reduce motion" }), el("p", { text: "No animations in the window. Recording is never affected." })),
+      el("div", { class: "pick" }, el("div", { class: "seg", role: "group", "aria-label": "Reduce motion" },
+        [[false, "Off"], [true, "On"]].map(([v, label]) => el("button", { "aria-pressed": String(settings.reduce_motion === v), text: label, onclick: () => pick({ reduce_motion: v }, v ? "Animations off" : "Animations on") }))))));
+}
+
 function renderAll() {
+  renderAppearance();
   renderRecording();
   renderGames();
   renderStorage();
@@ -1115,8 +1204,9 @@ const thumbObserver = new IntersectionObserver((entries) => {
     document.body.prepend(el("p", { class: "empty", text: "Open this page from the Archy app. " + e }));
     return;
   }
+  applySettingsLook();
   try { appVersion = await invoke("app_version"); } catch {}
-  $("#app-version").textContent = appVersion ? `Archy v${appVersion}` : "";
+  $("#app-version").textContent = appVersion ? `v${appVersion}` : "";
   $("#update-btn").addEventListener("click", () => updateDialog(knownUpdate));
   renderAll();
   refreshStatus();

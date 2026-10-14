@@ -94,6 +94,14 @@ pub struct Settings {
     pub voice_fine_tune: i32,
     /// The last voice test the user saved, to show how much to trust the setting.
     pub voice_test: Option<VoiceTestResult>,
+    /// Window look (the recorder ignores these): "dark" | "light" | "system".
+    pub theme: String,
+    /// "blue" | "violet" | "teal" | "orange".
+    pub accent: String,
+    /// "comfortable" | "compact".
+    pub density: String,
+    /// No animations in the window.
+    pub reduce_motion: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -189,6 +197,10 @@ impl Default for Settings {
             voice_tuning: None,
             voice_fine_tune: 0,
             voice_test: None,
+            theme: "dark".into(),
+            accent: "blue".into(),
+            density: "comfortable".into(),
+            reduce_motion: false,
         }
     }
 }
@@ -285,6 +297,16 @@ impl Settings {
         }
         self.voice_sound_volume = self.voice_sound_volume.min(200);
         self.voice_fine_tune = self.voice_fine_tune.clamp(-50, 50);
+        // Unknown look values (a hand edit, a newer Archy) fall back to the defaults.
+        if !["dark", "light", "system"].contains(&self.theme.as_str()) {
+            self.theme = "dark".into();
+        }
+        if !["blue", "violet", "teal", "orange"].contains(&self.accent.as_str()) {
+            self.accent = "blue".into();
+        }
+        if !["comfortable", "compact"].contains(&self.density.as_str()) {
+            self.density = "comfortable".into();
+        }
         self
     }
 
