@@ -283,26 +283,32 @@ async fn gpus() -> Vec<GpuView> {
 /// The update the banner offered, for "Update".
 static OFFERED: std::sync::Mutex<Option<archy_core::update::Update>> = std::sync::Mutex::new(None);
 
-/// A newer Archy on GitHub, unless checking is off or the user skipped it.
+/// A newer Archy on GitHub. Automatic checks (`manual` false) stay quiet when
+/// checking is off or that version was skipped; "Check for updates" always asks
+/// GitHub and reports failures.
 #[tauri::command]
-async fn check_update() -> Option<archy_core::update::Update> {
+async fn check_update(manual: Option<bool>) -> Result<Option<archy_core::update::Update>, String> {
+    let manual = manual.unwrap_or(false);
     let s = Settings::load().0;
-    if !s.check_updates {
-        return None;
+    if !manual && !s.check_updates {
+        return Ok(None);
     }
-    let update = tauri::async_runtime::spawn_blocking(|| {
-        archy_core::update::check(env!("CARGO_PKG_VERSION")).ok().flatten()
-    })
-    .await
-    .ok()
-    .flatten()?;
-    if update.version == s.skipped_version {
-        return None;
+    let found = tauri::async_runtime::spawn_blocking(|| archy_core::update::check(env!("CARGO_PKG_VERSION")))
+        .await
+        .map_err(|e| e.to_string())?;
+    let update = match found {
+        Ok(Some(u)) => u,
+        Ok(None) => return Ok(None),
+        Err(e) if manual => return Err(e),
+        Err(_) => return Ok(None),
+    };
+    if !manual && update.version == s.skipped_version {
+        return Ok(None);
     }
     if let Ok(mut o) = OFFERED.lock() {
         *o = Some(update.clone());
     }
-    Some(update)
+    Ok(Some(update))
 }
 
 /// Downloads and verifies the offered installer, then runs it. The installer
@@ -500,6 +506,63 @@ async fn export_clip(app: AppHandle, mut request: editor::ExportRequest) -> Resu
         let _ = std::process::Command::new("explorer").arg(format!("/select,{}", out.display())).spawn();
     }
     Ok(out.to_string_lossy().into_owned())
+}
+
+/// Takes a video, GIF or sound dropped into the editor (raw bytes; its name in
+/// the `x-name` header) and says what it is and how long. Long ones are then
+/// trimmed in a popup before `finish_media`.
+#[tauri::command]
+async fn stage_media(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<editor::StagedMedia, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("no file was sent".into());
+    };
+    let name = request
+        .headers()
+        .get("x-name")
+        .and_then(|v| v.to_str().ok())
+        .map(percent_decode)
+        .unwrap_or_else(|| "file".into());
+    let bytes = bytes.clone();
+    let staged = tauri::async_runtime::spawn_blocking(move || editor::stage_media(&name, &bytes))
+        .await
+        .map_err(|_| "couldn't add it".to_string())??;
+    allow_folder(&app, &editor::media_dir());
+    Ok(staged)
+}
+
+/// A copy of a staged file the trim popup can play (for formats the window can't).
+#[tauri::command]
+async fn trim_preview(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || editor::trim_preview(&path))
+        .await
+        .map_err(|_| "couldn't open it".to_string())?
+}
+
+/// Cuts the chosen part out of a staged file and readies it for the editor.
+#[tauri::command]
+async fn finish_media(path: String, start: f64, end: f64) -> Result<editor::MediaInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || editor::finish_media(&path, start, end))
+        .await
+        .map_err(|_| "couldn't add it".to_string())?
+}
+
+/// Undoes the page's encodeURIComponent (file names can have any characters).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The version of this Archy (shown in the sidebar and General).
@@ -729,6 +792,9 @@ fn main() {
             choose_export_path,
             cancel_export,
             app_version,
+            stage_media,
+            trim_preview,
+            finish_media,
             audio_devices,
             running_apps,
             start_recorder,

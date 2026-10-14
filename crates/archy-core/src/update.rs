@@ -20,6 +20,8 @@ pub struct Update {
     pub version: String,
     /// The release page, for "what's new".
     pub page: String,
+    /// What's new (the release notes, Markdown, shortened).
+    pub notes: String,
     #[serde(skip)]
     download: String,
     #[serde(skip)]
@@ -87,6 +89,7 @@ pub fn check(current: &str) -> Result<Option<Update>, String> {
     Ok(Some(Update {
         version: format!("{}.{}.{}", version.0, version.1, version.2),
         page: release["html_url"].as_str().unwrap_or_default().to_string(),
+        notes: release["body"].as_str().unwrap_or_default().chars().take(3000).collect(),
         download,
         sha256: asset["digest"].as_str().and_then(|d| d.strip_prefix("sha256:")).map(str::to_lowercase),
     }))

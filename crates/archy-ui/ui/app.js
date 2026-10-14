@@ -573,8 +573,7 @@ function aboutCard() {
     el("div", {}, el("h3", { text: `Archy v${appVersion}` }),
       el("p", { class: "sub", text: "The version installed on this PC. Archy checks GitHub for a newer one when it starts, if \"Check for updates\" is on." })),
     el("button", { class: "btn", text: "Check now", onclick: async () => {
-      try { const u = await invoke("check_update"); toast(u ? `Archy ${u.version} is available` : "You have the latest version"); if (u) checkUpdate(); }
-      catch (e) { toast(String(e)); }
+      updateDialog();
     } }));
 }
 
@@ -1016,34 +1015,86 @@ function renderAll() {
 }
 
 // ---------- updates ----------
-async function checkUpdate() {
-  let u = null;
-  try { u = await invoke("check_update"); } catch { return; }
-  if (!u) return;
-  const old = $("#update-banner");
-  if (old) old.remove();
-  const status = el("span", { class: "sub" });
-  const banner = el("section", { class: "status", id: "update-banner", style: "margin-bottom:12px;border-color:var(--accent)" },
-    el("div", { class: "what" },
-      el("b", { text: `Archy ${u.version} is available` }),
-      el("span", { text: "Fixes and improvements. Your clips and settings are kept. " },
-        el("a", { href: "#", text: "What's new", onclick: (e) => { e.preventDefault(); invoke("open_release_page", { url: u.page }).catch((err) => toast(String(err))); } }))),
-    status,
-    el("button", { class: "btn primary", text: "Update", onclick: async (e) => {
-      e.target.disabled = true;
-      status.textContent = "Downloading…";
-      try {
-        await invoke("install_update");
-        status.textContent = "The installer is open: finish there.";
-      } catch (err) {
-        status.textContent = "Update failed: " + err;
-        e.target.disabled = false;
-      }
-    } }),
-    el("button", { class: "btn", text: "Not now", onclick: () => banner.remove() }),
-    el("button", { class: "btn", text: "Skip this version", onclick: () => { save({ skipped_version: u.version }, `Won't ask about ${u.version} again`); banner.remove(); } }));
-  $("#status").before(banner);
+// ---------- updates ----------
+let knownUpdate = null;
+
+/// Light Markdown for release notes: headings, bold and bullet lists, as plain text nodes.
+function notesView(md) {
+  const box = el("div", { class: "upd-notes" });
+  let list = null;
+  for (const raw of md.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) { list = null; continue; }
+    const strong = (t) => t.split(/\*\*(.+?)\*\*/).map((part, i) => (i % 2 ? el("b", { text: part }) : part));
+    if (line.startsWith("#")) { list = null; box.append(el("h4", { text: line.replace(/^#+\s*/, "") })); }
+    else if (/^[-*]\s/.test(line)) { if (!list) box.append(list = el("ul")); list.append(el("li", {}, ...strong(line.slice(2)))); }
+    else { list = null; box.append(el("p", {}, ...strong(line))); }
+  }
+  return box;
 }
+
+function setUpdateDot(on) { $("#update-btn")?.classList.toggle("has-update", !!on); }
+
+/// The update dialog. `u`: an update already found (opens straight to it);
+/// otherwise it checks first.
+async function updateDialog(u = null) {
+  $("#upd-back")?.remove();
+  const body = el("div", { class: "upd-body" });
+  const actions = el("div", { class: "upd-actions" });
+  const close = () => back.remove();
+  const box = el("div", { class: "upd-box", role: "dialog", "aria-modal": "true", "aria-label": "Updates" },
+    el("div", { class: "upd-top" }, el("h3", { text: "Updates" }), el("span", { class: "sub", text: `You have Archy v${appVersion}` })),
+    body, actions);
+  const back = el("div", { class: "upd-back", id: "upd-back" }, box);
+  back.addEventListener("click", (e) => { if (e.target === back) close(); });
+  back.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+  document.body.append(back);
+  const show = (kids, buttons) => { body.replaceChildren(...kids); actions.replaceChildren(...buttons); };
+  const closeBtn = (label = "Close") => el("button", { class: "btn", text: label, onclick: close });
+  if (!u) {
+    show([el("div", { class: "upd-spin" }), el("p", { text: "Checking GitHub for a newer Archy…" })], [closeBtn("Cancel")]);
+    try { u = await invoke("check_update", { manual: true }); }
+    catch (e) { show([el("p", { class: "upd-big", text: "Couldn't check right now" }), el("p", { class: "sub", text: `${e}. Are you online?` })], [el("button", { class: "btn", text: "Try again", onclick: () => updateDialog() }), closeBtn()]); return; }
+    if (!back.isConnected) return;
+    if (!u) {
+      knownUpdate = null; setUpdateDot(false);
+      show([el("p", { class: "upd-big", text: "You're up to date" }), el("p", { class: "sub", text: `Archy v${appVersion} is the newest version.` })], [closeBtn()]);
+      return;
+    }
+  }
+  knownUpdate = u; setUpdateDot(true);
+  const status = el("p", { class: "sub" });
+  const install = el("button", { class: "btn primary", text: "Install now", onclick: async () => {
+    install.disabled = true;
+    status.textContent = "Downloading the installer… (checked against GitHub's fingerprint before it runs)";
+    try { await invoke("install_update"); status.textContent = "The installer is open: click Yes there. Archy restarts on the new version; your clips and settings are kept."; }
+    catch (err) { status.textContent = "Update failed: " + err; install.disabled = false; }
+  } });
+  show([
+    el("p", { class: "upd-big", text: `Archy ${u.version} is available` }),
+    u.notes ? notesView(u.notes) : el("p", { class: "sub", text: "Fixes and improvements." }),
+    el("a", { href: "#", class: "sub", text: "Open the release page", onclick: (e) => { e.preventDefault(); invoke("open_release_page", { url: u.page }).catch((err) => toast(String(err))); } }),
+    status,
+  ], [
+    el("button", { class: "btn", text: "Skip this version", onclick: () => { save({ skipped_version: u.version }, `Won't ask about ${u.version} again`); knownUpdate = null; setUpdateDot(false); close(); } }),
+    closeBtn("Later"),
+    install,
+  ]);
+}
+
+/// Quiet check: on opening Archy (shows the dialog when there's something new)
+/// and every 6 hours while it stays open (just the dot on the sidebar button).
+async function checkUpdate(openDialog = true) {
+  let u = null;
+  try { u = await invoke("check_update", { manual: false }); } catch { return; }
+  if (!u) return;
+  const fresh = !knownUpdate || knownUpdate.version !== u.version;
+  knownUpdate = u;
+  setUpdateDot(true);
+  if (openDialog) updateDialog(u);
+  else if (fresh) toast(`Archy ${u.version} is available: click Check for updates`);
+}
+setInterval(() => checkUpdate(false), 6 * 60 * 60 * 1000);
 
 // Loads a clip's thumbnail once its card is (nearly) visible.
 const thumbObserver = new IntersectionObserver((entries) => {
@@ -1066,6 +1117,7 @@ const thumbObserver = new IntersectionObserver((entries) => {
   }
   try { appVersion = await invoke("app_version"); } catch {}
   $("#app-version").textContent = appVersion ? `Archy v${appVersion}` : "";
+  $("#update-btn").addEventListener("click", () => updateDialog(knownUpdate));
   renderAll();
   refreshStatus();
   loadClips();
