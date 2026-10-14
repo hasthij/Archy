@@ -864,7 +864,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         }),
         WM_TRAY => match (lp.0 as u32) & 0xffff {
             WM_RBUTTONUP | WM_CONTEXTMENU => with_app(|a| a.show_menu()),
-            WM_LBUTTONUP => open_ui(),
+            // NIN_BALLOONUSERCLICK: a notification was clicked (e.g. "update available").
+            WM_LBUTTONUP | 0x405 => open_ui(),
             _ => {}
         },
         WM_DESTROY => {
@@ -979,17 +980,27 @@ fn main() {
     if app.settings.notify_on_start {
         notify(window.0 as isize, "Archy is running", &hint, false);
     }
-    if app.settings.check_updates {
-        let skipped = app.settings.skipped_version.clone();
+    {
+        // Checks shortly after start, then every 6 hours while Archy runs (it can
+        // stay open for days). One light notification per new version; clicking
+        // it opens Archy, which shows the update dialog. Settings are re-read each
+        // time, so "Check for updates" off or "Skip this version" apply at once.
         let hwnd = window.0 as isize;
         std::thread::spawn(move || {
-            // Let start-up (and the game) settle first.
-            std::thread::sleep(std::time::Duration::from_secs(30));
-            if let Ok(Some(u)) = archy_core::update::check(env!("CARGO_PKG_VERSION")) {
-                if u.version != skipped {
-                    log(&format!("update available: {}", u.version));
-                    notify(hwnd, &format!("Archy {} is available", u.version), "Open Archy to update (it asks first).", false);
+            std::thread::sleep(std::time::Duration::from_secs(30)); // let start-up (and the game) settle
+            let mut told = String::new();
+            loop {
+                let s = Settings::load().0;
+                if s.check_updates {
+                    if let Ok(Some(u)) = archy_core::update::check(env!("CARGO_PKG_VERSION")) {
+                        if u.version != s.skipped_version && u.version != told {
+                            log(&format!("update available: {}", u.version));
+                            notify(hwnd, &format!("Archy {} is available", u.version), "Click to see what's new and update (it asks first).", false);
+                            told = u.version;
+                        }
+                    }
                 }
+                std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
             }
         });
     }

@@ -46,7 +46,7 @@ function textFont(it, H) { return `700 ${Math.round(it.size * H)}px "${it.font}"
 
 /// Size of an item in clip pixels.
 function itemSize(it, W, H) {
-  if (it.kind === "image") {
+  if (it.kind === "image" || it.kind === "video") {
     const w = it.w * W;
     return [w, w / it.aspect];
   }
@@ -59,9 +59,12 @@ function itemSize(it, W, H) {
 
 function drawItem(ctx, it, W, H) {
   const cx = it.x * W, cy = it.y * H;
-  if (it.kind === "image") {
+  if (it.kind === "image" || it.kind === "video") {
     const [w, h] = itemSize(it, W, H);
-    ctx.drawImage(it.img, cx - w / 2, cy - h / 2, w, h);
+    const src = it.kind === "video" ? it.el : it.img;
+    // A video with no frame yet shows as an outline, so it can still be placed.
+    if (it.kind === "video" && it.el.readyState < 2) { ctx.strokeStyle = "#B8F5D2"; ctx.lineWidth = 2; ctx.strokeRect(cx - w / 2, cy - h / 2, w, h); return; }
+    ctx.drawImage(src, cx - w / 2, cy - h / 2, w, h);
     return;
   }
   const px = it.size * H;
@@ -83,10 +86,11 @@ function drawItem(ctx, it, W, H) {
   });
 }
 
-/// Bottom layer first: image tracks, then text tracks (track 1 lowest).
+/// Bottom layer first: video tracks, then image tracks, then text tracks (track 1 lowest).
+/// Sounds aren't drawn, so they're not in it.
 function drawOrder() {
-  const rank = (it) => (it.kind === "image" ? 0 : 10) + it.lane;
-  return [...ed.items].sort((a, b) => rank(a) - rank(b) || a.start - b.start);
+  const rank = (it) => ({ video: 0, image: 10, text: 20 })[it.kind] + it.lane;
+  return ed.items.filter((it) => it.kind !== "audio").sort((a, b) => rank(a) - rank(b) || a.start - b.start);
 }
 
 const shownAt = (it, t) => t >= it.start && t < it.end;
@@ -109,7 +113,7 @@ async function openEditor(clip, opts = {}) {
     main: 100,
     sep: info.tracks.map(() => 100),
     solo: -1,
-    items: [], lanes: { text: 1, image: 1 }, media: [], selected: null,
+    items: [], lanes: { text: 1, image: 1, video: 1, audio: 1 }, audioLanes: [], media: [], selected: null,
     format: opts.format || "mp4", gifWidth: 480, gifFps: 15,
     audio: { ctx: null, buffers: null, gains: [], sources: [], t0: 0, at: 0 },
     busy: false, dirty: true, sig: "", lastT: -1, lastLabel: "", driftAt: 0, dom: {},
@@ -122,6 +126,7 @@ function closeEditor() {
   if (!ed) return;
   if (ed.busy) { toast("Exporting: wait for it to finish, or press Cancel export"); return; }
   stopAudio();
+  for (const it of ed.items) if (it.el) { it.el.pause(); it.el.removeAttribute("src"); it.el.load(); }
   if (ed.audio.ctx) ed.audio.ctx.close().catch(() => {});
   cancelAnimationFrame(ed.raf);
   ed.resize?.disconnect();
@@ -199,7 +204,7 @@ function buildEditor() {
   stagePointer(d.canvas);
   dropTarget(d.stage, (m, e) => {
     const r = d.canvas.getBoundingClientRect();
-    addImage(m, 0, d.video.currentTime, [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]);
+    place(m, 0, d.video.currentTime, [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]);
   });
 
   d.play = el("button", { class: "btn", text: "Play", onclick: togglePlay });
@@ -238,6 +243,7 @@ function buildEditor() {
       side));
   $("#editor").replaceChildren(box);
   $("#editor").hidden = false;
+  dropAllSetup(box);
 
   const v = d.video;
   v.addEventListener("loadedmetadata", () => { v.currentTime = ed.start; });
@@ -286,6 +292,26 @@ function tick(now) {
     const label = `${fmt(t - ed.start)} / ${fmt(ed.end - ed.start)}`;
     if (label !== ed.lastLabel) { ed.lastLabel = label; d.time.textContent = label; }
   }
+  // Overlay videos follow the clip: right spot in their loop, playing when it plays.
+  let moving = false;
+  for (const it of ed.items) {
+    if (it.kind !== "video" && it.kind !== "audio") continue;
+    const el = it.el;
+    const sound = it.kind === "audio";
+    if (!shownAt(it, t) && (sound || it.id !== ed.selected)) { if (!el.paused) el.pause(); continue; }
+    const len = it.media.info.duration || 1;
+    const into = Math.max(0, t - it.start) + (it.offset || 0);
+    const local = sound ? Math.min(into, len) : into % len;
+    const playing = !v.paused && shownAt(it, t) && (!sound || into < len);
+    if (Math.abs(el.currentTime - local) > (playing ? 0.25 : 0.04) && !el.seeking) el.currentTime = local;
+    if (playing && el.paused) el.play().catch(() => {});
+    if (!playing && !el.paused) el.pause();
+    const vol = effectiveVolume(it);
+    el.muted = !playing || !vol;
+    el.volume = Math.min(1, vol / 100);
+    if (!sound) moving = true;
+  }
+  if (moving) ed.dirty = true;
   // Redraw only when what's on screen changes.
   const sig = ed.items.filter((it) => shownAt(it, t)).map((it) => it.id).join(",");
   if (ed.dirty || sig !== ed.sig) { ed.sig = sig; ed.dirty = false; drawPreview(t); }
@@ -315,7 +341,7 @@ function drawPreview(t) {
   }
   ctx.globalAlpha = 1;
   const sel = selectedItem();
-  if (sel) {
+  if (sel && sel.kind !== "audio") {
     const [w, h] = itemSize(sel, W, H);
     const x = sel.x * W - w / 2, y = sel.y * H - h / 2;
     ctx.setLineDash([6 / k, 4 / k]);
@@ -341,7 +367,7 @@ function stagePointer(canvas) {
     const [px, py] = toClip(e);
     const k = canvas.getBoundingClientRect().width / W; // screen px per clip px
     const t = ed.dom.video.currentTime;
-    const sel = selectedItem();
+    const sel = selectedItem()?.kind === "audio" ? null : selectedItem();
     const box = (it) => { const [w, h] = itemSize(it, W, H); return [it.x * W - w / 2, it.y * H - h / 2, w, h]; };
     if (sel) {
       const [x, y, w, h] = box(sel);
@@ -372,7 +398,7 @@ function stagePointer(canvas) {
       it.y = clamp((py - drag.dy) / H, 0, 1);
     } else {
       const f = Math.hypot(px - drag.cx, py - drag.cy) / Math.max(1, drag.d0);
-      if (it.kind === "image") it.w = clamp(drag.w0 * f, 0.03, 1.5);
+      if (it.kind !== "text") it.w = clamp(drag.w0 * f, 0.03, 1.5);
       else it.size = clamp(drag.s0 * f, 0.02, 0.3);
     }
     ed.dirty = true;
@@ -521,46 +547,127 @@ function addImage(m, lane, t, pos = [0.5, 0.5]) {
   select(it.id);
 }
 
+/// A playing element for a video/GIF (preview copy) or a sound, one per item.
+function mediaElement(m, tag) {
+  const el = document.createElement(tag);
+  el.src = fileSrc(m.info.proxy);
+  el.preload = "auto";
+  if (tag === "video") { el.playsInline = true; el.addEventListener("loadeddata", () => { if (ed) ed.dirty = true; }); }
+  el.muted = true;
+  return el;
+}
+
+function addVideo(m, lane, t, pos = [0.5, 0.5]) {
+  const start = clamp(t, ed.start, ed.end - 0.5);
+  const it = { id: nextId++, kind: "video", lane, start, end: Math.min(ed.end, start + m.info.duration), offset: 0,
+    media: m, el: mediaElement(m, "video"), name: m.name, aspect: m.info.width / Math.max(1, m.info.height),
+    w: 0.4, x: clamp(pos[0], 0, 1), y: clamp(pos[1], 0, 1), volume: m.info.has_audio ? 100 : 0 };
+  ed.items.push(it);
+  select(it.id);
+}
+
+function addAudio(m, lane, t) {
+  const start = clamp(t, 0, ed.info.duration - 0.5);
+  const it = { id: nextId++, kind: "audio", lane, start, end: Math.min(ed.info.duration, start + m.info.duration), offset: 0,
+    media: m, el: mediaElement(m, "audio"), name: m.name, volume: 100 };
+  ed.items.push(it);
+  select(it.id);
+}
+
+/// Puts a bay item on the clip, on a track of its own kind.
+function place(m, lane, t, pos) {
+  if (m.kind === "video") addVideo(m, lane, t, pos);
+  else if (m.kind === "audio") addAudio(m, lane, t);
+  else addImage(m, lane, t, pos);
+}
+
 function deleteSelected() {
+  const gone = selectedItem();
+  if (gone?.el) { gone.el.pause(); gone.el.removeAttribute("src"); gone.el.load(); }
   ed.items = ed.items.filter((it) => it.id !== ed.selected);
   select(null);
 }
+
+/// An audio track's own settings (like a mixer channel).
+function audioLane(n) {
+  ed.audioLanes[n] ??= { name: `Audio ${n + 1}`, vol: 100, mute: false };
+  return ed.audioLanes[n];
+}
+
+/// What an item's sound plays at: its own volume times its track's (0 when muted).
+function effectiveVolume(it) {
+  if (it.kind !== "audio") return it.volume;
+  const l = audioLane(it.lane);
+  return l.mute ? 0 : Math.round(it.volume * l.vol / 100);
+}
+
+const KIND_NAME = { text: "Text", image: "Image", video: "Video", audio: "Audio" };
+const KIND_HINT = { image: "an image", video: "a video or GIF", audio: "a sound" };
 
 function renderLanes() {
   const d = ed.dom;
   const rows = [];
   const lane = (kind, n) => {
-    const name = `${kind === "text" ? "Text" : "Image"} ${n + 1}`;
-    const track = el("div", { class: "ed-lane-track" });
+    const track = el("div", { class: "ed-lane-track" + (kind === "audio" ? " audio" : "") });
     for (const it of ed.items.filter((x) => x.kind === kind && x.lane === n)) {
       const bar = el("div", {
         class: `ed-item ${kind}` + (it.id === ed.selected ? " on" : ""),
         style: `left:${pct(it.start)};width:${pct(it.end - it.start)}`,
-        title: kind === "text" ? it.text : it.name,
+        title: (kind === "text" ? it.text : it.name) + (kind === "text" ? "" : " · drag the ends to trim"),
       }, el("span", { text: kind === "text" ? it.text.split("\n")[0] || "(empty)" : it.name }));
+      if (kind === "video" && it.end - it.start > it.media.info.duration - it.offset + 0.05) bar.classList.add("loops");
       barDrag(bar, it, track);
       track.append(bar);
     }
-    if (kind === "image") dropTarget(track, (m, e) => {
+    if (kind !== "text") dropTarget(track, (m, e) => {
+      if ((m.kind || "image") !== kind) { toast(`${KIND_NAME[m.kind || "image"]}s go on ${KIND_NAME[m.kind || "image"].startsWith("A") ? "an" : "a"} ${KIND_NAME[m.kind || "image"]} track`); return; }
       const r = track.getBoundingClientRect();
-      addImage(m, n, (e.clientX - r.left) / r.width * ed.info.duration);
+      place(m, n, (e.clientX - r.left) / r.width * ed.info.duration);
     });
-    const add = el("button", { class: "ed-lane-plus", text: "+", title: kind === "text" ? `Add text to ${name}` : `Add the newest image to ${name}`,
-      onclick: () => kind === "text" ? addText(n) : (ed.media.length ? addImage(ed.media[ed.media.length - 1], n, ed.dom.video.currentTime) : toast("Add an image on the left first")) });
-    rows.push(el("div", { class: "ed-tl" }, el("span", { class: "ed-lane-name" }, name, add), track));
+    const newest = () => [...ed.media].reverse().find((m) => (m.kind || "image") === kind);
+    const add = el("button", { class: "ed-lane-plus", text: "+", title: kind === "text" ? "Add text here" : `Add the newest ${KIND_HINT[kind]} here`,
+      onclick: () => {
+        if (kind === "text") return addText(n);
+        const m = newest();
+        if (m) place(m, n, ed.dom.video.currentTime);
+        else toast(`Add ${KIND_HINT[kind]} on the left first`);
+      } });
+    let head;
+    if (kind === "audio") {
+      // Like a mixer channel: name, volume and mute for everything on this track.
+      const l = audioLane(n);
+      const name = el("input", { class: "ed-lane-title", value: l.name, "aria-label": "Track name", maxlength: "24" });
+      name.addEventListener("change", () => { l.name = name.value.trim() || `Audio ${n + 1}`; });
+      const vol = el("input", { type: "range", min: "0", max: "200", step: "5", value: String(l.vol), "aria-label": `${l.name} volume`, title: `${l.vol}%` });
+      vol.addEventListener("input", () => { l.vol = Number(vol.value); vol.title = `${l.vol}%`; out.textContent = `${l.vol}%`; });
+      const out = el("span", { class: "ed-vol", text: `${l.vol}%` });
+      const mute = el("button", { class: "ed-mute", text: "M", title: "Mute this track", "aria-pressed": String(l.mute),
+        onclick: () => { l.mute = !l.mute; mute.setAttribute("aria-pressed", String(l.mute)); track.classList.toggle("muted", l.mute); } });
+      track.classList.toggle("muted", l.mute);
+      head = el("div", { class: "ed-lane-head-audio" },
+        el("div", { class: "ed-lane-top" }, name, mute, add),
+        el("div", { class: "ed-lane-vol" }, vol, out));
+    } else {
+      head = el("span", { class: "ed-lane-name" }, `${KIND_NAME[kind]} ${n + 1}`, add);
+    }
+    rows.push(el("div", { class: "ed-tl" + (kind === "audio" ? " tall" : "") }, head, track));
   };
+  for (let n = 0; n < ed.lanes.video; n++) lane("video", n);
   for (let n = 0; n < ed.lanes.image; n++) lane("image", n);
   for (let n = 0; n < ed.lanes.text; n++) lane("text", n);
+  for (let n = 0; n < ed.lanes.audio; n++) lane("audio", n);
   // One playhead line across all the tracks.
   d.laneHead = el("div", { class: "ed-head ed-lane-head" });
   d.lanes.replaceChildren(el("div", { class: "ed-lanes-in" }, ...rows, el("div", { class: "ed-lane-headbox" }, d.laneHead)));
   ed.lastT = -1;
-  d.laneButtons.replaceChildren(
-    el("button", { class: "btn", text: "+ Text track", disabled: ed.lanes.text >= MAX_LANES ? "" : null, onclick: () => { ed.lanes.text++; renderLanes(); } }),
-    el("button", { class: "btn", text: "+ Image track", disabled: ed.lanes.image >= MAX_LANES ? "" : null, onclick: () => { ed.lanes.image++; renderLanes(); } }));
+  const more = (kind, label) => el("button", { class: "btn", text: `+ ${label} track`, disabled: ed.lanes[kind] >= MAX_LANES ? "" : null,
+    onclick: () => { ed.lanes[kind]++; renderLanes(); } });
+  d.laneButtons.replaceChildren(more("text", "Text"), more("image", "Image"), more("video", "Video"), more("audio", "Audio"));
 }
 
-/// Drag a bar to move it in time; drag its ends to change when it starts/stops.
+/// Drag a bar to move it in time. Its ends trim it: for a video or sound the
+/// left end cuts off its beginning (like trimming a clip in a music app), the
+/// right end its ending. A video dragged past its end loops; a sound stops.
 function barDrag(bar, it, track) {
   bar.addEventListener("pointerdown", (e) => {
     e.stopPropagation();
@@ -568,15 +675,24 @@ function barDrag(bar, it, track) {
     const secPerPx = ed.info.duration / r.width;
     const br = bar.getBoundingClientRect();
     const mode = e.clientX - br.left < 8 ? "start" : br.right - e.clientX < 8 ? "end" : "move";
-    const x0 = e.clientX, s0 = it.start, e0 = it.end;
+    const x0 = e.clientX, s0 = it.start, e0 = it.end, o0 = it.offset || 0;
+    const len = it.media?.info.duration;
     if (ed.selected !== it.id) { ed.selected = it.id; ed.dirty = true; renderProps(); bar.classList.add("on"); }
     bar.setPointerCapture(e.pointerId);
     const move = (ev) => {
       const dt = (ev.clientX - x0) * secPerPx;
-      const len = e0 - s0;
-      if (mode === "move") { it.start = clamp(s0 + dt, 0, ed.info.duration - len); it.end = it.start + len; }
-      else if (mode === "start") it.start = clamp(s0 + dt, 0, it.end - 0.2);
-      else it.end = clamp(e0 + dt, it.start + 0.2, ed.info.duration);
+      if (mode === "move") {
+        it.start = clamp(s0 + dt, 0, ed.info.duration - (e0 - s0));
+        it.end = it.start + (e0 - s0);
+      } else if (mode === "start") {
+        // Media: moving the start trims the front, so it can't go before the file's start.
+        const lo = it.media ? Math.max(0, s0 - o0) : 0;
+        it.start = clamp(s0 + dt, lo, it.end - 0.2);
+        if (it.media) it.offset = o0 + (it.start - s0);
+      } else {
+        const hi = it.kind === "audio" ? Math.min(ed.info.duration, it.start + len - (it.offset || 0)) : ed.info.duration;
+        it.end = clamp(e0 + dt, it.start + 0.2, hi);
+      }
       bar.style.left = pct(it.start);
       bar.style.width = pct(it.end - it.start);
       ed.dirty = true;
@@ -592,36 +708,68 @@ function barDrag(bar, it, track) {
   });
 }
 
-// ---------- image bay ----------
+// ---------- the bay: images, videos, GIFs and sounds ----------
 function renderBay() {
-  const input = el("input", { type: "file", accept: "image/*", multiple: true, hidden: true });
-  input.addEventListener("change", () => { importImages(input.files); input.value = ""; });
+  const input = el("input", { type: "file", accept: "image/*,video/*,audio/*,.mp3,.wav,.m4a,.aac,.ogg,.opus,.flac,.wma,.mkv", multiple: true, hidden: true });
+  input.addEventListener("change", () => { importFiles(input.files); input.value = ""; });
   const zone = el("div", { class: "ed-drop" },
-    el("b", { text: "Images" }),
-    el("p", { class: "ed-note", text: "Drop images here, then drag them onto the video or an Image track." }),
+    el("div", { class: "ed-drop-icon", text: "⇩" }),
+    el("b", { text: "Drop files here" }),
+    el("p", { class: "ed-note", text: "Images, videos, GIFs and sounds (MP3, WAV and more). Long videos and songs open a trimmer." }),
     el("button", { class: "btn", text: "Browse…", onclick: () => input.click() }), input);
   zone.addEventListener("dragover", (e) => { if (e.dataTransfer.types.includes("Files")) { e.preventDefault(); zone.classList.add("over"); } });
   zone.addEventListener("dragleave", () => zone.classList.remove("over"));
-  zone.addEventListener("drop", (e) => { e.preventDefault(); zone.classList.remove("over"); importImages(e.dataTransfer.files); });
+  zone.addEventListener("drop", (e) => { e.preventDefault(); zone.classList.remove("over"); importFiles(e.dataTransfer.files); });
   const list = el("div", { class: "ed-media" }, ed.media.map((m) => {
-    const thumb = el("img", { src: m.src, alt: m.name, draggable: "true", title: `${m.name}: drag onto the video or an Image track, or click to add it now` });
+    const kind = m.kind || "image";
+    const tip = `${m.name}${m.info ? ` (${m.info.duration.toFixed(1)} s)` : ""}: drag onto the clip or ${KIND_NAME[kind].startsWith("A") ? "an" : "a"} ${KIND_NAME[kind]} track, or click to add it now`;
+    const thumb = kind === "video"
+      ? el("video", { src: fileSrc(m.info.proxy) + "#t=0.1", muted: true, preload: "metadata", draggable: "true", title: tip })
+      : kind === "audio"
+        ? el("div", { class: "ed-sound", draggable: "true", title: tip }, el("span", { text: "♪" }), el("small", { text: m.name }))
+        : el("img", { src: m.src, alt: m.name, draggable: "true", title: tip });
     thumb.addEventListener("dragstart", (e) => e.dataTransfer.setData("text/archy-media", String(m.id)));
-    thumb.addEventListener("click", () => addImage(m, 0, ed.dom.video.currentTime));
-    return el("div", { class: "ed-thumb" }, thumb,
+    thumb.addEventListener("click", () => place(m, 0, ed.dom.video.currentTime));
+    return el("div", { class: `ed-thumb ${kind}` }, thumb,
+      m.staged ? el("button", { class: "ed-thumb-trim", text: "Trim…", title: "Pick a different part", onclick: () => openTrimmer(m.staged, m.name) }) : null,
       el("button", { class: "ed-thumb-x", text: "×", "aria-label": `Remove ${m.name}`, onclick: () => { ed.media = ed.media.filter((x) => x !== m); renderBay(); } }));
   }));
   ed.dom.bay.replaceChildren(zone, list);
 }
 
-function importImages(files) {
+const SOUND_EXT = /\.(mp3|wav|m4a|aac|ogg|oga|opus|flac|wma|aiff?)$/i;
+
+/// Videos, GIFs and sounds: stored by Archy; long ones open the trimmer first.
+async function importMedia(f) {
+  toast(`Adding ${f.name}…`);
+  try {
+    const bytes = await f.arrayBuffer();
+    const staged = await invoke("stage_media", bytes, { headers: { "x-name": encodeURIComponent(f.name) } });
+    if (!ed) return;
+    if (staged.duration > staged.limit + 0.5) openTrimmer(staged, f.name);
+    else await finishMedia(staged, f.name, 0, staged.duration);
+  } catch (e) { toast(String(e)); }
+}
+
+async function finishMedia(staged, name, start, end) {
+  const info = await invoke("finish_media", { path: staged.path, start, end });
+  if (!ed) return;
+  const cut = start > 0.05 || end < staged.duration - 0.05;
+  ed.media.push({ id: nextId++, kind: info.kind === "audio" ? "audio" : "video", name: cut ? `${name} (${fmt(start)}–${fmt(end)})` : name, info, staged });
+  renderBay();
+  toast(`${name} added: drag it onto the clip or a track`);
+}
+
+function importFiles(files) {
   for (const f of files) {
-    if (!f.type.startsWith("image/")) continue;
+    if (f.type.startsWith("video/") || f.type.startsWith("audio/") || f.type === "image/gif" || SOUND_EXT.test(f.name) || /\.mkv$/i.test(f.name)) { importMedia(f); continue; }
+    if (!f.type.startsWith("image/")) { toast(`${f.name} isn't an image, video, GIF or sound`); continue; }
     const reader = new FileReader();
     reader.onload = () => {
       const img = new Image();
       img.onload = () => {
         if (!ed) return;
-        ed.media.push({ id: nextId++, name: f.name, src: reader.result, img });
+        ed.media.push({ id: nextId++, kind: "image", name: f.name, src: reader.result, img });
         renderBay();
       };
       img.src = reader.result;
@@ -630,18 +778,129 @@ function importImages(files) {
   }
 }
 
-/// Lets an image from the bay (or a file from Explorer) be dropped on `target`.
+/// Lets something from the bay (or files from Explorer) be dropped on `target`.
 function dropTarget(target, place) {
   target.addEventListener("dragover", (e) => {
     if (e.dataTransfer.types.includes("text/archy-media") || e.dataTransfer.types.includes("Files")) e.preventDefault();
   });
   target.addEventListener("drop", (e) => {
     e.preventDefault();
+    e.stopPropagation();
+    hideDropAll();
     const id = Number(e.dataTransfer.getData("text/archy-media"));
     const m = ed.media.find((x) => x.id === id);
     if (m) place(m, e);
-    else if (e.dataTransfer.files.length) importImages(e.dataTransfer.files);
+    else if (e.dataTransfer.files.length) importFiles(e.dataTransfer.files);
   });
+}
+
+// Dragging files from Explorer anywhere over the editor shows one big drop target.
+let dragDepth = 0;
+function hideDropAll() { dragDepth = 0; ed?.dom.dropAll?.classList.remove("show"); }
+function dropAllSetup(box) {
+  const overlay = el("div", { class: "ed-dropall" }, el("div", {}, el("div", { class: "ed-drop-icon", text: "⇩" }), el("b", { text: "Drop to add to your media" }),
+    el("p", { class: "ed-note", text: "Images, videos, GIFs and sounds" })));
+  ed.dom.dropAll = overlay;
+  box.append(overlay);
+  const files = (e) => e.dataTransfer?.types.includes("Files");
+  box.addEventListener("dragenter", (e) => { if (files(e)) { dragDepth++; overlay.classList.add("show"); } });
+  box.addEventListener("dragleave", (e) => { if (files(e) && --dragDepth <= 0) hideDropAll(); });
+  overlay.addEventListener("dragover", (e) => e.preventDefault());
+  overlay.addEventListener("drop", (e) => { e.preventDefault(); hideDropAll(); importFiles(e.dataTransfer.files); });
+}
+
+// ---------- the trimmer: pick the part of a long video or song ----------
+function openTrimmer(staged, name) {
+  const limit = staged.limit;
+  const dur = staged.duration;
+  let start = 0, end = Math.min(dur, limit);
+  const isAudio = staged.kind === "audio";
+  const player = el(isAudio ? "audio" : "video", { preload: "auto", playsinline: true });
+  const useSrc = (p) => { player.src = fileSrc(p); };
+  let fellBack = false;
+  player.addEventListener("error", async () => {
+    if (fellBack) return;
+    fellBack = true;
+    status.textContent = "Getting it ready…";
+    try { useSrc(await invoke("trim_preview", { path: staged.path })); status.textContent = ""; }
+    catch (e) { status.textContent = String(e); }
+  });
+  // GIFs can't play in a video element: go straight to the preview copy.
+  if (staged.kind === "gif") player.dispatchEvent(new Event("error")); else useSrc(staged.path);
+
+  const range = el("div", { class: "ed-range" });
+  const hs = el("div", { class: "ed-handle", "aria-label": "Start", role: "slider", tabindex: "0" });
+  const he = el("div", { class: "ed-handle", "aria-label": "End", role: "slider", tabindex: "0" });
+  const head = el("div", { class: "ed-head" });
+  const line = el("div", { class: "ed-timeline trim-line" }, range, hs, he, head);
+  const info = el("span", { class: "ed-note ed-inline" });
+  const status = el("p", { class: "ed-note" });
+  const num = (get, set) => {
+    const i = el("input", { class: "input ed-num", type: "number", step: "0.1", min: "0", max: dur.toFixed(1) });
+    i.addEventListener("change", () => { set(Number(i.value) || 0); draw(); });
+    i.sync = () => { i.value = get().toFixed(1); };
+    return i;
+  };
+  // Keep the pick inside the file and no longer than the limit, moving the other end if needed.
+  const setStart = (s) => { start = clamp(s, 0, dur - 0.2); if (end - start > limit) end = start + limit; if (end <= start) end = Math.min(dur, start + 0.2); };
+  const setEnd = (s) => { end = clamp(s, 0.2, dur); if (end - start > limit) start = end - limit; if (start >= end) start = Math.max(0, end - 0.2); };
+  const fromIn = num(() => start, setStart);
+  const toIn = num(() => end, setEnd);
+  const P = (s) => `${(s / dur) * 100}%`;
+  function draw() {
+    hs.style.left = P(start); he.style.left = P(end);
+    range.style.left = P(start); range.style.width = P(end - start);
+    info.textContent = `${(end - start).toFixed(1)} s of ${fmt(dur)} (up to ${limit} s)`;
+    fromIn.sync(); toIn.sync();
+  }
+  let grab = null;
+  line.addEventListener("pointerdown", (e) => {
+    grab = e.target === hs ? "s" : e.target === he ? "e" : "seek";
+    line.setPointerCapture(e.pointerId);
+    drag(e);
+  });
+  const drag = (e) => {
+    if (!grab) return;
+    const r = line.getBoundingClientRect();
+    const t = clamp((e.clientX - r.left) / r.width, 0, 1) * dur;
+    if (grab === "s") { setStart(t); player.currentTime = start; }
+    else if (grab === "e") { setEnd(t); player.currentTime = Math.max(start, end - 1); }
+    else player.currentTime = t;
+    draw();
+  };
+  line.addEventListener("pointermove", drag);
+  line.addEventListener("pointerup", () => { grab = null; });
+  let raf = 0;
+  const follow = () => {
+    head.style.left = P(player.currentTime || 0);
+    if (playingSel && player.currentTime >= end) { player.pause(); playingSel = false; }
+    raf = requestAnimationFrame(follow);
+  };
+  let playingSel = false;
+  const playSel = el("button", { class: "btn", text: "Play selection", onclick: () => { player.currentTime = start; playingSel = true; player.play().catch(() => {}); } });
+  const close = () => { cancelAnimationFrame(raf); player.pause(); player.removeAttribute("src"); player.load(); back.remove(); };
+  const add = el("button", { class: "btn primary", text: "Add to media", onclick: async () => {
+    add.disabled = true;
+    status.textContent = "Cutting it out…";
+    try { await finishMedia(staged, name, start, end); close(); }
+    catch (e) { status.textContent = String(e); add.disabled = false; }
+  } });
+  const box = el("div", { class: "trim-box", role: "dialog", "aria-modal": "true", "aria-label": `Trim ${name}` },
+    el("h3", { text: `Pick the part of ${name} to use` }),
+    el("p", { class: "ed-note", text: dur > limit
+      ? `It's ${fmt(dur)} long; ${isAudio ? "sounds" : "videos and GIFs"} can be up to ${limit} s. Drag the blue handles (or type the times), then press Add.`
+      : "Drag the blue handles (or type the times) to keep just the part you want." }),
+    isAudio ? el("div", { class: "trim-sound" }, el("span", { text: "♪" }), player) : el("div", { class: "trim-video" }, player),
+    line,
+    el("div", { class: "ed-row" }, el("span", { text: "From" }), fromIn, el("span", { text: "to" }), toIn, el("span", { text: "s" }), info),
+    status,
+    el("div", { class: "ed-row trim-actions" }, playSel, el("button", { class: "btn", text: "Cancel", onclick: close }), add));
+  if (isAudio) player.controls = true;
+  const back = el("div", { class: "trim-back" }, box);
+  back.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } });
+  $("#editor").append(back);
+  draw();
+  raf = requestAnimationFrame(follow);
 }
 
 // ---------- properties of the selected item ----------
@@ -682,7 +941,7 @@ function renderProps() {
   const it = selectedItem();
   const box = ed.dom.props;
   if (!it) {
-    box.replaceChildren(el("p", { class: "ed-note", text: "Press + on a Text track to add text, or drag an image from the left onto the video. Click anything on the video or the tracks to change it; drag it on the video to move it, and drag its corner to resize." }));
+    box.replaceChildren(el("p", { class: "ed-note", text: "Press + on a Text track to add text, or drag an image, video, GIF or sound from the left onto the clip. Click anything on the video or the tracks to change it; drag it on the video to move it, and drag its corner to resize." }));
     return;
   }
   const kids = [];
@@ -702,13 +961,31 @@ function renderProps() {
         el("label", { class: "ed-check" },
           (() => { const b = el("input", { type: "checkbox" }); b.checked = it.outline; b.addEventListener("change", () => { it.outline = b.checked; ed.dirty = true; }); return b; })(),
           "Outline")));
+  } else if (it.kind === "audio") {
+    const len = it.media.info.duration;
+    const out = el("span", { class: "ed-vol", text: `${it.volume}%` });
+    const range = el("input", { type: "range", min: "0", max: "200", step: "5", value: String(it.volume), "aria-label": "Volume" });
+    range.addEventListener("input", () => { it.volume = Number(range.value); out.textContent = `${it.volume}%`; });
+    kids.push(el("p", { class: "ed-note", text: `${it.name} · ${len.toFixed(1)} s · on ${audioLane(it.lane).name}${it.offset > 0.05 ? ` · starts ${it.offset.toFixed(1)} s in` : ""}` }),
+      el("div", { class: "ed-slider ed-row" }, el("span", { text: "Volume" }), range, out),
+      el("p", { class: "ed-note", text: "Drag the ends of its bar to trim it. The track's own volume and M (mute) are on the left of the track." }));
+  } else if (it.kind === "video") {
+    const len = it.media.info.duration;
+    kids.push(el("p", { class: "ed-note", text: `${it.name} · ${len.toFixed(1)} s${it.end - it.start > len - (it.offset || 0) + 0.05 ? " · loops to fill its time" : ""}` }),
+      sizeSlider("Size", it.w * 100, 5, 150, (v) => (it.w = v / 100)));
+    if (it.media.info.has_audio) {
+      const out = el("span", { class: "ed-vol", text: `${it.volume}%` });
+      const range = el("input", { type: "range", min: "0", max: "200", step: "5", value: String(it.volume), "aria-label": "Its sound" });
+      range.addEventListener("input", () => { it.volume = Number(range.value); out.textContent = `${it.volume}%`; });
+      kids.push(el("div", { class: "ed-slider ed-row" }, el("span", { text: "Sound" }), range, out));
+    } else kids.push(el("p", { class: "ed-note", text: "No sound." }));
   } else {
     kids.push(el("p", { class: "ed-note", text: it.name }),
       sizeSlider("Size", it.w * 100, 3, 150, (v) => (it.w = v / 100)));
   }
   kids.push(timeInputs(it),
     el("div", { class: "ed-row" },
-      el("button", { class: "btn", text: "Center", onclick: () => { it.x = 0.5; it.y = 0.5; ed.dirty = true; } }),
+      it.kind === "audio" ? null : el("button", { class: "btn", text: "Center", onclick: () => { it.x = 0.5; it.y = 0.5; ed.dirty = true; } }),
       el("button", { class: "btn danger", text: "Delete", onclick: deleteSelected })));
   box.replaceChildren(...kids);
 }
@@ -785,11 +1062,16 @@ async function runExport(toClipboard) {
     });
   } catch {}
   try {
-    const overlays = drawOrder()
-      .filter((it) => it.end > mine.start && it.start < mine.end && (it.kind === "image" || it.text.trim()))
+    const used = drawOrder().filter((it) => it.end > mine.start && it.start < mine.end);
+    const overlays = used.filter((it) => it.kind === "image" || (it.kind === "text" && it.text.trim()))
       .map((it) => ({ png: overlayImage(it), start: it.start, end: it.end }));
+    const sounds = ed.items.filter((it) => it.kind === "audio" && it.end > mine.start && it.start < mine.end);
+    const media = [...used.filter((it) => it.kind === "video"), ...sounds].map((it) => ({
+      kind: it.kind, path: it.media.info.path, start: it.start, end: it.end, offset: it.offset || 0,
+      x: it.x ?? 0.5, y: it.y ?? 0.5, w: it.w ?? 0.1, aspect: it.aspect ?? 1,
+      volume: effectiveVolume(it), has_audio: it.media.info.has_audio }));
     const out = await invoke("export_clip", { request: {
-      path: mine.clip.path, start: mine.start, end: mine.end, volumes: volumes(), overlays,
+      path: mine.clip.path, start: mine.start, end: mine.end, volumes: volumes(), overlays, media,
       format: mine.format, gif_width: mine.gifWidth, gif_fps: mine.gifFps, to_clipboard: toClipboard, save_to: saveTo,
     } });
     const kind = mine.format === "gif" ? "GIF" : "Video";
