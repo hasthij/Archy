@@ -402,7 +402,7 @@ fn run(args: Args) -> Result<()> {
         if args.convert_only {
             continue;
         }
-        match tx.try_send(SendPtr(Input { texture, time })) {
+        match tx.try_send(SendPtr(Input { texture, time, ticket: None, repeat: false })) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 dropped += 1;

@@ -648,18 +648,16 @@ pub fn calibrate(
         let false_alarms = found.iter().filter(|&&t| t > talk.0 && t <= talk.1).count();
         scored.push(Calibration { tuning, hits, prompts: prompts.len(), false_alarms, learned });
     }
-    scored.sort_by(|a, b| caution(&b.tuning).total_cmp(&caution(&a.tuning)));
-    scored
-        .into_iter()
-        .filter(|c| c.false_alarms == 0)
-        // Most hits; then fewer extra triggers; then the more cautious tuning.
-        .max_by(|a, b| {
-            a.hits
-                .cmp(&b.hits)
-                .then(b.learned.len().cmp(&a.learned.len()))
-                .then(caution(&a.tuning).total_cmp(&caution(&b.tuning)))
-        })
-        .ok_or_else(|| "it fired while you were just talking at every setting; pick a longer or more unusual phrase".into())
+    // The settings that caught the most takes without ever firing on the
+    // look-alike sentences; among those, a middle one. The strictest one passed
+    // the test but missed real phrases in noisy games; the loosest is the most
+    // likely to fire by accident. Fewer extra learned triggers win ties.
+    let clean: Vec<Calibration> = scored.into_iter().filter(|c| c.false_alarms == 0).collect();
+    let best = clean.iter().map(|c| c.hits).max().ok_or("it fired while you were reading the look-alike sentences at every setting; pick a longer or more unusual phrase")?;
+    let mut top: Vec<Calibration> = clean.into_iter().filter(|c| c.hits == best).collect();
+    top.sort_by(|a, b| caution(&b.tuning).total_cmp(&caution(&a.tuning)).then(a.learned.len().cmp(&b.learned.len())));
+    let middle = top.len() / 2;
+    Ok(top.swap_remove(middle))
 }
 
 /// Silence put before each calibration take, and the least room after it, so

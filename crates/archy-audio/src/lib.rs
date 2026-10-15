@@ -181,6 +181,13 @@ impl AudioCapture {
     }
 }
 
+impl AudioCapture {
+    /// Asks the capture to stop (returns at once; the thread ends on its own).
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
 impl Drop for AudioCapture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);

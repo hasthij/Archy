@@ -51,6 +51,7 @@ function show(name) {
   if (name === "clips") loadClips();
 }
 document.querySelectorAll(".nav").forEach((b) => b.addEventListener("click", () => show(b.dataset.view)));
+window.showView = show; // for welcome.js
 
 // ---------- status ----------
 async function refreshStatus() {
@@ -59,6 +60,7 @@ async function refreshStatus() {
   const box = $("#status");
   box.className = "status";
   box.replaceChildren();
+  $("#game-btn").textContent = gameLabel();
   const keys = $("#keys");
   if (settings) {
     const phrase = settings.voice_enabled && settings.voice_phrases[0] ? [el("span", { class: "sep", text: "·" }), `or say "${settings.voice_phrases[0].text}"`] : [];
@@ -84,6 +86,56 @@ async function refreshStatus() {
   if (kind) box.classList.add(kind);
   box.append(el("span", { class: dot }), el("b", { text: title }), detail ? el("span", { class: "detail", text: detail }) : null);
 }
+
+// ---------- which game to record ----------
+// Automatic = the game being played; or a game the user picked from the open
+// apps, recorded whether or not it's in front (settings.record_target).
+const gameLabel = () => (settings?.record_target ? `Game: ${settings.record_target.replace(/\.exe$/i, "")}` : "Game: Automatic")
+  + (settings?.capture === "screen" ? " · whole screen" : "");
+
+function closeGameMenu() {
+  $("#game-menu").hidden = true;
+  $("#game-btn").setAttribute("aria-expanded", "false");
+}
+
+async function openGameMenu() {
+  const menu = $("#game-menu");
+  if (!menu.hidden) { closeGameMenu(); return; }
+  menu.replaceChildren(el("p", { class: "sub", text: "Looking for open apps…" }));
+  menu.hidden = false;
+  $("#game-btn").setAttribute("aria-expanded", "true");
+  let apps = [];
+  try { apps = await invoke("running_apps"); } catch {}
+  const listed = (exe) => settings.games.some((g) => g.toLowerCase() === exe.toLowerCase());
+  // Your listed games first, then everything else that's open.
+  apps.sort((a, b) => Number(listed(b.exe)) - Number(listed(a.exe)) || a.title.localeCompare(b.title));
+  const current = (settings.record_target || "").toLowerCase();
+  const item = (label, sub, exe) => el("button", {
+    class: "game-item", role: "menuitemradio", "aria-checked": String(current === exe.toLowerCase()),
+    onclick: () => { closeGameMenu(); save({ record_target: exe }, exe ? `Recording ${label}` : "Back to automatic"); },
+  }, el("b", { text: label }), el("span", { text: sub }));
+  // The one place to switch between the game's window and the whole screen.
+  const whole = settings.capture === "screen";
+  const screenSwitch = el("button", {
+    class: "screen-switch", role: "switch", "aria-checked": String(whole),
+    onclick: () => {
+      const next = whole ? "window" : "screen";
+      closeGameMenu();
+      save({ capture: next }, next === "screen" ? "Recording the whole screen" : "Recording just the game window");
+    },
+  }, el("span", { class: "track" }, el("i")),
+    el("span", {}, el("b", { text: "Record the whole screen" }),
+      el("span", { class: "sub", text: whole ? "On: overlays and popups show up in clips too." : "Off: just the game window, no popups." })));
+  menu.replaceChildren(
+    screenSwitch,
+    el("div", { class: "game-menu-head", text: "Record which game?" }),
+    item("Automatic", "The game you're playing (from your list, or anything fullscreen)", ""),
+    ...apps.map((a) => item(a.title, `${a.exe}${listed(a.exe) ? " · on your games list" : ""}`, a.exe)),
+    ...(apps.length ? [] : [el("p", { class: "sub", text: "No other apps are open." })]));
+}
+$("#game-btn").addEventListener("click", openGameMenu);
+document.addEventListener("click", (e) => { if (!e.target.closest(".pick-game")) closeGameMenu(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#game-menu").hidden) closeGameMenu(); });
 
 // ---------- clips ----------
 const MB = (b) => (b / 1e6).toFixed(b < 10e6 ? 1 : 0) + " MB";
@@ -120,6 +172,9 @@ function renderFilters() {
   })));
 }
 
+/// Clip cards by clip + size + featured, reused across renders.
+let cardCache = new Map();
+
 function renderClips() {
   const grid = $("#clips");
   const todayStr = new Date().toDateString();
@@ -138,8 +193,18 @@ function renderClips() {
   const key = shown.map((c) => c.path + c.bytes).join("|") + (q || filter);
   if (grid.dataset.key === key) return;
   grid.dataset.key = key;
-  // The newest clip gets the big card when you're looking at everything.
-  grid.replaceChildren(...shown.map((c, i) => clipCard(c, i === 0 && filter === "all" && !q)));
+  // The newest clip gets the big card when you're looking at everything. Cards
+  // that are still the same clip are reused (moving a node keeps its loaded
+  // thumbnail), so a new clip adds one card instead of rebuilding them all.
+  const next = new Map();
+  grid.replaceChildren(...shown.map((c, i) => {
+    const featured = i === 0 && filter === "all" && !q;
+    const id = `${c.path}|${c.bytes}|${featured}`;
+    const card = cardCache.get(id) || clipCard(c, featured);
+    next.set(id, card);
+    return card;
+  }));
+  cardCache = next;
 }
 $("#clip-search").addEventListener("input", (e) => { search = e.target.value; renderClips(); });
 
@@ -155,10 +220,10 @@ const playIcon = () => {
 };
 
 function clipCard(c, hero = false) {
-  // The file loads only when the card scrolls into view: with every card
-  // loading at once, dozens of big 1080p clips were decoded on each redraw.
-  const video = el("video", { preload: "none", muted: true });
-  video.dataset.src = fileSrc(c.path) + "#t=0.5";
+  // A small cached JPEG, fetched when the card scrolls into view (decoding a
+  // video per card to show one frame made the library lag).
+  const video = el("img", { alt: "", class: "thumb-img", decoding: "async" });
+  video.dataset.clip = c.path;
   thumbObserver.observe(video);
   let confirming = false;
   const del = el("button", { class: "btn danger", text: "Delete", "aria-label": `Move ${c.name} to Recycle Bin` });
@@ -193,7 +258,7 @@ function clipCard(c, hero = false) {
 }
 
 function discordButton(c) {
-  const b = el("button", { class: "btn discord", text: "Make Discord copy (under 10 MB)" });
+  const b = el("button", { class: "btn discord", text: "Discord copy", title: "Makes a copy under 10 MB that Discord accepts, and copies it" });
   b.addEventListener("click", async () => {
     b.disabled = true;
     b.textContent = "Making Discord copy…";
@@ -204,7 +269,7 @@ function discordButton(c) {
     } catch (e) {
       toast("Discord copy failed: " + e);
       b.disabled = false;
-      b.textContent = "Make Discord copy (under 10 MB)";
+      b.textContent = "Discord copy";
     }
   });
   return b;
@@ -298,13 +363,34 @@ function qualityDef() {
       { value: "discord", label: "Discord (10 MB)", best: `Every ${settings.clip_seconds} s clip stays under Discord's free 10 MB upload limit. Archy sizes the video to fit (720p when there's room, else 480p). Long clips can still go over.`, f: 0, q: 1, z: 0 },
       ...presets.map((p) => {
         const [best, f, q, z] = info[p.name] || ["", 1, 2, 1];
-        const mb = Math.round((p.mbps * settings.clip_seconds) / 8);
+        const mb = Math.round((p.mbps * Math.pow(Math.max(60, settings.fps) / 60, 0.6) * settings.clip_seconds) / 8); // same scaling as the tray
         const warn = mb > 10 ? " Too big for Discord's free 10 MB limit." : "";
         return { value: p.name, label: p.name, best: `${best} About ${mb} MB per ${settings.clip_seconds} s clip.${warn}`, f, q, z };
       }),
     ],
   };
 }
+
+const RECORDING_TIMING = {
+  key: "frame_timing", name: "Frame timing", rec: "smooth",
+  what: "How each frame's time is written. Only matters if you edit clips in After Effects or Premiere.",
+  options: [
+    { value: "smooth", label: "Smoothest", best: "Watching and sharing. Every frame keeps the exact moment it was on your screen, so clips play as smoothly as you played." },
+    { value: "constant", label: "For video editors", best: "After Effects, Premiere and Resolve: every frame exactly evenly spaced, so editors read the clip perfectly. If your screen's refresh rate isn't a multiple of the clip's (60 fps on a 144 Hz screen), motion looks slightly uneven." },
+  ],
+};
+
+const RECORDING_LIMIT = {
+  key: "clips_max_gb", name: "Clips folder size limit", rec: 0,
+  what: "When the clips folder grows past this, Archy moves the oldest clips to the Recycle Bin after each save (you can still restore them there). The clip you just saved is always kept.",
+  options: [
+    { value: 0, label: "No limit", best: "Keeping every clip. Archy warns when the drive gets nearly full." },
+    { value: 10, label: "10 GB", best: "Small drives and laptops." },
+    { value: 25, label: "25 GB", best: "Most people: hundreds of clips, and old ones clear themselves." },
+    { value: 50, label: "50 GB", best: "Recording at 1440p or 144 fps, which makes bigger clips." },
+    { value: 100, label: "100 GB", best: "Big drives, if you rarely clean up." },
+  ],
+};
 
 const RECORDING = () => [
   qualityDef(),
@@ -317,8 +403,8 @@ const RECORDING = () => [
       { value: 60, label: "60", best: "Most people. Smooth motion; what YouTube and Discord play best.", f: 1, q: 2, z: 2 },
       { value: 75, label: "75", best: "High-refresh players who want slightly smoother clips.", f: 2, q: 3, z: 2 },
       { value: 90, label: "90", best: "Very smooth clips for fast shooters, on a high-refresh monitor.", f: 2, q: 3, z: 3 },
-      { value: 120, label: "120", best: "120 Hz monitors and slow-motion edits. Same file size per second as 60, so each frame is a little softer; pick 1080p or higher to keep it sharp.", f: 3, q: 3, z: 3 },
-      { value: 144, label: "144", best: "144 Hz monitors: clips look exactly as smooth as you played. The most work for your graphics chip; skip it on laptops that struggle at 60.", f: 3, q: 3, z: 3 },
+      { value: 120, label: "120", best: "120 Hz monitors and slow-motion edits. Clips are about 1.5x the size of 60 fps, so every frame stays as sharp.", f: 3, q: 3, z: 3 },
+      { value: 144, label: "144", best: "144 Hz monitors: clips look exactly as smooth as you played, at about 1.7x the size of 60 fps. The most work for your graphics chip: run “Check what this PC can record” first.", f: 3, q: 3, z: 3 },
     ] },
   { key: "codec", name: "Video format", rec: "h264",
     what: "How clips are compressed. All formats cost the same FPS (the GPU's video chip does the work); newer ones look better at the same size but play in fewer places.",
@@ -327,12 +413,6 @@ const RECORDING = () => [
       { value: "hevc", label: "HEVC", best: "Better-looking clips at the same size. Some apps and older PCs won't preview it.", f: 1, q: 2, z: 1 },
       { value: "av1", label: "AV1", best: "Best quality per MB on new GPUs (RTX 40+, Radeon RX 7000+, Intel Arc). Many apps can't preview it yet.", f: 1, q: 3, z: 0 },
       { value: "auto", label: "Auto", best: "Archy uses the best format your graphics chip encodes in hardware.", f: 1, q: 3, z: 1 },
-    ] },
-  { key: "capture", name: "What to capture", rec: "window",
-    what: "Both are anti-cheat safe: Archy never injects anything into your game.",
-    options: [
-      { value: "window", label: "Game window", best: "Records only the game. Discord popups and notifications never end up in your clips." },
-      { value: "screen", label: "Whole screen", best: "Games that don't record properly as a window, or when you want overlays in the clip." },
     ] },
   { key: "efficiency_mode", name: "Efficiency mode", rec: true,
     what: "Keeps Archy away from your game's CPU time: low priority, power-saving scheduling, and on newer Intel/AMD chips only the efficiency cores.",
@@ -349,9 +429,68 @@ const RECORDING = () => [
 ];
 
 function renderRecording() {
-  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), screenPicker(), gpuPicker());
+  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), screenPicker(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_LIMIT));
   loadMonitors();
   loadGpus();
+}
+
+// ---------- "Check what this PC can record" ----------
+// Records a test window at 60, 120 and 144 fps and checks every frame for
+// tearing, smudging, skipped frames and an uneven frame rate.
+const selfTest = { running: false, results: [], error: "" };
+
+function selfTestCard() {
+  const rows = selfTest.results.map((r) => {
+    const verdict = r.error ? `Couldn't test: ${r.error}`
+      : r.pass ? "Smooth and clean"
+      : r.clean ? `Clean, but ${r.skipped} frames were missed: the PC was too busy (a game or app running?)`
+      : `Problems: ${[r.tears && "tearing", r.smudges && "smudging", r.backwards && "frames out of order", r.wrong_colours && "wrong colours", r.decode_errors && "broken video"].filter(Boolean).join(", ") || "not smooth"}`;
+    return el("div", { class: "selftest-row" + (r.pass ? " ok" : " bad") },
+      el("b", { text: `${r.fps} fps` }),
+      el("span", { text: verdict }),
+      el("span", { class: "sub", text: r.error ? "" : `${r.encoder} · ${Math.round(r.cpu_core_pct)}% CPU` }));
+  });
+  const best = selfTest.running ? null : Math.max(0, ...selfTest.results.filter((r) => r.pass).map((r) => r.fps));
+  const done = !selfTest.running && selfTest.results.length > 0;
+  const actions = [el("button", { class: "btn" + (done ? "" : " primary"), text: selfTest.running ? "Testing…" : done ? "Test again" : "Run the check", disabled: selfTest.running ? "" : null, onclick: runSelfTest })];
+  if (done) actions.unshift(el("button", { class: "btn", text: "Copy report", title: "Copies the results with your GPU, driver and Windows version, to paste when asking for help", onclick: copySelfTestReport }));
+  if (done && best && best !== settings.fps) {
+    actions.push(el("button", { class: "btn primary", text: `Use ${best} fps`, onclick: () => { save({ fps: best }, `Frame rate: ${best}`); renderRecording(); } }));
+  }
+  return el("div", { class: "card setting", id: "self-test" },
+    el("div", { class: "about" }, el("h3", { text: "Check what this PC can record" }),
+      el("p", { text: "Records a test pattern at 60, 120 and 144 fps and checks every frame for tearing, smudging and skipped frames. Takes about a minute; a test window pops up while it runs. Close your game first for a fair result." })),
+    el("div", { class: "pick" },
+      rows.length ? el("div", { class: "selftest-rows" }, rows) : null,
+      done ? el("p", { class: "sub", text: best ? `Your PC records ${best} fps cleanly.` : "Even 60 fps missed frames. Close games and heavy apps and test again; if it still misses, try 30 or 45 fps or a lower quality." } ) : null,
+      el("div", { class: "welcome-actions" }, actions)));
+}
+
+/// Everything someone helping needs, as text to paste (nothing is sent anywhere).
+async function copySelfTestReport() {
+  let version = "";
+  try { version = await invoke("app_version"); } catch { /* older build */ }
+  const report = { archy: version, settings: { quality: settings.quality, fps: settings.fps, codec: settings.codec, encoder_gpu: settings.encoder_gpu }, results: selfTest.results };
+  const text = "Archy self-test report\n" + JSON.stringify(report, null, 2);
+  try { await navigator.clipboard.writeText(text); toast("Report copied. Paste it where you're asking for help"); }
+  catch { toast("Couldn't copy the report"); }
+}
+
+async function runSelfTest() {
+  if (selfTest.running) return;
+  selfTest.running = true;
+  selfTest.results = [];
+  const redraw = () => $("#self-test")?.replaceWith(selfTestCard());
+  redraw();
+  for (const fps of [60, 120, 144]) {
+    let r;
+    try { r = await invoke("self_test", { fps }); } catch (e) { r = { fps, error: String(e) }; }
+    selfTest.results.push(r);
+    redraw();
+    if (r.error && !r.fps) break;
+  }
+  selfTest.running = false;
+  redraw();
 }
 
 // ---------- GPU picker ----------
@@ -407,7 +546,7 @@ function screenPicker() {
   select.addEventListener("change", () => save({ capture_monitor: select.value }, `Recording: ${select.selectedOptions[0].text}`));
   return el("div", { class: "card setting", id: "screen-picker" },
     el("div", { class: "about" }, el("h3", { text: "Which screen" }),
-      el("p", { text: "With Whole screen on, Archy records this screen while a game is open, like picking a screen to share." })),
+      el("p", { text: "With \u201cRecord the whole screen\u201d on (the Game button at the top), Archy records this screen while a game is open." })),
     el("div", { class: "pick" },
       el("div", { class: "field" }, select, el("button", { class: "btn", text: "Refresh", onclick: loadMonitors })),
       el("p", { class: "sub", text: "If the screen is unplugged, Archy records the screen the game is on instead." })));
@@ -571,18 +710,9 @@ function renderAudio() {
       "If it's unplugged, Archy uses Windows' default mic instead. Voice clipping listens on this mic too."),
     devicePicker("output_device", devices.outputs, "Speakers / headphones", "Which output track 1 (everything you heard) records from. Pick the one you actually listen on.",
       "If it's unplugged, Archy uses Windows' default output instead."),
-    onOff("audio_everything", "Track 1: everything you heard", "All PC audio mixed together: game, friends, music, plus your microphone when it's on below. Discord, phones and most players only play this track.",
-      "Clips that sound right everywhere. Keep this on.", "Silent clips in apps that only play the first track."),
-    volumeRow("volume_everything", "Track 1 volume", "How loud everything the PC plays is in track 1 (your mic has its own slider below)."),
-    onOff("audio_game", "Game only", "A separate track with just the game's sound.",
-      "Editing: turn the game up or down on its own.", "Smaller files if you never edit."),
-    volumeRow("volume_game", "Game track volume", "How loud the game-only track is."),
-    onOff("audio_discord", "Discord only", "A separate track with just your friends in voice chat.",
-      "Muting or lowering friends later without losing game sound.", "Keeping friends' voices out of the separate tracks (they're still in track 1)."),
-    volumeRow("volume_discord", "Discord track volume", "How loud the Discord-only track is."),
-    onOff("audio_mic", "Your microphone", "Your voice, mixed into track 1 (so every player hears you) and also kept as its own track.",
-      "Commentary and reactions; turn yourself up or down later.", "Keeping your mic out of clips entirely."),
-    volumeRow("volume_mic", "Microphone volume", "How loud your voice is, in track 1 and in your own track."),
+    soundMixCard(),
+    ...(settings.audio_mode === "separate" ? [] : [onOff("record_stems", "Keep each source as its own track", "In One volume mode, also record the game, Discord and your mic as separate tracks, so the editor can rebalance them after the clip is saved.",
+      "Fixing the mix later in the editor.", "The lightest recording: one audio track (one audio encoder instead of four).")]),
     settingCard({ key: "audio_kbps", name: "Audio quality", rec: 160,
       what: "Bitrate per track. Audio is tiny next to video; higher is clearer music and voices.",
       options: [
@@ -595,6 +725,41 @@ function renderAudio() {
     el("div", { id: "voice-settings" }));
   // The voice section lives inside this page, so redraw it whenever the page is.
   renderVoice();
+}
+
+// What's in a clip's sound, like the editor: one main volume, or each source on
+// its own. Only sliders; the mode decides which ones count (the others are off).
+function soundMixCard() {
+  const separate = settings.audio_mode === "separate";
+  const slider = (key, name, about, enabled, offAt0) => {
+    const v = settings[key];
+    const out = el("span", { class: "mix-val", text: !enabled ? "—" : offAt0 && v === 0 ? "Off" : `${v}%` });
+    const range = el("input", { type: "range", min: 0, max: 200, step: 5, value: v, "aria-label": `${name} volume`, disabled: enabled ? null : "" });
+    range.addEventListener("input", () => { out.textContent = offAt0 && Number(range.value) === 0 ? "Off" : `${range.value}%`; });
+    range.addEventListener("change", () => save({ [key]: Number(range.value) }, `${name}: ${offAt0 && Number(range.value) === 0 ? "not recorded" : range.value + "%"}`));
+    range.addEventListener("dblclick", () => { if (enabled) save({ [key]: 100 }, `${name}: 100%`); });
+    return el("div", { class: "mix-row" + (enabled ? "" : " off") },
+      el("div", {}, el("b", { text: name }), el("span", { class: "sub", text: about })), range, out);
+  };
+  return el("div", { class: "card" },
+    el("div", { class: "mix-head" },
+      el("div", {}, el("h3", { text: "Sound in your clips" }),
+        el("p", { class: "sub", style: "margin:0", text: separate
+          ? "Each source at its own volume. The main volume is off. A source at 0% isn't recorded at all, so 0% on your mic keeps it out of clips."
+          : "One volume for everything: game, friends, your mic and other apps. To change one of them on its own, pick Each source." })),
+      el("div", { class: "seg", role: "group", "aria-label": "How to set the sound" },
+        [["main", "One volume"], ["separate", "Each source"]].map(([m, label]) => el("button", {
+          "aria-pressed": String((settings.audio_mode || "main") === m),
+          onclick: () => save({ audio_mode: m }, m === "separate" ? "Each source at its own volume" : "One volume for everything"),
+        }, label)))),
+    slider("volume_everything", "Main volume", "Everything you heard, plus your mic", !separate, false),
+    el("div", { class: "mix-sub", text: "Each source" }),
+    slider("volume_game", "Game", "Only the game's sound", separate, true),
+    slider("volume_discord", "Discord", "Your friends in voice chat", separate, true),
+    slider("volume_mic", "Microphone", "Your voice", separate, true),
+    el("p", { class: "sub", style: "margin-top:12px", text: (separate || settings.record_stems
+      ? "Clips always have one mixed track that every player plays, plus the game, Discord and your mic as separate tracks you can rebalance later in the editor."
+      : "Clips have one mixed track (separate tracks are off below).") + " Double-click a slider to reset it to 100%." }));
 }
 
 // A 0-200% volume slider; saves when released.
@@ -615,6 +780,7 @@ function aboutCard() {
   return el("div", { class: "card about-card" },
     el("div", {}, el("h3", { text: `Archy v${appVersion}` }),
       el("p", { class: "sub", text: "The version installed on this PC. Archy checks GitHub for a newer one when it starts, if \"Check for updates\" is on." })),
+    el("button", { class: "btn", text: "Show the tour again", onclick: () => window.startWelcome?.() }),
     el("button", { class: "btn", text: "Check now", onclick: async () => {
       updateDialog();
     } }));
@@ -628,6 +794,8 @@ function renderGeneral() {
     onOff("sound_on_save", "Sound when a clip saves", "Archy's short two-note chime.",
       "Hearing it worked while you keep playing, even in fullscreen.", "Silence: for streams or quiet rooms."),
     volumeRow("clip_sound_volume", "Clip sound volume", "How loud the clip-saved chime is."),
+    onOff("sound_on_hotkey", "Ping when you press the clip key", "The same soft blip as voice clipping, the moment you press it, before the clip finishes saving.",
+      "Knowing the key press registered, even in fullscreen.", "Only the saved chime."),
     onOff("notify_on_start", "\"Archy is running\" notification", "A reminder when Archy starts that it's ready and what your hotkey is.",
       "Remembering your hotkey.", "A quieter start-up."),
     onOff("start_with_windows", "Start with Windows", "Archy starts in the tray when you sign in, so clips are always ready.",
@@ -709,7 +877,7 @@ function renderVoice() {
     voiceTestCard(),
     onOff("sound_on_voice", "Sound when a phrase is heard", "A soft blip the moment Archy hears you, before the clip finishes saving.",
       "Knowing Archy heard you.", "Silent voice clipping."),
-    volumeRow("voice_sound_volume", "Voice ping volume", "How loud the blip is when Archy hears your phrase."));
+    volumeRow("voice_sound_volume", "Ping volume", "How loud the blip is when Archy hears your phrase or you press the clip key."));
 }
 
 // ---------- voice fine-tuning and test ----------
@@ -935,11 +1103,15 @@ function calibrationSteps(phrase) {
   const done = calib.takes.length;
   out.push(el("div", { class: "calib-step" + (talking ? " past" : "") },
     el("b", { text: `1. Say "${phrase}"` }),
-    el("div", { class: "calib-dots" }, Array.from({ length: CAL_TAKES }, (_, i) => el("span", {
-      class: i < done ? (calib.takes[i] ? "ok" : "miss") : "",
-      text: i < done ? (calib.takes[i] ? "✓" : "✗") : String(i + 1),
-      title: i < done ? (calib.takes[i] ? "Heard" : "Not heard at the Balanced setting") : "",
-    })))));
+    el("div", { class: "calib-dots" }, Array.from({ length: CAL_TAKES }, (_, i) => {
+      const t = calib.takes[i];
+      const state = i >= done ? "" : t == null ? "wait" : t ? "ok" : "miss";
+      return el("span", {
+        class: state,
+        text: { "": String(i + 1), wait: "…", ok: "✓", miss: "✗" }[state],
+        title: { "": "", wait: "Checking…", ok: "Heard", miss: "Not heard at the Balanced setting (calibration still learns from it)" }[state],
+      });
+    }))));
   if (talking) {
     const n = Math.min(calib.talked, CAL_SENTENCES.length - 1);
     out.push(el("div", { class: "calib-step" },
@@ -1012,11 +1184,17 @@ async function runCalibration(phrase) {
     }
     if (m.step === "ready") { calib.ready = true; showCalib("", "Hold the button, say your phrase the way you would in a game, then let go."); }
     else if (m.step === "take") {
+      // Listed at once; whether it was heard arrives a moment later ("checked").
       calib.takes[m.n - 1] = m.heard;
       calib.takes.length = m.n;
       if (m.n >= CAL_TAKES) { calib.stage = "talk"; showCalib("", "Now two sentences that shouldn't set it off. Read each one normally."); }
-      else showCalib(m.heard ? `Heard it (${m.n} of ${CAL_TAKES})` : `Take ${m.n} saved`,
-        m.heard ? "" : "Not heard at the Balanced setting yet. That's fine: calibration learns how you say it. Keep going.");
+      else showCalib(`Take ${m.n} saved`, "");
+    } else if (m.step === "checked") {
+      if (m.n <= calib.takes.length) calib.takes[m.n - 1] = m.heard;
+      if (calib.stage === "takes" && m.n === calib.takes.length) {
+        showCalib(m.heard ? `Heard it (${m.n} of ${CAL_TAKES})` : `Take ${m.n} saved`,
+          m.heard ? "" : "Not heard at the Balanced setting yet. That's fine: calibration learns how you say it. Keep going.");
+      } else renderVoice();
     } else if (m.step === "undone") { calib.takes.length = m.n; showCalib("Last take removed", ""); }
     else if (m.step === "talked") {
       calib.talked += 1;
@@ -1026,12 +1204,13 @@ async function runCalibration(phrase) {
       }
       renderVoice();
     } else if (m.step === "analyzing") showCalib("Finding your setting…", "Testing settings on your recording. About 30 seconds; you can play meanwhile.");
-    else if (m.step === "error") { calib.running = false; showCalib("Calibration didn't finish", m.message); }
+    else if (m.step === "error") { calib.running = false; showCalib("Calibration didn't finish", m.message); window.welcomeAfterCalibration?.(); }
     else if (m.step === "done") {
       calib.running = false;
       calib.result = m;
       if (m.hits >= Math.min(CAL_MIN, m.prompts)) {
         const learned = m.learned?.length ? ` Learned ${m.learned.length} way${m.learned.length === 1 ? "" : "s"} you say it.` : "";
+        window.welcomeAfterCalibration?.();
         showCalib(`Done: caught ${m.hits} of ${m.prompts}`, `No false alarms on the look-alike sentences.${learned} Archy uses this now (Sensitivity: Calibrated). Run the test below to check it.`);
         save({ voice_sensitivity: 0, voice_fine_tune: 0, voice_tuning: { score: m.score, paths: m.paths, threshold: m.threshold, hits: m.hits, prompts: m.prompts, phrase, learned: m.learned || [] } }, "Voice calibrated");
       } else {
@@ -1185,16 +1364,29 @@ async function checkUpdate(openDialog = true) {
 }
 setInterval(() => checkUpdate(false), 6 * 60 * 60 * 1000);
 
-// Loads a clip's thumbnail once its card is (nearly) visible.
+// Loads a clip's thumbnail once its card is (nearly) visible, a few at a time
+// so making new ones never holds the window up. Cached ones come back at once.
+const thumbQueue = [];
+let thumbsBusy = 0;
+function pumpThumbs() {
+  while (thumbsBusy < 3 && thumbQueue.length) {
+    const img = thumbQueue.shift();
+    if (!img.isConnected) continue;
+    thumbsBusy++;
+    invoke("clip_thumb", { path: img.dataset.clip })
+      .then((p) => { img.src = fileSrc(p); img.onload = () => img.classList.add("ready"); })
+      .catch(() => img.classList.add("none"))
+      .finally(() => { thumbsBusy--; pumpThumbs(); });
+  }
+}
 const thumbObserver = new IntersectionObserver((entries) => {
   for (const e of entries) {
     if (!e.isIntersecting) continue;
-    const v = e.target;
-    thumbObserver.unobserve(v);
-    v.preload = "metadata";
-    v.src = v.dataset.src;
+    thumbObserver.unobserve(e.target);
+    thumbQueue.push(e.target);
   }
-}, { rootMargin: "200px" });
+  pumpThumbs();
+}, { rootMargin: "300px" });
 
 // ---------- start ----------
 (async function start() {
@@ -1211,6 +1403,7 @@ const thumbObserver = new IntersectionObserver((entries) => {
   renderAll();
   refreshStatus();
   loadClips();
+  window.maybeWelcome?.();
   loadDevices();
   checkUpdate();
   setInterval(refreshStatus, 2000);

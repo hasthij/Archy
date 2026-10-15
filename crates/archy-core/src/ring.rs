@@ -36,6 +36,14 @@ impl ReplayBuffer {
         self.bytes
     }
 
+    /// Seconds from the first to the end of the last packet.
+    pub fn span_seconds(&self) -> f64 {
+        match (self.packets.front(), self.packets.back()) {
+            (Some(a), Some(b)) => (b.time + b.duration - a.time) as f64 / 1e7,
+            _ => 0.0,
+        }
+    }
+
     pub fn push(&mut self, packet: StoredPacket) {
         let latest = packet.time;
         self.bytes += packet.data.len();

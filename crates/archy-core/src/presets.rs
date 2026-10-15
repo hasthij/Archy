@@ -22,8 +22,9 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         name: "720p",
         height: 720,
-        mbps: 5.0,
-    }, // ~19 MB
+        // 5 Mbps looked grainy in motion (fast camera over detailed ground).
+        mbps: 6.5,
+    }, // ~25 MB
     Preset {
         name: "1080p",
         height: 1080,

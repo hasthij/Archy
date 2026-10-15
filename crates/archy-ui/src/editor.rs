@@ -44,11 +44,92 @@ pub fn tools_dir() -> Option<PathBuf> {
         .find(|d| d.join("ffmpeg.exe").is_file() && d.join("ffprobe.exe").is_file())
 }
 
+/// FFmpeg runs below normal priority: an export or GIF made while a game runs
+/// must not take CPU from the game (it just takes a little longer).
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+
 fn tool(name: &str) -> Result<Command, String> {
     let dir = tools_dir().ok_or(MISSING)?;
     let mut c = Command::new(dir.join(name));
-    c.creation_flags(CREATE_NO_WINDOW).stdin(Stdio::null());
+    c.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS).stdin(Stdio::null());
     Ok(c)
+}
+
+/// Ties a long-running FFmpeg to this window's lifetime: if Archy crashes or is
+/// ended from Task Manager mid-export, Windows ends FFmpeg too (it used to keep
+/// running in the background). A job object closed with the process kills it.
+pub fn tie_to_archy(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    // The handle stays open for the life of the process (closing it ends the job).
+    static JOB: OnceLock<Option<isize>> = OnceLock::new();
+    let job = JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(None, None).ok()?;
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+        .ok()?;
+        Some(job.0 as isize)
+    });
+    if let Some(job) = job {
+        unsafe {
+            let _ = AssignProcessToJobObject(HANDLE(*job as *mut _), HANDLE(child.as_raw_handle()));
+        }
+    }
+}
+
+/// Clears the editor's scratch files (imported media, previews, half-finished
+/// exports: 115 MB had piled up). Run when the window starts, when no edit can be
+/// in progress. Finished exports are kept a day (one may still be on the clipboard).
+pub fn clean_temp() {
+    for sub in ["media", "preview", "export-work"] {
+        let _ = std::fs::remove_dir_all(temp_dir(sub));
+    }
+    let day = std::time::Duration::from_secs(24 * 60 * 60);
+    for e in std::fs::read_dir(temp_dir("exports")).into_iter().flatten().flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|a| a > day));
+        if old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Removes thumbnails of clips that no longer exist (deleted or edited).
+pub fn prune_thumbs(folder: &Path) {
+    let keep: std::collections::HashSet<PathBuf> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| thumb_path(&e.path()))
+        .collect();
+    for e in std::fs::read_dir(thumbs_dir()).into_iter().flatten().flatten() {
+        // A thumbnail being made right now (.part.jpg) is left alone.
+        let writing = e.file_name().to_string_lossy().ends_with(".part.jpg");
+        if !writing && !keep.contains(&e.path()) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Where a clip's thumbnail is cached (named by the clip's path, size and date).
+fn thumb_path(clip: &Path) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let meta = std::fs::metadata(clip).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    clip.hash(&mut h);
+    meta.len().hash(&mut h);
+    meta.modified().ok().hash(&mut h);
+    Some(thumbs_dir().join(format!("{:016x}.jpg", h.finish())))
 }
 
 /// Scratch space for track previews and clipboard exports.
@@ -149,6 +230,40 @@ pub fn preview_tracks(path: &Path, count: usize) -> Result<Vec<String>, String> 
 
 fn preview_dir() -> PathBuf {
     temp_dir("preview")
+}
+
+/// Where clip thumbnails are cached (made once, then shown instantly).
+pub fn thumbs_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Archy")
+        .join("thumbs")
+}
+
+/// A small JPEG of a clip for the library: one frame half a second in, 480 px
+/// wide. Cached by the clip's name, size and date, so it's only made once (an
+/// edited or replaced clip gets a new one).
+pub fn thumbnail(clip: &Path) -> Result<PathBuf, String> {
+    let out = thumb_path(clip).ok_or("no such clip")?;
+    let dir = thumbs_dir();
+    if out.exists() {
+        return Ok(out);
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let tmp = out.with_extension("part.jpg");
+    let r = tool("ffmpeg.exe")?
+        .args(["-y", "-v", "error", "-ss", "0.5", "-i"])
+        .arg(clip)
+        .args(["-frames:v", "1", "-an", "-vf", "scale='min(480,iw)':-2", "-q:v", "5"])
+        .arg(&tmp)
+        .output()
+        .map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
+    if !r.status.success() || std::fs::rename(&tmp, &out).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("no thumbnail".into());
+    }
+    Ok(out)
 }
 
 /// Longest video or GIF that can be put on a clip.
@@ -612,6 +727,7 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
         }
         cmd.arg(&partial).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
+        tie_to_archy(&child);
         let stderr = child.stderr.take();
         let errors = std::thread::spawn(move || {
             let mut s = String::new();
@@ -727,8 +843,16 @@ mod export_tests {
         let copy = archy_core::discord::make_copy(&src, &discord, 10_000_000).unwrap();
         println!("discord copy of a named clip: {} KB", copy.bytes / 1024);
         println!("clip: {:.1} s {}x{} @{:.0} tracks {:?}", clip_info.duration, clip_info.width, clip_info.height, clip_info.fps, clip_info.tracks);
-        assert!(clip_info.duration > 6.0);
+        assert!(clip_info.duration > 7.5, "the test clip must be over 7.5 s (it cuts 2 s to 7 s)");
 
+        // Library thumbnail: made once, then reused from the cache.
+        let t0 = std::time::Instant::now();
+        let thumb = thumbnail(&src).unwrap();
+        let made = t0.elapsed();
+        assert!(std::fs::metadata(&thumb).unwrap().len() > 1000);
+        let t1 = std::time::Instant::now();
+        assert_eq!(thumbnail(&src).unwrap(), thumb);
+        println!("thumbnail: made in {} ms, cached in {} us", made.as_millis(), t1.elapsed().as_micros());
         let previews = preview_tracks(&src, clip_info.tracks.len()).unwrap();
         assert!(previews.iter().all(|p| std::fs::metadata(p).unwrap().len() > 0));
 

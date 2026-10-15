@@ -21,6 +21,13 @@ use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 pub mod mf;
 pub mod vpl;
 
+/// Test-only fault injection (`ARCHY_FAULT=<name>`), so the failure paths a bad
+/// NVIDIA/AMD driver would trigger can be exercised on any PC
+/// (examples/fault_test). Never set in normal use.
+pub fn fault(name: &str) -> bool {
+    std::env::var("ARCHY_FAULT").is_ok_and(|v| v == name)
+}
+
 pub struct Config {
     pub codec: Codec,
     pub width: u32,
@@ -41,6 +48,30 @@ pub struct Input {
     pub texture: ID3D11Texture2D,
     /// Presentation time in 100 ns units.
     pub time: i64,
+    /// Counts this frame as in flight until the encoder is done with it.
+    pub ticket: Option<InFlight>,
+    /// The same picture as the previous frame (a slot filled with a repeat). An
+    /// encoder that can, writes a near-free "nothing changed" frame instead.
+    pub repeat: bool,
+}
+
+/// A frame the encoder hasn't finished taking yet. The recorder converts into a
+/// small rotating pool of textures; it only converts another frame while fewer
+/// than the pool can spare are in flight, so a queued frame is never overwritten
+/// by a newer one (which showed as old pictures after new ones under load).
+pub struct InFlight(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl InFlight {
+    pub fn new(count: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(count.clone())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 /// One compressed frame (Annex B for H.264/HEVC, OBUs for AV1).
@@ -62,6 +93,8 @@ pub struct Stats {
     pub late: u64,
     /// Keyframes the encoder was made to insert because it ignored the keyframe interval.
     pub forced_keyframes: u64,
+    /// Repeated frames written as near-free skip frames (oneVPL).
+    pub skipped: u64,
 }
 
 /// Whether a compressed frame really is a safe place to start decoding, read

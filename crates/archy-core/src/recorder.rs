@@ -1,7 +1,7 @@
 //! The always-on recorder: capture → convert → encode into the replay buffer.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use archy_audio::{AacInfo, AudioCapture, Source};
 use archy_capture::{Capture, Target};
-use archy_encode::{Backend, Config, Encoder, Input};
+use archy_encode::{Backend, Config, Encoder, InFlight, Input};
 use archy_gpu::convert::{fit_size, AnyConverter, ConvertMode};
 use archy_gpu::device::{Gpu, RECORDER_GPU_PRIORITY};
 use archy_gpu::probe::Codec;
@@ -17,14 +17,18 @@ use archy_gpu::SendPtr;
 use archy_mux::{AudioTrack, Mp4Writer};
 use windows::core::{Error, Result};
 use windows::Win32::Foundation::{E_FAIL, LUID};
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
-use crate::cadence::Cadence;
+use crate::cadence::{clock_now, Pacer};
 use crate::ring::{ReplayBuffer, StoredPacket};
 
-/// NV12 textures in rotation: queue depth + frames the encoder may still hold + one being written.
-const NV12_POOL: usize = 8;
+/// NV12 textures in rotation: more than can ever be in flight (QUEUE_DEPTH, plus
+/// one being written), so a texture is never reused while the encoder needs it.
+const NV12_POOL: usize = 12;
 /// Frames allowed to wait for the encoder. Beyond this a frame is dropped, never queued.
-const QUEUE_DEPTH: usize = 3;
+/// Six absorbs an encoder's occasional slow frame (Media Foundation encoders had
+/// ~1-2% drops with three, each a hole in the clip's constant frame rate).
+const QUEUE_DEPTH: usize = 6;
 
 #[derive(Clone, Debug)]
 pub struct RecorderConfig {
@@ -47,6 +51,15 @@ pub struct RecorderConfig {
     /// Audio tracks, in file order (track 1 is what single-track players play).
     pub audio: Vec<AudioSource>,
     pub audio_kbps: u32,
+    /// Encoders (`RecorderInfo::encoder_key`) that failed on this PC: skipped, so
+    /// the next encoder, GPU or codec is used instead.
+    pub avoid: Vec<String>,
+    /// `true`: every frame exactly 1/fps apart, repeats filling the gaps (what
+    /// After Effects / Premiere need). `false`: each frame keeps the moment it was
+    /// shown (smoothest playback; how 0.4.0 recorded). With constant timing a
+    /// 60 fps clip from a 144 Hz screen judders: frames shown 14 and 21 ms apart
+    /// get stamped 16.7 ms apart.
+    pub constant_rate: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -72,8 +85,12 @@ pub struct RecorderInfo {
     pub height: u32,
     pub fps: u32,
     pub encoder: String,
+    /// Encoder + codec, as `RecorderConfig::avoid` names it.
+    pub encoder_key: String,
     /// The GPU recording runs on.
     pub gpu: String,
+    /// Recording on the Intel oneVPL path (the GPU priority adapts only there; see GpuContest).
+    pub vpl: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +122,12 @@ struct Shared {
     encoder_stats: Mutex<Option<archy_encode::Stats>>,
     /// Why recording ended, for the log and the user.
     reason: Mutex<String>,
+    /// Capture-clock time of the encoder's latest packet (0: none yet).
+    last_output: AtomicI64,
+    /// Capture-clock time of the latest frame handed to the encoder.
+    last_input: AtomicI64,
+    /// Repeats written as near-free skip frames (oneVPL).
+    skip_frames: AtomicU64,
 }
 
 /// A GPU encoder that hasn't taken a single frame for this long while frames
@@ -113,6 +136,15 @@ const ENCODER_STALL: Duration = Duration::from_secs(10);
 /// How long to wait for the encoder to finish when recording stops. A hung
 /// driver can block it forever; Archy must never freeze waiting for it.
 const ENCODER_EXIT_WAIT: Duration = Duration::from_secs(5);
+/// A started recording must be up within this; a driver that hangs while the
+/// encoder is created must never freeze the caller (the tray's message thread).
+const START_LIMIT: Duration = Duration::from_secs(15);
+/// Frames going in but no packet coming out for this long: the encoder has
+/// silently stopped (seen with misbehaving drivers). Recording ends with an
+/// "encoder" reason so the tray restarts on the next encoder.
+/// Long enough that a GPU overloaded for a moment (a game plus a calibration:
+/// frames taking over a second each) isn't mistaken for a dead encoder.
+const OUTPUT_STALL: i64 = 80_000_000; // 8 s, capture-clock units
 
 
 pub struct Recorder {
@@ -140,12 +172,16 @@ impl Recorder {
             mislabeled: AtomicU64::new(0),
             encoder_stats: Mutex::new(None),
             reason: Mutex::new(String::new()),
+            last_output: AtomicI64::new(0),
+            last_input: AtomicI64::new(0),
+            skip_frames: AtomicU64::new(0),
         });
         let (ready_tx, ready_rx) = sync_channel::<Result<RecorderInfo>>(1);
         let thread_shared = shared.clone();
         let capture_thread = thread::Builder::new()
             .name("archy-capture".into())
             .spawn(move || {
+                let _mmcss = crate::eco::video_thread();
                 let result = capture_loop(cfg, &thread_shared, &ready_tx);
                 if let Ok(mut r) = thread_shared.reason.lock() {
                     *r = match &result {
@@ -162,9 +198,16 @@ impl Recorder {
                 thread_shared.finished.store(true, Ordering::Release);
             })
             .map_err(|e| Error::new(E_FAIL, e.to_string()))?;
-        let info = ready_rx
-            .recv()
-            .map_err(|_| Error::new(E_FAIL, "recorder thread exited during start-up"))??;
+        let info = match ready_rx.recv_timeout(START_LIMIT) {
+            Ok(r) => r?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // The thread is stuck in a driver call: tell it to stop if it ever
+                // returns, and leave it behind rather than wait forever.
+                shared.stop.store(true, Ordering::Release);
+                return Err(Error::new(E_FAIL, "the GPU encoder took over 15 s to start (driver problem)"));
+            }
+            Err(_) => return Err(Error::new(E_FAIL, "recorder thread exited during start-up")),
+        };
         // Audio never blocks video: a source that can't start is reported and skipped.
         let mut audio = Vec::new();
         let mut audio_report = Vec::new();
@@ -202,6 +245,22 @@ impl Recorder {
         })
     }
 
+    /// Stops capturing (video and audio) without waiting, and keeps the replay
+    /// buffer readable: a recording that is replaced (a setting changed, the
+    /// encoder failed, the game was minimized) can still be saved from. The
+    /// threads are joined when the recorder is dropped.
+    pub fn stop(&self) {
+        self.shared.stop.store(true, Ordering::Release);
+        for a in &self.audio {
+            a._capture.stop();
+        }
+    }
+
+    /// Seconds of video in the replay buffer.
+    pub fn buffered_seconds(&self) -> f64 {
+        self.shared.ring.lock().map(|r| r.span_seconds()).unwrap_or(0.0)
+    }
+
     /// Names of the audio tracks being recorded, in file order.
     pub fn audio_tracks(&self) -> Vec<String> {
         self.audio.iter().map(|a| a.name.clone()).collect()
@@ -237,6 +296,10 @@ impl Recorder {
         if mislabeled > 0 {
             notes.push(format!("{mislabeled} keyframe labels corrected"));
         }
+        let skips = self.shared.skip_frames.load(Ordering::Relaxed);
+        if skips > 0 {
+            notes.push(format!("{skips} repeats written as skip frames"));
+        }
         if let Some(s) = self.shared.encoder_stats.lock().ok().and_then(|s| s.clone()) {
             if s.late > 0 {
                 notes.push(format!("{} slow frames (>1 s)", s.late));
@@ -265,6 +328,7 @@ impl Recorder {
     /// re-encoded. The file appears atomically (written under a temporary name).
     pub fn save_clip(&self, seconds: u32, path: &Path) -> Result<ClipInfo> {
         let started = Instant::now();
+        let _fast = crate::eco::Unthrottled::new();
         let packets = self
             .shared
             .ring
@@ -343,7 +407,20 @@ impl Recorder {
             return Err(e);
         }
         append_track_names(&partial, &names);
-        std::fs::rename(&partial, path).map_err(|e| Error::new(E_FAIL, e.to_string()))?;
+        // OneDrive or antivirus can hold a new file for a moment: retry, and never
+        // leave a stray .partial.mp4 behind.
+        let mut renamed = std::fs::rename(&partial, path);
+        for _ in 0..10 {
+            if renamed.is_ok() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+            renamed = std::fs::rename(&partial, path);
+        }
+        if let Err(e) = renamed {
+            let _ = std::fs::remove_file(&partial);
+            return Err(Error::new(E_FAIL, format!("couldn't finish the clip file ({e})")));
+        }
         Ok(ClipInfo {
             path: path.to_path_buf(),
             seconds: (last.time + last.duration - first.time) as f64 / 1e7,
@@ -358,6 +435,60 @@ impl Drop for Recorder {
         self.shared.stop.store(true, Ordering::Release);
         if let Some(t) = self.capture_thread.take() {
             let _ = t.join();
+        }
+    }
+}
+
+/// The recorder's GPU priority, adapted to how busy the GPU is. It starts below
+/// the game's (RECORDER_GPU_PRIORITY: the game wins every contest, zero FPS
+/// cost). On a GPU the game keeps busy (integrated graphics, where the game and
+/// the recorder share one chip) the recorder's small jobs then wait behind every
+/// game frame, its queue fills and the clip loses frames: 13% at 1080p60 in
+/// Roblox on Intel UHD, seen as stutter. So while frames are being lost the
+/// recorder gets the same priority as the game (its work is ~1-2 ms a frame),
+/// and drops back once it has been clean for a while.
+/// Only on the oneVPL (Intel) path: on Media Foundation the encoder shares this
+/// device, and raising it there would also raise NVENC/AMF work, whose cost to
+/// the game is untested.
+struct GpuContest {
+    dxgi: Option<windows::Win32::Graphics::Dxgi::IDXGIDevice>,
+    boosted: bool,
+    at: Instant,
+    clean_since: Instant,
+    counts: (u64, u64),
+}
+
+impl GpuContest {
+    const EVERY: Duration = Duration::from_secs(1);
+    const CALM: Duration = Duration::from_secs(30);
+
+    fn new(device: &windows::Win32::Graphics::Direct3D11::ID3D11Device) -> Self {
+        use windows::core::Interface;
+        Self { dxgi: device.cast().ok(), boosted: false, at: Instant::now(), clean_since: Instant::now(), counts: (0, 0) }
+    }
+
+    fn check(&mut self, shared: &Shared) {
+        if self.at.elapsed() < Self::EVERY {
+            return;
+        }
+        self.at = Instant::now();
+        let now = (shared.frames.load(Ordering::Relaxed), shared.dropped.load(Ordering::Relaxed));
+        let (sent, lost) = (now.0 - self.counts.0, now.1 - self.counts.1);
+        self.counts = now;
+        let losing = lost * 50 > sent + lost; // over 2% of this second's frames
+        let want = if losing {
+            self.clean_since = Instant::now();
+            true
+        } else {
+            self.boosted && self.clean_since.elapsed() < Self::CALM
+        };
+        if want != self.boosted {
+            self.boosted = want;
+            if let Some(d) = &self.dxgi {
+                unsafe {
+                    let _ = d.SetGPUThreadPriority(if want { 0 } else { RECORDER_GPU_PRIORITY });
+                }
+            }
         }
     }
 }
@@ -380,6 +511,11 @@ pub fn append_track_names(path: &Path, names: &[&str]) {
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(path) {
         let _ = f.write_all(&bx);
     }
+}
+
+/// How `RecorderConfig::avoid` names an encoder: its name and the codec.
+pub fn encoder_key(name: &str, codec: Codec) -> String {
+    format!("{name} | {codec:?}")
 }
 
 fn open_encoder(
@@ -414,6 +550,9 @@ fn open_encoder(
                 gop: cfg.fps * 2,
             };
             match Encoder::new(backend, gpu, &enc_cfg) {
+                Ok(e) if cfg.avoid.contains(&encoder_key(e.name(), codec)) => {
+                    last = Error::new(E_FAIL, format!("{} failed earlier on this PC", e.name()));
+                }
                 Ok(e) => return Ok((e, codec)),
                 Err(e) => last = e,
             }
@@ -442,16 +581,18 @@ fn capture_loop(
     let mut tried_others = false;
     let mut last_error = Error::new(E_FAIL, "no GPU found");
     let mut index = 0;
-    let (_gpu, capture, mut converter, mut encoder, codec, width, height) = loop {
+    let (gpu, capture, mut converter, mut encoder, codec, width, height) = loop {
         let Some(&adapter) = adapters.get(index) else {
             return Err(last_error);
         };
         index += 1;
         let attempt = (|| -> Result<_> {
             let gpu = Gpu::new(adapter, RECORDER_GPU_PRIORITY)?;
-            // Half the interval: the compositor wakes us at most twice per wanted
-            // frame, and frames arriving a hair early are never pushed to the next refresh.
-            let capture = Capture::start(&gpu.device, cfg.target, interval / 2)?;
+            // At most one frame per 3/4 interval: enough for every frame a game at
+            // up to 1.33x the clip's rate shows (so none is lost on a 144 Hz screen),
+            // and on 165-240 Hz screens the compositor copies far fewer frames
+            // nobody uses (half the interval let through up to 120 a second for 60).
+            let capture = Capture::start(&gpu.device, cfg.target, interval * 3 / 4)?;
             let (width, height) = fit_size(capture.width, capture.height, cfg.max_height);
             // Hardware encoders reject tiny frames (a minimized or collapsed window).
             let (width, height) = (width.max(160), height.max(120));
@@ -463,6 +604,9 @@ fn capture_loop(
                 cfg.fps,
                 NV12_POOL,
             )?;
+            if archy_encode::fault("start_hang") {
+                thread::sleep(Duration::from_secs(25)); // a driver call that never returns in time
+            }
             let (encoder, codec) = open_encoder(&gpu, &cfg, width, height)?;
             Ok((gpu, capture, converter, encoder, codec, width, height))
         })();
@@ -485,8 +629,11 @@ fn capture_loop(
         height,
         fps: cfg.fps,
         encoder: encoder.name().to_string(),
-        gpu: archy_gpu::device::adapter_name(_gpu.luid),
+        encoder_key: encoder_key(encoder.name(), codec),
+        gpu: archy_gpu::device::adapter_name(gpu.luid),
+        vpl: matches!(encoder, Encoder::Vpl(_)),
     };
+    let vpl = info.vpl;
 
     let (tx, rx) = sync_channel::<SendPtr<Input>>(QUEUE_DEPTH);
     let enc_shared = shared.clone();
@@ -494,12 +641,19 @@ fn capture_loop(
         .name("archy-encode".into())
         .spawn(move || -> Result<()> {
             crate::init_thread()?;
+            let _mmcss = crate::eco::video_thread();
             // Latest codec header (SPS/PPS, VPS/SPS/PPS) seen in the stream. Some
             // drivers send it only once, at the start; a clip starting at a later
             // keyframe then has no header and can't be written. Such keyframes get
             // the cached header put in front.
             let mut header: Option<Vec<u8>> = None;
+            let mut packets = 0u64;
+            let stall = archy_encode::fault("output_stall");
             let stats = encoder.run(rx, |p| {
+                packets += 1;
+                if stall && packets > 120 {
+                    thread::sleep(Duration::from_secs(60)); // as if the driver hung mid-stream
+                }
                 // Clips may only start on a frame that really resets the decoder, so
                 // the bitstream decides; starting on a mislabelled frame shows blocks
                 // and smeared colours until the next real keyframe.
@@ -530,9 +684,11 @@ fn capture_loop(
                 if let Ok(mut ring) = enc_shared.ring.lock() {
                     ring.push(packet);
                 }
+                enc_shared.last_output.store(clock_now(), Ordering::Release);
                 Ok(())
             });
             if let (Ok(s), Ok(mut slot)) = (&stats, enc_shared.encoder_stats.lock()) {
+                enc_shared.skip_frames.store(s.skipped, Ordering::Relaxed);
                 *slot = Some(s.clone());
             }
             stats.map(|_| ())
@@ -540,44 +696,175 @@ fn capture_loop(
         .map_err(|e| Error::new(E_FAIL, e.to_string()))?;
     let _ = ready.send(Ok(info));
 
-    let mut cadence = Cadence::new(cfg.fps);
+    let mut pacer = Pacer::new(cfg.fps);
+    // ARCHY_PACE_TRACE=1: timings of the first two seconds, for diagnosing start-up.
+    let trace = std::env::var_os("ARCHY_PACE_TRACE").is_some();
+    let t_start = Instant::now();
+    // The last converted frame, repeated on slots that get no new frame.
+    let mut last: Option<ID3D11Texture2D> = None;
+    // A stale first frame held back (see below).
+    let mut stale: Option<ID3D11Texture2D> = None;
+    let constant = cfg.constant_rate;
+    // Time of the last frame sent (smooth timing keeps times strictly increasing).
+    let mut last_time = i64::MIN;
     // Since when every frame has found the encoder's queue full.
     let mut backed_up: Option<Instant> = None;
+    // Sends one frame stamped `time`; Err ends the recording.
+    // A full queue gets up to one frame to make room (this thread waits, never
+    // the game): dropping at once left a gap in the clip every time the encoder
+    // had a slow frame, e.g. while it warms up.
+    let patience = Duration::from_micros(1_000_000 / cfg.fps.max(1) as u64);
+    // Frames the encoder hasn't finished taking (queued, or being read).
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let busy = {
+        let in_flight = in_flight.clone();
+        move || in_flight.load(Ordering::Acquire) >= QUEUE_DEPTH
+    };
+    let mut send = |texture: &ID3D11Texture2D, time: i64, repeat: bool| -> Result<()> {
+        let mut input = SendPtr(Input { texture: texture.clone(), time, ticket: Some(InFlight::new(&in_flight)), repeat });
+        let waited_from = Instant::now();
+        let outcome = loop {
+            match tx.try_send(input) {
+                Err(TrySendError::Full(back)) if waited_from.elapsed() < patience => {
+                    input = back;
+                    thread::sleep(Duration::from_micros(500));
+                }
+                other => break other,
+            }
+        };
+        match outcome {
+            Ok(()) => {
+                // The output watchdog starts with the first frame sent.
+                let now = clock_now();
+                let _ = shared.last_output.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
+                shared.last_input.store(now, Ordering::Release);
+                shared.frames.fetch_add(1, Ordering::Relaxed);
+                backed_up = None;
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => {
+                shared.dropped.fetch_add(1, Ordering::Relaxed);
+                // The queue has stayed full the whole time: the encoder has hung.
+                if backed_up.get_or_insert_with(Instant::now).elapsed() > ENCODER_STALL {
+                    return Err(Error::new(E_FAIL, "the GPU encoder stopped responding"));
+                }
+                Ok(())
+            }
+            Err(TrySendError::Disconnected(_)) => Err(Error::new(E_FAIL, "encoder stopped")),
+        }
+    };
+    let mut contest = GpuContest::new(&gpu.device);
+    // Off by default: on a GPU shared with the game (integrated graphics), raising
+    // the recorder to the game's priority took GPU time from the game and it felt
+    // laggy (2026-10-15). The recorder always yields to the game, as in 0.4.0.
+    // ARCHY_GPU_BOOST=1 turns it back on for testing.
+    let gpu_boost = std::env::var_os("ARCHY_GPU_BOOST").is_some();
     let result = loop {
         if shared.stop.load(Ordering::Acquire) || capture.is_closed() {
             break Ok(());
         }
-        // Sleeps until the compositor has a new frame; a static screen costs nothing.
-        let frame = match capture.next(Duration::from_millis(100)) {
-            Ok(Some(f)) => f,
-            Ok(None) => continue,
+        if vpl && gpu_boost {
+            contest.check(shared);
+        }
+        // Frames went in after the last packet came out, and nothing for 8 s: the
+        // encoder has stopped. (A still screen sends nothing in smooth timing, so
+        // "no output" alone isn't a stall.)
+        let out = shared.last_output.load(Ordering::Acquire);
+        if out != 0 && clock_now() - out > OUTPUT_STALL && shared.last_input.load(Ordering::Acquire) > out {
+            break Err(Error::new(E_FAIL, "the GPU encoder stopped producing video (no output for 8 s)"));
+        }
+        // Sleeps until the compositor has a new frame or the next slot is due,
+        // whichever is first (a static screen still gets its slots, as repeats).
+        let wait = match pacer.deadline() {
+            Some(due) if constant => Duration::from_micros(((due - clock_now()).max(0) / 10) as u64)
+                .clamp(Duration::from_millis(1), Duration::from_millis(100)),
+            _ => Duration::from_millis(100),
+        };
+        // Slots the pacer had to leave empty are frames missing from the clip
+        // (in smooth timing there are no slots to fill: a quiet screen is just quiet).
+        let lost = pacer.take_lost();
+        if lost > 0 && constant {
+            shared.dropped.fetch_add(lost, Ordering::Relaxed);
+        }
+        let t_wait = Instant::now();
+        let frame = match capture.next(wait) {
+            Ok(f) => f,
             Err(e) => break Err(e),
         };
-        if !cadence.accept(frame.time) {
+        if trace && t_start.elapsed() < Duration::from_secs(2) {
+            eprintln!(
+                "[pace] {:>5} ms: waited {:>4} ms for {}, frame age {} ms",
+                t_start.elapsed().as_millis(),
+                t_wait.elapsed().as_millis(),
+                if frame.is_some() { "a frame" } else { "nothing" },
+                frame.as_ref().map_or(0, |f| (clock_now() - f.time) / 10_000)
+            );
+        }
+        let Some(frame) = frame else {
+            // Started with only a stale frame and nothing fresh came: use it now.
+            if !pacer.started() {
+                if let Some(tex) = stale.take() {
+                    let at = pacer.frame(clock_now(), clock_now()).map(|s| s.at).unwrap_or_default();
+                    if let Err(e) = send(&tex, at, false) {
+                        break Err(e);
+                    }
+                    last = Some(tex);
+                }
+                continue;
+            }
+            // Nothing new: repeat the last frame on every slot that's due (unless
+            // the encoder is behind: those slots stay open and are filled later).
+            // Smooth timing has no slots to fill.
+            if let (Some(tex), false, true) = (&last, busy(), constant) {
+                if let Err(e) = pacer.idle(clock_now()).into_iter().try_for_each(|t| send(tex, t, true)) {
+                    break Err(e);
+                }
+            }
+            continue;
+        };
+        // The first frame of a capture is what was last on screen, often from a
+        // second ago: hold it back and start with a fresh one if one comes soon.
+        if !pacer.started() && stale.is_none() && clock_now() - frame.time > 2_500_000 {
+            match converter.convert(&frame.texture, (frame.content_width, frame.content_height)) {
+                Ok(t) => stale = Some(t),
+                Err(e) => break Err(e),
+            }
             continue;
         }
-        // Absolute QPC time: the same clock audio uses, so tracks line up at save.
-        let time = frame.time;
+        // The encoder is behind: skip this frame without converting it (a convert
+        // now could overwrite a pooled texture a queued frame still points at).
+        // Its slot stays open and is filled with a repeat once there's room.
+        if busy() {
+            // Only a frame that would have had a slot counts as dropped.
+            if pacer.wants(frame.time) {
+                shared.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            continue;
+        }
+        // Times are on the capture clock (QPC), the same one audio uses, so
+        // tracks line up at save; slots keep the frame rate exactly constant.
+        let Some(slots) = pacer.frame(frame.time, clock_now()) else {
+            continue; // this slot already has a frame
+        };
+        if let (Some(tex), true) = (&last, constant) {
+            if let Err(e) = slots.repeat.iter().try_for_each(|&t| send(tex, t, true)) {
+                break Err(e);
+            }
+        }
+        // Smooth timing: the frame keeps the moment it was shown (the very first
+        // one uses the pacer's time, which re-stamps a stale first frame).
+        let at = if constant || last.is_none() { slots.at } else { frame.time.max(last_time + 1) };
         let texture =
             match converter.convert(&frame.texture, (frame.content_width, frame.content_height)) {
                 Ok(t) => t,
                 Err(e) => break Err(e),
             };
         drop(frame); // hand the buffer back to the compositor right away
-        match tx.try_send(SendPtr(Input { texture, time })) {
-            Ok(()) => {
-                shared.frames.fetch_add(1, Ordering::Relaxed);
-                backed_up = None;
-            }
-            Err(TrySendError::Full(_)) => {
-                shared.dropped.fetch_add(1, Ordering::Relaxed);
-                // The queue has stayed full the whole time: the encoder has hung.
-                if backed_up.get_or_insert_with(Instant::now).elapsed() > ENCODER_STALL {
-                    break Err(Error::new(E_FAIL, "the GPU encoder stopped responding"));
-                }
-            }
-            Err(TrySendError::Disconnected(_)) => break Err(Error::new(E_FAIL, "encoder stopped")),
+        if let Err(e) = send(&texture, at, false) {
+            break Err(e);
         }
+        last_time = at;
+        last = Some(texture);
     };
     drop(tx);
     let deadline = Instant::now() + ENCODER_EXIT_WAIT;

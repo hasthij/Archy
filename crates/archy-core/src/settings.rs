@@ -29,6 +29,9 @@ pub struct Settings {
     pub record_fullscreen_apps: bool,
     /// Executable names that are never recorded (wins over `games`).
     pub never_record: Vec<String>,
+    /// The game the user picked to record ("Client-Win64-Shipping.exe"), whether
+    /// or not it's in front; empty = automatic (the game being played).
+    pub record_target: String,
     /// "window" (only the game; popups never appear) | "screen" (whole monitor).
     pub capture: String,
     /// Screen to record in "screen" mode (Windows' name, e.g. `\\.\DISPLAY2`);
@@ -60,6 +63,19 @@ pub struct Settings {
     pub volume_mic: u32,
     /// AAC bitrate per track: 96, 128, 160 or 192.
     pub audio_kbps: u32,
+    /// "main": one volume (`volume_everything`) for the whole clip; "separate":
+    /// game, Discord and mic each at their own volume (0 = not recorded).
+    pub audio_mode: String,
+    /// "main" mode: also record game, Discord and mic as their own tracks, so the
+    /// editor can change each one later. Off: one track only (lightest: one audio
+    /// encoder instead of four).
+    pub record_stems: bool,
+    /// "smooth": frames keep the moment they were shown (smoothest playback);
+    /// "constant": exactly 1/fps apart (for After Effects / Premiere).
+    pub frame_timing: String,
+    /// Keep the clips folder under this many GB by moving the oldest clips to the
+    /// Recycle Bin after each save (0 = no limit).
+    pub clips_max_gb: u32,
     /// Microphone to record (device id); empty = Windows' default microphone.
     pub mic_device: String,
     /// Output device track 1 records from (device id); empty = Windows' default output.
@@ -80,6 +96,8 @@ pub struct Settings {
     pub voice_phrases: Vec<VoicePhrase>,
     /// Play a short sound the moment a phrase is heard.
     pub sound_on_voice: bool,
+    /// Play the same sound the moment a clip hotkey is pressed.
+    pub sound_on_hotkey: bool,
     /// Volume of the clip-saved chime, 0-200 (%).
     pub clip_sound_volume: u32,
     /// Volume of the phrase-heard blip, 0-200 (%).
@@ -102,6 +120,8 @@ pub struct Settings {
     pub density: String,
     /// No animations in the window.
     pub reduce_motion: bool,
+    /// The first-run welcome and tour have been seen.
+    pub onboarded: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -156,6 +176,7 @@ impl Default for Settings {
             games: vec!["RobloxPlayerBeta.exe".into()],
             record_fullscreen_apps: true,
             never_record: Vec::new(),
+            record_target: String::new(),
             capture: "window".into(),
             capture_monitor: String::new(),
             encoder_gpu: String::new(),
@@ -168,6 +189,10 @@ impl Default for Settings {
             audio_discord: true,
             audio_mic: true,
             audio_kbps: 160,
+            audio_mode: "main".into(),
+            record_stems: true,
+            frame_timing: "smooth".into(),
+            clips_max_gb: 0,
             volume_everything: 100,
             volume_game: 100,
             volume_discord: 100,
@@ -191,6 +216,7 @@ impl Default for Settings {
                 },
             ],
             sound_on_voice: true,
+            sound_on_hotkey: true,
             voice_sensitivity: 50,
             clip_sound_volume: 100,
             voice_sound_volume: 100,
@@ -201,6 +227,7 @@ impl Default for Settings {
             accent: "blue".into(),
             density: "comfortable".into(),
             reduce_motion: false,
+            onboarded: false,
         }
     }
 }
@@ -298,6 +325,9 @@ impl Settings {
         self.voice_sound_volume = self.voice_sound_volume.min(200);
         self.voice_fine_tune = self.voice_fine_tune.clamp(-50, 50);
         // Unknown look values (a hand edit, a newer Archy) fall back to the defaults.
+        if self.audio_mode != "separate" {
+            self.audio_mode = "main".into();
+        }
         if !["dark", "light", "system"].contains(&self.theme.as_str()) {
             self.theme = "dark".into();
         }
@@ -310,17 +340,84 @@ impl Settings {
         self
     }
 
-    /// The replay buffer has to hold the longest clip either hotkey can ask for.
-    pub fn buffer_seconds(&self) -> u32 {
-        let voice = if self.voice_enabled {
-            self.voice_phrases
-                .iter()
-                .map(|p| p.seconds)
-                .max()
-                .unwrap_or(0)
+    /// Whether the microphone is heard in the clip at all (mixed into track 1).
+    /// In "separate" mode a mic at 0% is never opened.
+    pub fn mic_wanted(&self) -> bool {
+        self.audio_mode != "separate" || self.volume_mic > 0
+    }
+
+    /// Which sources get their own track (game, Discord, mic). Everything always
+    /// has track 1. In "separate" mode a source at 0% isn't recorded at all
+    /// (a mic at 0% is never opened); in "main" mode all are kept for the editor
+    /// unless `record_stems` is off.
+    pub fn audio_sources(&self) -> (bool, bool, bool) {
+        if self.audio_mode == "separate" {
+            (self.volume_game > 0, self.volume_discord > 0, self.volume_mic > 0)
+        } else if self.record_stems {
+            (true, true, true)
         } else {
-            0
-        };
+            (false, false, false)
+        }
+    }
+
+    /// Live volumes (everything, game, Discord, mic) for the current mode: in
+    /// "main" mode only the main volume applies; in "separate" mode track 1 stays
+    /// at 100% and each source has its own.
+    pub fn audio_volumes(&self) -> (u32, u32, u32, u32) {
+        if self.audio_mode == "separate" {
+            (100, self.volume_game, self.volume_discord, self.volume_mic)
+        } else {
+            (self.volume_everything, 100, 100, 100)
+        }
+    }
+
+    /// The replay buffer has to hold the longest clip either hotkey can ask for.
+    /// Voice phrases count even while voice is off: switching voice on must not
+    /// resize the buffer (a resize restarts the recording and empties it).
+    pub fn buffer_seconds(&self) -> u32 {
+        let voice = self.voice_phrases.iter().map(|p| p.seconds).max().unwrap_or(0);
         self.clip_seconds.max(self.long_clip_seconds).max(voice)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_volume_records_every_source_and_only_the_main_volume_counts() {
+        let s = Settings { volume_everything: 70, volume_game: 0, volume_discord: 30, volume_mic: 0, ..Default::default() };
+        assert_eq!(s.audio_mode, "main");
+        assert_eq!(s.audio_sources(), (true, true, true), "kept for the editor");
+        assert_eq!(s.audio_volumes(), (70, 100, 100, 100));
+    }
+
+    #[test]
+    fn each_source_uses_its_own_volume_and_zero_means_not_recorded() {
+        let s = Settings {
+            audio_mode: "separate".into(),
+            volume_everything: 30,
+            volume_game: 120,
+            volume_discord: 0,
+            volume_mic: 80,
+            ..Default::default()
+        };
+        assert_eq!(s.audio_sources(), (true, false, true));
+        assert_eq!(s.audio_volumes(), (100, 120, 0, 80));
+        let quiet_mic = Settings { volume_mic: 0, ..s };
+        assert!(!quiet_mic.audio_sources().2, "a mic at 0% is never opened");
+    }
+
+    #[test]
+    fn unknown_values_fall_back() {
+        let s = Settings { audio_mode: "weird".into(), theme: "neon".into(), accent: "pink".into(), ..Default::default() }.clamped();
+        assert_eq!((s.audio_mode.as_str(), s.theme.as_str(), s.accent.as_str()), ("main", "dark", "blue"));
+    }
+
+    #[test]
+    fn a_settings_file_with_a_byte_order_mark_is_read() {
+        let text = format!("\u{feff}{}", serde_json::to_string(&Settings { fps: 144, ..Default::default() }).unwrap());
+        let s: Settings = serde_json::from_str(text.trim_start_matches('\u{feff}')).unwrap();
+        assert_eq!(s.fps, 144);
     }
 }

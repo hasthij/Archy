@@ -8,6 +8,7 @@
 <script src="theme.js"></script>
 <script src="app.js" defer></script>
 <script src="editor.js" defer></script>
+<script src="welcome.js" defer></script>
 </head>
 <body>
 <div class="app">
@@ -60,6 +61,10 @@
   <div class="main-col">
     <header class="topbar">
       <section class="status" id="status" aria-live="polite"></section>
+      <div class="pick-game">
+        <button class="btn game-btn" id="game-btn" aria-haspopup="true" aria-expanded="false">Game: Automatic</button>
+        <div class="game-menu" id="game-menu" role="menu" hidden></div>
+      </div>
       <div class="keys" id="keys"></div>
     </header>
 

@@ -14,19 +14,72 @@ pub struct Foreground {
     pub exe: String,
     pub pid: u32,
     pub fullscreen: bool,
+    /// Minimized (a picked game can be; the foreground window never is).
+    pub minimized: bool,
 }
 
 /// Desktop/shell windows and apps that are often fullscreen but aren't games.
 const NOT_GAMES: &[&str] = &[
     "explorer.exe",
+    // Browsers
     "chrome.exe",
     "msedge.exe",
     "firefox.exe",
     "opera.exe",
+    "opera_gx.exe",
     "brave.exe",
+    "vivaldi.exe",
+    "arc.exe",
+    "zen.exe",
+    "librewolf.exe",
+    "waterfox.exe",
+    "iexplore.exe",
+    // Video and music players
     "vlc.exe",
-    "Discord.exe",
+    "mpv.exe",
+    "PotPlayerMini64.exe",
+    "PotPlayerMini.exe",
+    "mpc-hc64.exe",
+    "mpc-hc.exe",
+    "mpc-be64.exe",
+    "wmplayer.exe",
+    "Microsoft.Media.Player.exe",
+    "Video.UI.exe",
     "Spotify.exe",
+    "iTunes.exe",
+    "Netflix.exe",
+    "Plex.exe",
+    "Kodi.exe",
+    "stremio.exe",
+    // Calls, chat, streaming and slides
+    "Discord.exe",
+    "Teams.exe",
+    "ms-teams.exe",
+    "Zoom.exe",
+    "slack.exe",
+    "obs64.exe",
+    "obs32.exe",
+    "Streamlabs OBS.exe",
+    "POWERPNT.EXE",
+    "WINWORD.EXE",
+    "EXCEL.EXE",
+    "Photos.exe",
+    "Microsoft.Photos.exe",
+    "PhotosApp.exe",
+    // Game launchers (their fullscreen modes aren't games)
+    "steamwebhelper.exe",
+    "steam.exe",
+    "EpicGamesLauncher.exe",
+    "Battle.net.exe",
+    "RiotClientServices.exe",
+    "EADesktop.exe",
+    // Windows itself
+    "TextInputHost.exe",
+    "ShellExperienceHost.exe",
+    "ScreenClippingHost.exe",
+    "SnippingTool.exe",
+    "Magnify.exe",
+    "mstsc.exe",
     "Archy.exe",
     // Archy's own window: maximized, it looked like a fullscreen game.
     "archy-ui.exe",
@@ -56,6 +109,7 @@ pub fn foreground() -> Option<Foreground> {
         pid,
         fullscreen: covers_monitor(hwnd),
         exe,
+        minimized: false,
     })
 }
 
@@ -72,6 +126,52 @@ impl Foreground {
             && self.fullscreen
             && !NOT_GAMES.iter().any(|n| n.eq_ignore_ascii_case(&self.exe))
     }
+}
+
+/// The main window of a running program (`exe`, e.g. "Client-Win64-Shipping.exe"),
+/// for a game the user picked: its largest visible top-level window.
+pub fn find(exe: &str) -> Option<Foreground> {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindow, GetWindowLongW, GetWindowTextLengthW, IsWindowVisible, GWL_EXSTYLE, GW_OWNER,
+        WS_EX_TOOLWINDOW,
+    };
+    struct Search<'a> {
+        exe: &'a str,
+        best: Option<(i64, HWND, u32)>,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, lp: LPARAM) -> BOOL {
+        let s = unsafe { &mut *(lp.0 as *mut Search) };
+        // Some games' windows have no title: allowed, but a titled window wins.
+        let shown = unsafe { IsWindowVisible(hwnd).as_bool() };
+        let titled = unsafe { GetWindowTextLengthW(hwnd) > 0 };
+        let owned = unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|o| !o.0.is_null());
+        let tool = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW.0 != 0;
+        if shown && !owned && !tool {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if archy_core::process::exe_name(pid).is_some_and(|n| n.eq_ignore_ascii_case(s.exe)) {
+                let mut r = RECT::default();
+                let _ = unsafe { GetWindowRect(hwnd, &mut r) };
+                // Minimized windows count, but any open one wins.
+                let area = if unsafe { IsIconic(hwnd) }.as_bool() { 0 } else { (r.right - r.left) as i64 * (r.bottom - r.top) as i64 + 1 };
+                // Titled windows rank above any untitled one.
+                let area = if titled { area + (1i64 << 40) } else { area };
+                if s.best.is_none_or(|(a, _, _)| area > a) {
+                    s.best = Some((area, hwnd, pid));
+                }
+            }
+        }
+        true.into()
+    }
+    let mut search = Search { exe, best: None };
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut _ as isize));
+    }
+    let (_, hwnd, pid) = search.best?;
+    let minimized = unsafe { IsIconic(hwnd) }.as_bool();
+    Some(Foreground { hwnd, exe: exe.to_string(), pid, fullscreen: covers_monitor(hwnd), minimized })
 }
 
 pub fn alive(hwnd: HWND) -> bool {
@@ -123,7 +223,7 @@ mod tests {
 
     #[test]
     fn never_record_wins() {
-        let fg = Foreground { hwnd: HWND::default(), exe: "Game.exe".into(), pid: 1, fullscreen: true };
+        let fg = Foreground { hwnd: HWND::default(), exe: "Game.exe".into(), pid: 1, fullscreen: true, minimized: false };
         let games = vec!["game.exe".to_string()];
         assert!(fg.is_game(&games, true, &[]));
         assert!(!fg.is_game(&games, true, &["GAME.EXE".to_string()]));

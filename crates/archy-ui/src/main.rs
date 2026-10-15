@@ -571,6 +571,17 @@ fn app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// A clip's cached thumbnail (made the first time it's asked for).
+#[tauri::command]
+async fn clip_thumb(app: AppHandle, path: String) -> Result<String, String> {
+    let src = clip_path(&path)?;
+    let thumb = tauri::async_runtime::spawn_blocking(move || editor::thumbnail(&src))
+        .await
+        .map_err(|_| "no thumbnail".to_string())??;
+    allow_folder(&app, &editor::thumbs_dir());
+    Ok(thumb.to_string_lossy().into_owned())
+}
+
 /// Stops the running export; nothing is left behind.
 #[tauri::command]
 fn cancel_export() {
@@ -694,6 +705,31 @@ async fn test_voice(progress: tauri::ipc::Channel<serde_json::Value>) -> Result<
     voice_child(vec!["--voice-test".into()], progress, "the voice test").await
 }
 
+/// Checks whether this PC records cleanly at `fps` (`archy.exe --self-test`,
+/// about 15 s: a test window is recorded and every frame of the clip checked).
+#[tauri::command]
+async fn self_test(fps: u32) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::os::windows::process::CommandExt;
+        let ffmpeg = editor::tools_dir()
+            .ok_or("The video tools aren't installed. Update or reinstall Archy.")?
+            .join("ffmpeg.exe");
+        let mut exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        exe.set_file_name("archy.exe");
+        let out = std::process::Command::new(&exe)
+            .arg("--self-test")
+            .arg(fps.to_string())
+            .arg(ffmpeg)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output()
+            .map_err(|e| format!("{}: {e}", exe.display()))?;
+        let line = String::from_utf8_lossy(&out.stdout);
+        serde_json::from_str(line.trim()).map_err(|_| "the test stopped unexpectedly (see archy.log)".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Runs archy.exe with `args` in the CALIBRATION slot (so Stop can end it) and
 /// forwards its JSON lines to the page.
 async fn voice_child(
@@ -767,6 +803,11 @@ fn main() {
         })
         .setup(|app| {
             allow_folder(app.handle(), &Settings::load().0.save_folder);
+            // Editor scratch files and thumbnails of deleted clips (they used to pile up).
+            std::thread::spawn(|| {
+                editor::clean_temp();
+                editor::prune_thumbs(&Settings::load().0.save_folder);
+            });
             // Opening Archy from the Start menu also makes sure the recorder is running.
             if !get_status().running {
                 let _ = start_recorder();
@@ -792,6 +833,7 @@ fn main() {
             choose_export_path,
             cancel_export,
             app_version,
+            clip_thumb,
             stage_media,
             trim_preview,
             finish_media,
@@ -800,6 +842,7 @@ fn main() {
             start_recorder,
             calibrate_voice,
             test_voice,
+            self_test,
             calibration_input,
             stop_calibration,
             read_log,

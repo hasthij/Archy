@@ -31,7 +31,8 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO,
+    FindWindowW, MessageBoxW, PostMessageW, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK,
+    MB_YESNO, WM_CLOSE,
 };
 
 static ARCHY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/archy.exe"));
@@ -80,10 +81,12 @@ fn desktop_link() -> PathBuf {
 }
 
 /// Closes running Archy processes so their files can be replaced or removed.
-fn stop_archy() {
+/// Process ids of every running archy.exe / archy-ui.exe.
+fn archy_processes() -> Vec<u32> {
+    let mut out = Vec::new();
     unsafe {
         let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
-            return;
+            return out;
         };
         let mut e = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
@@ -94,20 +97,85 @@ fn stop_archy() {
             let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
             let name = String::from_utf16_lossy(&e.szExeFile[..len]).to_ascii_lowercase();
             if name == "archy.exe" || name == "archy-ui.exe" {
-                if let Ok(h) = OpenProcess(
-                    PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
-                    false,
-                    e.th32ProcessID,
-                ) {
-                    let _ = TerminateProcess(h, 0);
-                    WaitForSingleObject(h, 3000);
-                    let _ = CloseHandle(h);
-                }
+                out.push(e.th32ProcessID);
             }
             ok = Process32NextW(snap, &mut e).is_ok();
         }
         let _ = CloseHandle(snap);
     }
+    out
+}
+
+/// Closes Archy before files are replaced. Asked politely first (the recorder
+/// finishes a clip it's saving, the tray icon goes away, the window can say it's
+/// exporting); only what is still running after 10 s is ended by force. Force
+/// alone used to lose a clip mid-save and leave a ghost tray icon.
+fn stop_archy() {
+    unsafe {
+        if let Ok(tray) = FindWindowW(w!("ArchyTray"), None) {
+            let _ = PostMessageW(Some(tray), WM_CLOSE, Default::default(), Default::default());
+        }
+        if let Ok(window) = FindWindowW(None, w!("Archy")) {
+            let _ = PostMessageW(Some(window), WM_CLOSE, Default::default(), Default::default());
+        }
+    }
+    let t = std::time::Instant::now();
+    while !archy_processes().is_empty() && t.elapsed().as_secs() < 10 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    for pid in archy_processes() {
+        unsafe {
+            if let Ok(h) = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid) {
+                let _ = TerminateProcess(h, 0);
+                WaitForSingleObject(h, 3000);
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+}
+
+/// Puts the new program files in place all at once: each is written as
+/// `name.new`, then the old ones move to `name.old` and the new ones take their
+/// place. If anything fails (antivirus or a running copy holding a file), what
+/// was replaced is put back, so Archy is never left half old, half new. The
+/// `.old` files are removed by Archy itself once it has started.
+fn put_files(dir: &Path, files: &[(&str, &[u8])]) -> Result<(), String> {
+    let new = |n: &str| dir.join(format!("{n}.new"));
+    let old = |n: &str| dir.join(format!("{n}.old"));
+    for (name, bytes) in files {
+        if let Err(e) = std::fs::write(new(name), bytes) {
+            for (n, _) in files {
+                let _ = std::fs::remove_file(new(n));
+            }
+            return Err(format!("couldn't write {name}: {e}"));
+        }
+    }
+    let mut done: Vec<&str> = Vec::new();
+    for (name, _) in files {
+        let path = dir.join(name);
+        let _ = std::fs::remove_file(old(name));
+        let step = (|| {
+            if path.exists() {
+                std::fs::rename(&path, old(name))?;
+            }
+            std::fs::rename(new(name), &path)
+        })();
+        if let Err(e) = step {
+            // Put back everything replaced so far (and this one, if it moved).
+            for n in done.iter().chain([name]) {
+                if old(n).exists() {
+                    let _ = std::fs::remove_file(dir.join(n));
+                    let _ = std::fs::rename(old(n), dir.join(n));
+                }
+            }
+            for (n, _) in files {
+                let _ = std::fs::remove_file(new(n));
+            }
+            return Err(format!("couldn't replace {name}: {e}. Close Archy and run Setup again."));
+        }
+        done.push(name);
+    }
+    Ok(())
 }
 
 fn make_shortcut(link: &Path, target: &Path, description: &str) -> windows::core::Result<()> {
@@ -201,11 +269,7 @@ fn install() -> Result<(), String> {
     }
     stop_archy();
     std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
-    let write = |name: &str, bytes: &[u8]| {
-        std::fs::write(dir.join(name), bytes).map_err(|e| format!("couldn't write {name}: {e}"))
-    };
-    write("archy.exe", ARCHY)?;
-    write("archy-ui.exe", ARCHY_UI)?;
+    put_files(&dir, &[("archy.exe", ARCHY), ("archy-ui.exe", ARCHY_UI)])?;
     // A copy of this installer does the uninstalling from Settings > Apps.
     let uninstaller = dir.join("uninstall.exe");
     let me = std::env::current_exe().map_err(|e| e.to_string())?;

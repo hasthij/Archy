@@ -51,6 +51,29 @@ pub fn list() -> Vec<Monitor> {
     out
 }
 
+/// Whether HDR is on for the screen `monitor` is on. Capture is 8-bit SDR, so
+/// Windows tone-maps an HDR desktop for it and clips can look washed out.
+pub fn hdr_on(monitor: HMONITOR) -> bool {
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput6};
+    let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
+        return false;
+    };
+    for a in 0.. {
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(a) }) else { break };
+        for o in 0.. {
+            let Ok(output) = (unsafe { adapter.EnumOutputs(o) }) else { break };
+            let Ok(output) = output.cast::<IDXGIOutput6>() else { continue };
+            let Ok(desc) = (unsafe { output.GetDesc1() }) else { continue };
+            if desc.Monitor == monitor {
+                return desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+            }
+        }
+    }
+    false
+}
+
 /// The screen with Windows' name `id`, if it's still connected.
 pub fn find(id: &str) -> Option<HMONITOR> {
     if id.is_empty() {

@@ -9,10 +9,24 @@ use std::path::Path;
 const URL: &str = "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-full_build-shared.zip";
 const SHA256: &str = "8d31e162f1616e37aab3fa2db991b97e1b8dbeb1c8465fd81a81be16ff91b328";
 
-/// True when the tools are already there (an update keeps them).
+/// True when the tools are there in this version (an update keeps them; a newer
+/// FFmpeg is downloaded).
 pub fn installed(dir: &Path) -> bool {
     let d = dir.join("ffmpeg");
-    d.join("ffmpeg.exe").exists() && d.join("ffprobe.exe").exists()
+    d.join("ffmpeg.exe").exists() && d.join("ffprobe.exe").exists() && current(&d.join("version.txt"), SHA256)
+}
+
+/// Whether the marker at `path` says `stamp`. No marker (installed before
+/// markers existed) counts as current and gets one, so existing installs don't
+/// download everything again.
+pub(crate) fn current(path: &Path, stamp: &str) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(m) => m.trim() == stamp,
+        Err(_) => {
+            let _ = std::fs::write(path, stamp);
+            true
+        }
+    }
 }
 
 pub fn install(dir: &Path) -> Result<(), String> {
@@ -24,7 +38,9 @@ pub fn install(dir: &Path) -> Result<(), String> {
         let archive = crate::voice::fetch(URL, SHA256, &work, "ffmpeg.zip")?;
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-        unpack(&archive, &out)
+        unpack(&archive, &out)?;
+        let _ = std::fs::write(out.join("version.txt"), SHA256);
+        Ok(())
     })();
     let _ = std::fs::remove_dir_all(&work);
     if result.is_err() {
