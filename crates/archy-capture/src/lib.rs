@@ -24,7 +24,10 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITOR_DEFAULTTONEAREST,
     MONITOR_DEFAULTTOPRIMARY,
 };
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CreateEventW, CreateWaitableTimerExW, SetEvent, SetWaitableTimer, WaitForMultipleObjects,
+    WaitForSingleObject, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS,
+};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
@@ -92,6 +95,10 @@ pub struct Capture {
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     event: HANDLE,
+    /// High-resolution timer for the wait (None on Windows before 1803). A plain
+    /// millisecond timeout follows Windows' 15.6 ms default tick, so at 144 fps
+    /// (6.9 ms a frame) the loop woke late and sent repeats in bursts.
+    timer: Option<HANDLE>,
     token: i64,
     device: IDirect3DDevice,
     /// Current size of the captured content (follows window resizes).
@@ -164,6 +171,10 @@ impl Capture {
             Ok(())
         }))?;
         session.StartCapture()?;
+        let timer = unsafe {
+            CreateWaitableTimerExW(None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
+        }
+        .ok();
 
         Ok(Self {
             item,
@@ -172,6 +183,7 @@ impl Capture {
             pool,
             session,
             event,
+            timer,
             token,
             device: winrt_device,
             size: std::cell::Cell::new(size),
@@ -188,8 +200,19 @@ impl Capture {
     /// Waits up to `timeout` for the compositor to deliver a frame, then returns
     /// the newest one. `None` means the window showed nothing new in that time.
     pub fn next(&self, timeout: Duration) -> Result<Option<Frame>> {
-        let ms = timeout.as_millis().min(u32::MAX as u128) as u32;
-        if unsafe { WaitForSingleObject(self.event, ms) } != WAIT_OBJECT_0 {
+        let woke = match self.timer {
+            Some(timer) => unsafe {
+                // Negative = relative, in 100 ns units.
+                let due = -(timeout.as_nanos().min(i64::MAX as u128) as i64 / 100).max(1);
+                if SetWaitableTimer(timer, &due, 0, None, None, false).is_ok() {
+                    WaitForMultipleObjects(&[self.event, timer], false, INFINITE)
+                } else {
+                    WaitForSingleObject(self.event, timeout.as_millis().min(u32::MAX as u128) as u32)
+                }
+            },
+            None => unsafe { WaitForSingleObject(self.event, timeout.as_millis().min(u32::MAX as u128) as u32) },
+        };
+        if woke != WAIT_OBJECT_0 {
             return Ok(None);
         }
         self.latest()
@@ -243,6 +266,9 @@ impl Drop for Capture {
         let _ = self.pool.Close();
         unsafe {
             let _ = CloseHandle(self.event);
+            if let Some(timer) = self.timer {
+                let _ = CloseHandle(timer);
+            }
         }
     }
 }

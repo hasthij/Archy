@@ -180,11 +180,16 @@ pub fn host_main(args: &[String], log: fn(&str)) {
 
     log(&format!("voice: listening for {phrases:?}"));
     let mut samples: Vec<f32> = Vec::new();
+    let mut gate = SpeechGate::new(archy_voice::SAMPLE_RATE as usize, std::env::var_os("ARCHY_VOICE_NOGATE").is_none());
     let result = archy_audio::listen_microphone(mic, archy_voice::SAMPLE_RATE, &stop, &mut |pcm| {
         samples.clear();
         samples.extend(pcm.iter().map(|&s| s as f32 / 32768.0));
-        if let Some(i) = spotter.accept(&samples) {
-            post(window, message, i, 0);
+        // Speech recognition only runs around sound (it ran on every 10 ms of a
+        // silent mic, all game long).
+        for chunk in gate.feed(&samples) {
+            if let Some(i) = spotter.accept(&chunk) {
+                post(window, message, i, 0);
+            }
         }
     });
     if let Err(e) = result {
@@ -359,6 +364,17 @@ fn calibrate(args: &[String], marker: &std::path::Path) -> Result<archy_voice::C
         .map_err(|_| "couldn't hear anything from your microphone")?;
     emit(json!({ "step": "ready" }));
 
+    // Takes are checked one at a time, in order, on one thread.
+    let (check_tx, check_rx) = std::sync::mpsc::channel::<(usize, Vec<f32>)>();
+    {
+        let (dir, phrase) = (dir.clone(), phrase.clone());
+        std::thread::spawn(move || {
+            for (n, audio) in check_rx {
+                let heard = archy_voice::heard_in(&dir, &phrase, &audio, archy_voice::Tuning::preset(50)).unwrap_or(false);
+                emit(serde_json::json!({ "step": "checked", "n": n, "heard": heard }));
+            }
+        });
+    }
     let mut takes: Vec<Vec<f32>> = Vec::new();
     let mut talk: Vec<f32> = Vec::new();
     let mut current: Option<(Recording, Vec<f32>)> = None;
@@ -366,7 +382,16 @@ fn calibrate(args: &[String], marker: &std::path::Path) -> Result<archy_voice::C
     let mut peak = 0f32;
     let to_f32 = |pcm: &[i16]| pcm.iter().map(|&s| s as f32 / 32768.0).collect::<Vec<f32>>();
     let result = loop {
-        if let Ok(pcm) = rx.recv_timeout(std::time::Duration::from_millis(20)) {
+        let pcm = match rx.recv_timeout(std::time::Duration::from_millis(20)) {
+            Ok(pcm) => Some(pcm),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            // The microphone stopped (unplugged, taken by another app, blocked):
+            // say so instead of spinning here at full speed.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                break Err("the microphone stopped sending sound (unplugged, or another app took it). Check it and try again.".to_string());
+            }
+        };
+        if let Some(pcm) = pcm {
             let samples = to_f32(&pcm);
             peak = samples.iter().fold(peak, |m, s| m.max(s.abs()));
             if let Some((_, buf)) = current.as_mut() {
@@ -388,10 +413,12 @@ fn calibrate(args: &[String], marker: &std::path::Path) -> Result<archy_voice::C
             "talk" => current = Some((Recording::Talk, Vec::new())),
             "stop" => match current.take() {
                 Some((Recording::Take, buf)) => {
-                    let heard = archy_voice::heard_in(&dir, phrase, &padded(&buf, rate), archy_voice::Tuning::preset(50))
-                        .unwrap_or(false);
+                    // Shown at once; whether it was heard follows when checked.
+                    let audio = padded(&buf, rate);
                     takes.push(buf);
-                    emit(json!({ "step": "take", "n": takes.len(), "heard": heard }));
+                    let n = takes.len();
+                    emit(json!({ "step": "take", "n": n, "heard": null }));
+                    let _ = check_tx.send((n, audio));
                 }
                 Some((Recording::Talk, buf)) => {
                     talk.extend(std::iter::repeat_n(0.0, (0.3 * rate) as usize));
@@ -419,6 +446,7 @@ fn calibrate(args: &[String], marker: &std::path::Path) -> Result<archy_voice::C
     if loudest < 0.004 {
         return Err("your microphone was almost silent. Check the microphone picked above, or turn up its input level.".into());
     }
+    drop(check_tx); // no more takes: the checker finishes what's queued
     emit(json!({ "step": "analyzing" }));
     archy_voice::calibrate_takes(&dir, phrase, &takes, &talk)
 }
@@ -429,4 +457,87 @@ fn padded(take: &[f32], rate: f32) -> Vec<f32> {
     v.extend_from_slice(take);
     v.extend(std::iter::repeat_n(0.0, (TAIL * rate) as usize));
     v
+}
+
+/// Passes mic audio on only around sound: while the level is clearly above the
+/// room's noise floor, plus a pre-roll (so the start of the phrase is never cut)
+/// and a hangover (so its end is heard). Silence costs nothing.
+pub struct SpeechGate {
+    on: bool,
+    preroll: std::collections::VecDeque<f32>,
+    preroll_max: usize,
+    /// Samples left to pass after the sound stopped.
+    hangover: usize,
+    hangover_max: usize,
+    /// Slowly tracked background level (RMS).
+    floor: f32,
+}
+
+impl SpeechGate {
+    pub fn new(rate: usize, on: bool) -> Self {
+        Self {
+            on,
+            preroll: std::collections::VecDeque::new(),
+            preroll_max: rate / 2,
+            hangover: 0,
+            hangover_max: rate,
+            floor: 0.002,
+        }
+    }
+
+    /// The audio to pass to the recognizer for this block (none in silence).
+    pub fn feed(&mut self, block: &[f32]) -> Vec<Vec<f32>> {
+        if !self.on {
+            return vec![block.to_vec()];
+        }
+        let rms = (block.iter().map(|s| s * s).sum::<f32>() / block.len().max(1) as f32).sqrt();
+        // The floor falls fast and rises slowly, so speech never raises it much.
+        self.floor = if rms < self.floor { self.floor * 0.9 + rms * 0.1 } else { self.floor * 0.999 + rms * 0.001 };
+        self.floor = self.floor.clamp(0.0003, 0.05);
+        let loud = rms > (self.floor * 2.0).max(0.001); // about +6 dB over the room
+        let mut out = Vec::new();
+        if loud {
+            if self.hangover == 0 && !self.preroll.is_empty() {
+                out.push(self.preroll.drain(..).collect());
+            }
+            self.hangover = self.hangover_max;
+            out.push(block.to_vec());
+        } else if self.hangover > 0 {
+            self.hangover = self.hangover.saturating_sub(block.len());
+            out.push(block.to_vec());
+        } else {
+            self.preroll.extend(block.iter().copied());
+            while self.preroll.len() > self.preroll_max {
+                self.preroll.pop_front();
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SpeechGate;
+
+    #[test]
+    fn silence_is_skipped_and_speech_keeps_its_start() {
+        let mut g = SpeechGate::new(16_000, true);
+        let quiet = vec![0.0005f32; 160];
+        for _ in 0..200 {
+            assert!(g.feed(&quiet).is_empty(), "silence reaches the recognizer");
+        }
+        let speech = vec![0.1f32; 160];
+        let out = g.feed(&speech);
+        // Pre-roll (the half second before) comes first, then the block itself.
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].len(), 8_000);
+        // The second after the sound still passes.
+        assert!(!g.feed(&quiet).is_empty());
+    }
+
+    #[test]
+    fn off_passes_everything() {
+        let mut g = SpeechGate::new(16_000, false);
+        assert_eq!(g.feed(&[0.0; 160]).len(), 1);
+    }
 }

@@ -57,10 +57,14 @@ mod ffi {
     pub const MFX_CHROMAFORMAT_YUV420: u16 = 1;
     pub const MFX_GOP_CLOSED: u16 = 1;
     pub const MFX_TARGETUSAGE_BALANCED: u16 = 4;
+    pub const MFX_TARGETUSAGE_BEST_SPEED: u16 = 7;
     pub const MFX_RATECONTROL_VBR: u16 = 2;
     pub const MFX_RATECONTROL_ICQ: u16 = 9;
     pub const MFX_CODINGOPTION_ON: u16 = 0x10;
     pub const MFX_FRAMETYPE_I: u16 = 0x0001;
+    pub const MFX_SKIPFRAME_INSERT_DUMMY: u16 = 1;
+    pub const MFX_EXTBUFF_CODING_OPTION2: u32 = fourcc(b'C', b'D', b'O', b'P');
+    pub const MFX_EXTBUFF_VIDEO_SIGNAL_INFO: u32 = fourcc(b'V', b'S', b'I', b'N');
     pub const MFX_FRAMETYPE_IDR: u16 = 0x0080;
 
     pub const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
@@ -151,6 +155,80 @@ mod ffi {
     }
 
     #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct mfxExtBuffer {
+        pub BufferId: u32,
+        pub BufferSz: u32,
+    }
+
+    /// Colour description written into the stream (VUI), so players don't guess.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct mfxExtVideoSignalInfo {
+        pub Header: mfxExtBuffer,
+        pub VideoFormat: u16,
+        pub VideoFullRange: u16,
+        pub ColourDescriptionPresent: u16,
+        pub ColourPrimaries: u16,
+        pub TransferCharacteristics: u16,
+        pub MatrixCoefficients: u16,
+    }
+
+    /// Only `SkipFrame` is used (the rest stay 0 = driver default).
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct mfxExtCodingOption2 {
+        pub Header: mfxExtBuffer,
+        pub IntRefType: u16,
+        pub IntRefCycleSize: u16,
+        pub IntRefQPDelta: i16,
+        pub MaxFrameSize: u32,
+        pub MaxSliceSize: u32,
+        pub BitrateLimit: u16,
+        pub MBBRC: u16,
+        pub ExtBRC: u16,
+        pub LookAheadDepth: u16,
+        pub Trellis: u16,
+        pub RepeatPPS: u16,
+        pub BRefType: u16,
+        pub AdaptiveI: u16,
+        pub AdaptiveB: u16,
+        pub LookAheadDS: u16,
+        pub NumMbPerSlice: u16,
+        pub SkipFrame: u16,
+        pub MinQPI: u8,
+        pub MaxQPI: u8,
+        pub MinQPP: u8,
+        pub MaxQPP: u8,
+        pub MinQPB: u8,
+        pub MaxQPB: u8,
+        pub FixedFrameRate: u16,
+        pub DisableDeblockingIdc: u16,
+        pub DisableVUI: u16,
+        pub BufferingPeriodSEI: u16,
+        pub EnableMAD: u16,
+        pub UseRawRef: u16,
+    }
+
+    /// Per-frame encode control (only `SkipFrame` is used).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct mfxEncodeCtrl {
+        pub Header: mfxExtBuffer,
+        pub reserved: [u32; 4],
+        pub reserved1: u16,
+        pub MfxNalUnitType: u16,
+        pub SkipFrame: u16,
+        pub QP: u16,
+        pub FrameType: u16,
+        pub NumExtParam: u16,
+        pub NumPayload: u16,
+        pub reserved2: u16,
+        pub ExtParam: *mut c_void,
+        pub Payload: *mut c_void,
+    }
+
+    #[repr(C)]
     pub struct mfxBitstream {
         pub reserved: [u32; 6],
         pub DecodeTimeStamp: i64,
@@ -237,6 +315,9 @@ mod ffi {
         );
         assert!(size_of::<mfxFrameData>() == 96 && offset_of!(mfxFrameData, TimeStamp) == 32);
         assert!(offset_of!(mfxFrameData, MemId) == 80);
+        assert!(size_of::<mfxExtVideoSignalInfo>() == 20);
+        assert!(size_of::<mfxExtCodingOption2>() == 68 && offset_of!(mfxExtCodingOption2, SkipFrame) == 46);
+        assert!(size_of::<mfxEncodeCtrl>() == 56 && offset_of!(mfxEncodeCtrl, SkipFrame) == 28);
         assert!(size_of::<mfxFrameSurface1>() == 184 && offset_of!(mfxFrameSurface1, Data) == 88);
         assert!(size_of::<mfxFrameSurfaceInterface>() == 112);
         assert!(offset_of!(mfxFrameSurfaceInterface, Release) == 24);
@@ -370,7 +451,9 @@ fn video_param(cfg: &Config, low_power: bool, icq: bool) -> mfxVideoParam {
             ..Default::default()
         },
         CodecId: codec_id(cfg.codec),
-        TargetUsage: MFX_TARGETUSAGE_BALANCED,
+        // Above 60 fps each frame gets less than half the time: the fastest
+        // preset (slightly softer at the same bitrate) keeps the encoder ahead.
+        TargetUsage: if cfg.fps > 60 { MFX_TARGETUSAGE_BEST_SPEED } else { MFX_TARGETUSAGE_BALANCED },
         GopPicSize: cfg.gop as u16,
         // No B-frames: no reordering delay, less encoder work.
         GopRefDist: 1,
@@ -427,6 +510,8 @@ const PIPELINE: usize = 3;
 struct Slot {
     bitstream: mfxBitstream,
     _buffer: Vec<u8>,
+    /// This frame's encode control (kept here: it must outlive the async encode).
+    ctrl: Box<mfxEncodeCtrl>,
 }
 
 impl Slot {
@@ -439,6 +524,7 @@ impl Slot {
         Self {
             bitstream,
             _buffer: buffer,
+            ctrl: Box::new(unsafe { std::mem::zeroed() }),
         }
     }
 }
@@ -455,6 +541,8 @@ pub struct VplEncoder {
     frame_duration: i64,
     /// AV1 reports key frames as I (no IDR concept).
     av1: bool,
+    /// The runtime accepted dummy skip frames: repeats cost almost nothing.
+    skip_repeats: bool,
     pub name: String,
     pub rate_control: &'static str,
 }
@@ -479,6 +567,7 @@ impl VplEncoder {
             in_flight: VecDeque::new(),
             frame_duration: 10_000_000 / cfg.fps as i64,
             av1: cfg.codec == Codec::Av1,
+            skip_repeats: false,
             name: String::new(),
             rate_control: "",
         };
@@ -540,10 +629,45 @@ impl VplEncoder {
             .filter(|(_, icq, _)| cfg.target_bitrate.is_none() || !icq)
             .collect();
         let mut last = MFX_ERR_NONE;
-        for (low_power, icq, label) in attempts {
+        // Extras, best first: dummy skip frames for repeats + colour description,
+        // then colour only, then none. Each is optional; a runtime that rejects one
+        // still records.
+        let mut signal = mfxExtVideoSignalInfo {
+            Header: mfxExtBuffer {
+                BufferId: MFX_EXTBUFF_VIDEO_SIGNAL_INFO,
+                BufferSz: std::mem::size_of::<mfxExtVideoSignalInfo>() as u32,
+            },
+            VideoFormat: 5, // unspecified
+            VideoFullRange: 0,
+            ColourDescriptionPresent: 1,
+            ColourPrimaries: 1, // BT.709, as the converter makes
+            TransferCharacteristics: 1,
+            MatrixCoefficients: 1,
+        };
+        let mut option2 = mfxExtCodingOption2 {
+            Header: mfxExtBuffer {
+                BufferId: MFX_EXTBUFF_CODING_OPTION2,
+                BufferSz: std::mem::size_of::<mfxExtCodingOption2>() as u32,
+            },
+            SkipFrame: MFX_SKIPFRAME_INSERT_DUMMY,
+            ..Default::default()
+        };
+        let both: [*mut c_void; 2] = [
+            &mut option2 as *mut _ as *mut c_void,
+            &mut signal as *mut _ as *mut c_void,
+        ];
+        let colour: [*mut c_void; 1] = [&mut signal as *mut _ as *mut c_void];
+        let extras: [(&[*mut c_void], bool); 3] = [(&both, true), (&colour, false), (&[], false)];
+        let tries = attempts.iter().flat_map(|&a| extras.iter().map(move |&e| (a, e)));
+        for ((low_power, icq, label), (ext, skip)) in tries {
             let mut par = video_param(cfg, low_power, icq);
+            if !ext.is_empty() {
+                par.ExtParam = ext.as_ptr() as *mut c_void;
+                par.NumExtParam = ext.len() as u16;
+            }
             let status = unsafe { (self.api.init)(self.session, &mut par) };
             if status >= MFX_ERR_NONE {
+                self.skip_repeats = skip;
                 self.rate_control = label;
                 self.name = format!(
                     "Intel Quick Sync via oneVPL ({})",
@@ -607,6 +731,7 @@ impl VplEncoder {
     fn submit(
         &mut self,
         surface: *mut mfxFrameSurface1,
+        repeat: bool,
         on_packet: &mut impl FnMut(Packet) -> Result<()>,
         stats: &mut Stats,
     ) -> Result<bool> {
@@ -614,11 +739,24 @@ impl VplEncoder {
             self.finish_oldest(on_packet, stats)?;
         }
         let slot = self.free.pop().expect("a slot was just freed");
+        // A repeat becomes a dummy frame (every block "unchanged"): near-free to
+        // encode. The picture is still copied in, so a runtime that ignores the
+        // request encodes the right frame anyway.
+        let skip = repeat && self.skip_repeats && !surface.is_null();
+        let ctrl: *mut c_void = if skip {
+            let c = &mut self.slots[slot].ctrl;
+            **c = unsafe { std::mem::zeroed() };
+            c.SkipFrame = MFX_SKIPFRAME_INSERT_DUMMY;
+            stats.skipped += 1;
+            &mut **c as *mut mfxEncodeCtrl as *mut c_void
+        } else {
+            null_mut()
+        };
         let mut sync: mfxSyncPoint = null_mut();
         let t_submit = trace::now();
         let status = loop {
             let bs = &mut self.slots[slot].bitstream;
-            let s = unsafe { (self.api.encode)(self.session, null_mut(), surface, bs, &mut sync) };
+            let s = unsafe { (self.api.encode)(self.session, ctrl, surface, bs, &mut sync) };
             if s == MFX_WRN_DEVICE_BUSY {
                 // GPU queue full: collect a finished frame instead of sleeping, if there is one.
                 if !self.in_flight.is_empty() {
@@ -707,14 +845,14 @@ impl VplEncoder {
             let surface = self.input_surface(&input.texture)?;
             trace::add(2, t_copy);
             unsafe { (*surface).Data.TimeStamp = (input.time * 9 / 1000) as u64 };
-            let result = self.submit(surface, &mut on_packet, &mut stats);
+            let result = self.submit(surface, input.repeat, &mut on_packet, &mut stats);
             // The encoder holds its own reference while it needs the frame.
             unsafe { ((*(*surface).FrameInterface).Release)(surface) };
             result?;
             stats.frames_in += 1;
         }
         // Flush frames the runtime still holds, then collect everything in flight.
-        while self.submit(null_mut(), &mut on_packet, &mut stats)? {}
+        while self.submit(null_mut(), false, &mut on_packet, &mut stats)? {}
         while !self.in_flight.is_empty() {
             self.finish_oldest(&mut on_packet, &mut stats)?;
         }

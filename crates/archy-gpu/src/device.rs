@@ -53,6 +53,29 @@ pub fn adapter_name(luid: LUID) -> String {
     }
 }
 
+/// Driver version of the GPU called `name` (e.g. "31.0.101.5592"), for reports.
+pub fn driver_version(name: &str) -> String {
+    use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+    unsafe {
+        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory4>() else {
+            return String::new();
+        };
+        for i in 0.. {
+            let Ok(adapter) = factory.EnumAdapters1(i) else { break };
+            let Ok(d) = adapter.GetDesc1() else { continue };
+            let len = d.Description.iter().position(|&c| c == 0).unwrap_or(0);
+            if String::from_utf16_lossy(&d.Description[..len]) != name {
+                continue;
+            }
+            if let Ok(v) = adapter.CheckInterfaceSupport(&IDXGIDevice::IID) {
+                let v = v as u64;
+                return format!("{}.{}.{}.{}", v >> 48, (v >> 32) & 0xffff, (v >> 16) & 0xffff, v & 0xffff);
+            }
+        }
+    }
+    String::new()
+}
+
 pub fn other_adapters(except: LUID) -> Vec<LUID> {
     use windows::Win32::Graphics::Dxgi::{DXGI_ADAPTER_FLAG, DXGI_ADAPTER_FLAG_SOFTWARE};
     let mut found: Vec<(bool, LUID)> = Vec::new();

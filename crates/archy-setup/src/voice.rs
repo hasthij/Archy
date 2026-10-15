@@ -41,11 +41,19 @@ const MODEL_FILES: &[&str] = &[
 /// The model folder name Archy looks for (archy_voice::MODEL_DIR).
 const MODEL_DIR: &str = "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01";
 
-/// True when every file Archy needs is already there (an update keeps them).
+/// Which engine and model are installed (their pinned fingerprints).
+fn stamp() -> String {
+    format!("{ENGINE_SHA256} {MODEL_SHA256}")
+}
+
+/// True when every file Archy needs is there, in this version (an update keeps
+/// them; a newer engine or model is downloaded). Files from before version
+/// markers existed count as current, and get a marker.
 pub fn installed(dir: &Path) -> bool {
     let voice = dir.join("voice");
-    ENGINE_FILES.iter().all(|f| voice.join(f).exists())
-        && MODEL_FILES.iter().all(|f| voice.join(MODEL_DIR).join(f).exists())
+    let files = ENGINE_FILES.iter().all(|f| voice.join(f).exists())
+        && MODEL_FILES.iter().all(|f| voice.join(MODEL_DIR).join(f).exists());
+    files && crate::ffmpeg::current(&voice.join("version.txt"), &stamp())
 }
 
 pub fn install(dir: &Path) -> Result<(), String> {
@@ -65,6 +73,7 @@ pub fn install(dir: &Path) -> Result<(), String> {
         for f in MODEL_FILES {
             copy(&work.join(MODEL_DIR).join(f), &voice.join(MODEL_DIR).join(f))?;
         }
+        let _ = std::fs::write(voice.join("version.txt"), stamp());
         Ok(())
     })();
     let _ = std::fs::remove_dir_all(&work);

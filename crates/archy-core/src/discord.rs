@@ -15,6 +15,17 @@ use crate::init_thread;
 
 const AUDIO_BPS: u32 = 96_000;
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn high_fps_copies_are_thinned() {
+        assert_eq!(super::copy_fps(144.0, 30.0), 60);
+        assert_eq!(super::copy_fps(144.0, 90.0), 30);
+        assert_eq!(super::copy_fps(30.0, 30.0), 30);
+        assert_eq!(super::copy_fps(59.94, 20.0), 60);
+    }
+}
+
 #[derive(Debug)]
 pub struct CopyInfo {
     pub path: PathBuf,
@@ -49,7 +60,7 @@ pub fn make_copy(src: &Path, dst: &Path, limit_bytes: u64) -> Result<CopyInfo> {
     for _ in 0..3 {
         let total_bps = budget * 8.0 / duration;
         let video_bps = (total_bps - AUDIO_BPS as f64).max(250_000.0) as u32;
-        let info = transcode(src, dst, video_bps)?;
+        let info = transcode(src, dst, video_bps, duration)?;
         if info.bytes <= limit_bytes {
             return Ok(info);
         }
@@ -86,7 +97,15 @@ fn first_stream(reader: &IMFSourceReader, major: &windows::core::GUID) -> Option
     })
 }
 
-fn transcode(src: &Path, dst: &Path, video_bps: u32) -> Result<CopyInfo> {
+/// The copy's frame rate: a small file can't carry 144 sharp frames a second, so
+/// high-fps clips are thinned to 60 (30 for clips over a minute). At 144 fps each
+/// frame got 2.4x less data and copies came out very blurry.
+fn copy_fps(source_fps: f64, seconds: f64) -> u32 {
+    let cap = if seconds > 60.0 { 30.0 } else { 60.0 };
+    source_fps.min(cap).round().max(1.0) as u32
+}
+
+fn transcode(src: &Path, dst: &Path, video_bps: u32, seconds: f64) -> Result<CopyInfo> {
     unsafe {
         // One GPU device shared by decoder, scaler and encoder: frames stay on the GPU.
         let gpu = archy_gpu::device::Gpu::new(None, 0)?;
@@ -117,6 +136,10 @@ fn transcode(src: &Path, dst: &Path, video_bps: u32) -> Result<CopyInfo> {
         let native = reader.GetNativeMediaType(video, 0)?;
         let (src_w, src_h) = unpack(native.GetUINT64(&MF_MT_FRAME_SIZE)?);
         let rate = native.GetUINT64(&MF_MT_FRAME_RATE).unwrap_or(pack(60, 1));
+        let (num, den) = unpack(rate);
+        let source_fps = num as f64 / den.max(1) as f64;
+        let out_fps = copy_fps(source_fps, seconds);
+        let interval = 10_000_000 / out_fps as i64;
         // Resolution the bitrate can carry cleanly.
         let target_h = if video_bps >= 1_800_000 {
             720
@@ -159,11 +182,27 @@ fn transcode(src: &Path, dst: &Path, video_bps: u32) -> Result<CopyInfo> {
         vout.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
         vout.SetUINT32(&MF_MT_AVG_BITRATE, video_bps)?;
         vout.SetUINT64(&MF_MT_FRAME_SIZE, pack(w, h))?;
-        vout.SetUINT64(&MF_MT_FRAME_RATE, rate)?;
+        vout.SetUINT64(&MF_MT_FRAME_RATE, pack(out_fps, 1))?;
+        archy_encode::mf::set_bt709(&vout);
         vout.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
         vout.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1))?;
         let vstream = writer.AddStream(&vout)?;
-        writer.SetInputMediaType(vstream, &reader.GetCurrentMediaType(video)?, None)?;
+        // The encoder gets frames at the copy's rate (thinned below).
+        let vin = MFCreateMediaType()?;
+        reader.GetCurrentMediaType(video)?.CopyAllItems(&vin)?;
+        vin.SetUINT64(&MF_MT_FRAME_RATE, pack(out_fps, 1))?;
+        archy_encode::mf::set_bt709(&vin);
+        // Peak-capped VBR so the size lands under the limit the first time (the
+        // default mode overshot and the copy was encoded up to three times).
+        let mut params: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut params, 3)?;
+        let params = params.ok_or_else(|| windows::core::Error::new(E_FAIL, "attributes"))?;
+        params.SetUINT32(&CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32)?;
+        params.SetUINT32(&CODECAPI_AVEncCommonMeanBitRate, video_bps)?;
+        params.SetUINT32(&CODECAPI_AVEncCommonMaxBitRate, video_bps.saturating_mul(3) / 2)?;
+        if writer.SetInputMediaType(vstream, &vin, &params).is_err() {
+            writer.SetInputMediaType(vstream, &vin, None)?;
+        }
 
         let astream = match audio {
             Some(a) => {
@@ -189,6 +228,9 @@ fn transcode(src: &Path, dst: &Path, video_bps: u32) -> Result<CopyInfo> {
         };
 
         writer.BeginWriting()?;
+        // Video frames are thinned to the copy's rate: the first frame at or after
+        // each slot is kept, with its own time.
+        let mut next_slot: Option<i64> = None;
         let mut open = 1 + audio.is_some() as u32;
         while open > 0 {
             let mut index = 0u32;
@@ -209,7 +251,22 @@ fn transcode(src: &Path, dst: &Path, video_bps: u32) -> Result<CopyInfo> {
                 astream.filter(|(a, _)| *a == index).map(|(_, s)| s)
             };
             if let (Some(sample), Some(stream)) = (sample, target) {
-                writer.WriteSample(stream, &sample)?;
+                if index == video {
+                    let slot = *next_slot.get_or_insert(time);
+                    if time + interval / 2 >= slot {
+                        // Thinned only: each frame keeps its own time, so motion
+                        // stays as smooth as the clip.
+                        writer.WriteSample(stream, &sample)?;
+                        // Past a gap in the source, carry on from the frame's own slot.
+                        let mut n = slot + interval;
+                        while time - interval / 2 >= n {
+                            n += interval;
+                        }
+                        next_slot = Some(n);
+                    }
+                } else {
+                    writer.WriteSample(stream, &sample)?;
+                }
             }
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
                 open -= 1;

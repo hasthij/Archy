@@ -35,6 +35,8 @@ fn main() {
             },
         ],
         audio_kbps: 160,
+        avoid: Vec::new(),
+        constant_rate: true,
     };
     let rec = Recorder::start(cfg).unwrap();
     println!("encoder: {} on {} | audio: {:?}", rec.info.encoder, rec.info.gpu, rec.audio_report);

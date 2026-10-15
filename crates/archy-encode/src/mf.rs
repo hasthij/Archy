@@ -128,11 +128,13 @@ impl MfEncoder {
             out.SetUINT64(&MF_MT_FRAME_RATE, pack(cfg.fps, 1))?;
             out.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1))?;
             out.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+            set_bt709(&out);
             transform.SetOutputType(output_id, &out, 0)?;
 
             let input = find_input_type(&transform, input_id, &MFVideoFormat_NV12)?;
             input.SetUINT64(&MF_MT_FRAME_SIZE, pack(cfg.width, cfg.height))?;
             input.SetUINT64(&MF_MT_FRAME_RATE, pack(cfg.fps, 1))?;
+            set_bt709(&input);
             transform.SetInputType(input_id, &input, 0)?;
         }
 
@@ -180,7 +182,12 @@ impl MfEncoder {
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
         }
         loop {
-            let event = unsafe { events.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0))? };
+            let Some(event) = next_event(&events, if draining { DRAIN_LIMIT } else { EVENT_LIMIT })? else {
+                if draining {
+                    break; // the last few frames are lost; the recording itself is fine
+                }
+                return Err(Error::new(E_FAIL, "the GPU encoder stopped responding (no events for 5 s)"));
+            };
             let kind = unsafe { event.GetType()? };
             if kind == METransformNeedInput.0 as u32 {
                 if draining {
@@ -202,6 +209,11 @@ impl MfEncoder {
                         let sample = self.input_sample(&input)?;
                         unsafe { self.transform.ProcessInput(self.input_id, &sample, 0)? };
                         stats.frames_in += 1;
+                        if crate::fault("mf_silent") && stats.frames_in >= 120 {
+                            // As if the driver stopped sending events.
+                            std::thread::sleep(EVENT_LIMIT);
+                            return Err(Error::new(E_FAIL, "the GPU encoder stopped responding (no events for 5 s)"));
+                        }
                     }
                     Err(_) => unsafe {
                         self.transform
@@ -371,6 +383,48 @@ fn strip_ivf(data: &[u8]) -> &[u8] {
     data
 }
 
+/// BT.709, limited range: what the converter makes. Written into the stream so
+/// players and editors don't guess (they guessed BT.601 for small sizes). Best
+/// effort: an encoder that ignores it still records.
+pub fn set_bt709(t: &IMFMediaType) {
+    unsafe {
+        let _ = t.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32);
+        let _ = t.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32);
+        let _ = t.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
+        let _ = t.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32);
+    }
+}
+
+/// The encoder's next event, never waiting forever: an async MFT (NVENC, AMF)
+/// whose driver goes quiet used to hang this thread for good. Errors the encoder
+/// reports itself (MEError) are returned as errors.
+fn next_event(events: &IMFMediaEventGenerator, limit: Duration) -> Result<Option<IMFMediaEvent>> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match unsafe { events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+            Ok(event) => {
+                if unsafe { event.GetType()? } == MEError.0 as u32 {
+                    let status = unsafe { event.GetStatus()? };
+                    return Err(Error::new(status, "the GPU encoder reported an error"));
+                }
+                return Ok(Some(event));
+            }
+            Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => {
+                if Instant::now() > deadline {
+                    return Ok(None);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Longest wait for any encoder event while recording.
+const EVENT_LIMIT: Duration = Duration::from_secs(5);
+/// Longest wait for the encoder to finish its last frames when recording stops.
+const DRAIN_LIMIT: Duration = Duration::from_secs(3);
+
 fn find_input_type(transform: &IMFTransform, id: u32, subtype: &GUID) -> Result<IMFMediaType> {
     for i in 0.. {
         let t = unsafe { transform.GetInputAvailableType(id, i)? };
@@ -389,6 +443,13 @@ fn configure_codec_api(transform: &IMFTransform, cfg: &Config) -> &'static str {
     let set = |key: &GUID, value: VARIANT| unsafe { api.SetValue(key, &value).is_ok() };
 
     set(&CODECAPI_AVEncMPVGOPSize, var_u32(cfg.gop));
+    // Above 60 fps each frame is on screen for under half as long, and the
+    // encoder must finish more than twice as many: favour speed (0 = fastest)
+    // so NVENC / AMF / Quick Sync keep up at 120-144 fps. At 60 and below the
+    // driver's own balance stays.
+    if cfg.fps > 60 {
+        set(&CODECAPI_AVEncCommonQualityVsSpeed, var_u32(0));
+    }
     // No low-latency mode: on AMD/NVIDIA it also squeezes the rate-control buffer
     // to about one frame, so keyframes come out as blocks. B-frames stay off
     // explicitly instead (no reordering, less GPU work).

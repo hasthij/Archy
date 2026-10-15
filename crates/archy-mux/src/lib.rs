@@ -69,6 +69,11 @@ impl Mp4Writer {
             ty.SetGUID(&MF_MT_SUBTYPE, &codec.subtype())?;
             ty.SetUINT64(&MF_MT_FRAME_SIZE, pack(width, height))?;
             ty.SetUINT64(&MF_MT_FRAME_RATE, pack(fps, 1))?;
+            // BT.709 limited range, as recorded (players guessed otherwise).
+            let _ = ty.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32);
+            let _ = ty.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32);
+            let _ = ty.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32);
+            let _ = ty.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32);
             ty.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack(1, 1))?;
             ty.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
             match codec_header(codec, first_keyframe) {
@@ -86,6 +91,9 @@ impl Mp4Writer {
             let attrs = attrs.expect("MFCreateAttributes succeeded without attributes");
             attrs.SetGUID(&MF_TRANSCODE_CONTAINERTYPE, &MFTranscodeContainerType_MPEG4)?;
             attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
+            // No "faststart" (MF_MPEG4SINK_MOOV_BEFORE_MDAT): Media Foundation then
+            // re-reads the file it opened write-only, and every save failed with
+            // "Access is denied" (2026-10-15). Fast saves matter more.
             let writer = MFCreateSinkWriterFromURL(&HSTRING::from(path.as_os_str()), None, &attrs)?;
             let video = writer.AddStream(&ty)?;
             writer.SetInputMediaType(video, &ty, None)?;

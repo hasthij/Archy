@@ -43,6 +43,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 const WM_TRAY: u32 = WM_APP + 1;
 /// A voice phrase was heard; WPARAM = phrase index.
 const WM_VOICE: u32 = WM_APP + 2;
+/// The worker thread finished starting a recording (see `App::start`).
+const WM_STARTED: u32 = WM_APP + 3;
 const TIMER_WATCH: usize = 1;
 const HK_SAVE: i32 = 1;
 const HK_SAVE_LONG: i32 = 2;
@@ -58,12 +60,49 @@ struct Session {
     recorder: Arc<Recorder>,
     hwnd: HWND,
     game: String,
+    /// Its program file, to tell whether it's the game the user picked.
+    exe: String,
+    /// Recording the game's window (not a whole screen).
+    window_target: bool,
+}
+
+/// A recording being started on a worker thread.
+struct Starting {
+    rx: std::sync::mpsc::Receiver<Started>,
+    hwnd: isize,
+    game: String,
+    exe: String,
+    window_target: bool,
+}
+
+/// What the start worker sends back.
+struct Started {
+    result: Result<Recorder, String>,
+    /// Fallbacks that were needed, for the log.
+    notes: Vec<String>,
+    /// The frame rate it runs at (lower than the setting after a fallback).
+    fps: u32,
+}
+
+/// A recording that was replaced (settings changed, the encoder failed, the game
+/// was minimized). Stopped, but its buffer is kept for a while so a clip saved
+/// right after a restart still has everything from before it.
+struct Previous {
+    recorder: Arc<Recorder>,
+    game: String,
+    ended: std::time::Instant,
 }
 
 struct App {
     window: HWND,
     settings: Settings,
     session: Option<Session>,
+    /// A game whose GPU couldn't keep up with the chosen frame rate, and the
+    /// rate it's recorded at instead (until the settings change).
+    fps_cap: Option<(String, u32)>,
+    /// Frames sent / skipped at the last check, and how many checks in a row
+    /// the encoder fell behind.
+    keep_up: (u64, u64, u32),
     paused: bool,
     saving: Arc<AtomicBool>,
     settings_modified: Option<std::time::SystemTime>,
@@ -82,23 +121,86 @@ struct App {
     queued: Arc<std::sync::atomic::AtomicU32>,
     /// When "Voice clipping is off" was last shown, so a broken mic doesn't spam.
     voice_warned: std::cell::Cell<Option<std::time::Instant>>,
+    /// A recording being started on the worker thread.
+    starting: Option<Starting>,
+    /// Stop the recording being started as soon as it's up (settings changed or
+    /// paused meanwhile).
+    stop_after_start: bool,
+    previous: Option<Previous>,
+    /// Encoders that failed twice (`RecorderInfo::encoder_key`); skipped until restart.
+    avoid: Vec<String>,
+    /// Each encoder failure (avoided from the second one).
+    encoder_strikes: Vec<String>,
+    /// Recent failures: (exe, when).
+    failures: Vec<(String, std::time::Instant)>,
+    /// A game that kept failing, and when to try it again.
+    blocked: Option<(String, std::time::Instant)>,
+    /// Watch ticks the recorded window has been minimized.
+    minimized_ticks: u32,
+    ticks: u32,
+    hdr_warned: bool,
 }
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
 }
 
+/// One dated line in archy.log; past 1 MB the log moves to archy.old.log (it
+/// used to grow forever, with times but no dates).
 fn log(msg: &str) {
     let dir = settings::app_dir();
     let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("archy.log"))
-    {
-        let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-        let _ = writeln!(f, "{:02}:{:02}:{:02} {msg}", t.wHour, t.wMinute, t.wSecond);
+    let path = dir.join("archy.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1_000_000) {
+        let _ = std::fs::rename(&path, dir.join("archy.old.log"));
     }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+        let _ = writeln!(
+            f,
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02} {msg}",
+            t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+        );
+    }
+}
+
+/// Keeps the clips folder under the user's limit (GB, 0 = none) by moving the
+/// oldest clips to the Recycle Bin; the newest clip is always kept.
+fn trim_clips_folder(folder: &std::path::Path, limit_gb: u32) {
+    if limit_gb == 0 {
+        return;
+    }
+    let clips = archy_core::files::clips_oldest_first(folder);
+    for p in archy_core::files::over_limit(&clips, limit_gb as u64 * 1_000_000_000, 1) {
+        match archy_core::files::recycle(&p) {
+            Ok(()) => log(&format!("clips folder over {limit_gb} GB: moved {} to the Recycle Bin", p.display())),
+            Err(e) => log(&format!("couldn't trim {}: {e}", p.display())),
+        }
+    }
+}
+
+/// Warns (at most hourly) when the clips drive is nearly full.
+fn warn_low_disk(window: isize, folder: &std::path::Path) {
+    use std::sync::atomic::AtomicU64;
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let Some(free) = archy_core::files::free_bytes(folder) else { return };
+    if free >= 2_000_000_000 {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if now.saturating_sub(LAST.load(Ordering::Relaxed)) < 3600 {
+        return;
+    }
+    LAST.store(now, Ordering::Relaxed);
+    notify(
+        window,
+        "Your clips drive is almost full",
+        &format!("{:.1} GB left. Delete old clips, or set a size limit in Archy > Recording.", free as f64 / 1e9),
+        true,
+    );
 }
 
 fn wide_into<const N: usize>(dst: &mut [u16; N], text: &str) {
@@ -174,10 +276,11 @@ struct TrackVolumes {
 impl TrackVolumes {
     fn update(&self, s: &Settings) {
         use std::sync::atomic::Ordering::Relaxed;
-        self.everything.store(s.volume_everything, Relaxed);
-        self.game.store(s.volume_game, Relaxed);
-        self.discord.store(s.volume_discord, Relaxed);
-        self.mic.store(s.volume_mic, Relaxed);
+        let (everything, game, discord, mic) = s.audio_volumes();
+        self.everything.store(everything, Relaxed);
+        self.game.store(game, Relaxed);
+        self.discord.store(discord, Relaxed);
+        self.mic.store(mic, Relaxed);
     }
 
     fn of(&self, main: &archy_audio::Volume) -> archy_audio::Volumes {
@@ -185,11 +288,13 @@ impl TrackVolumes {
     }
 }
 
-fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolumes) -> RecorderConfig {
+fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolumes, avoid: &[String]) -> RecorderConfig {
     let mut audio = Vec::new();
-    if s.audio_everything {
-        // Track 1 is what single-track players play, so it carries your mic too.
-        let source = if s.audio_mic {
+    let (with_game, with_discord, with_mic) = s.audio_sources();
+    {
+        // Track 1 (always): everything you heard, and your mic, because it's what
+        // single-track players (Discord, phones) play.
+        let source = if s.mic_wanted() {
             Source::Mix {
                 output: Some(s.output_device.clone()),
                 mic: Some(s.mic_device.clone()),
@@ -205,14 +310,14 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
             volumes: vols.of(&vols.everything),
         });
     }
-    if s.audio_game && game_pid != 0 {
+    if with_game && game_pid != 0 {
         audio.push(AudioSource {
             name: "Game".into(),
             source: Source::Process { pid: game_pid },
             volumes: vols.of(&vols.game),
         });
     }
-    if s.audio_discord {
+    if with_discord {
         if let Some(pid) = archy_audio::find_root_process("Discord.exe") {
             audio.push(AudioSource {
                 name: "Discord".into(),
@@ -221,7 +326,7 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
             });
         }
     }
-    if s.audio_mic {
+    if with_mic {
         audio.push(AudioSource {
             name: "Microphone".into(),
             source: Source::Microphone {
@@ -240,7 +345,12 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
         (if video >= 2_000_000.0 { 720 } else { 480 }, video as u32)
     } else {
         let p = presets::find(&s.quality).unwrap_or(&presets::PRESETS[2]);
-        (p.height, (p.mbps * 1_000_000.0) as u32)
+        // Presets are sized for 60 fps. Above that the same bitrate is split over
+        // more frames and fast motion goes soft (at 144, each frame got 2.4x less),
+        // so it grows with the frame rate: less than linearly, as neighbouring
+        // frames are more alike the faster they come. 144 fps: x1.69.
+        let more_frames = (s.fps.max(60) as f64 / 60.0).powf(0.6);
+        (p.height, (p.mbps as f64 * more_frames * 1_000_000.0) as u32)
     };
     let codecs = match s.codec.to_ascii_lowercase().as_str() {
         "hevc" | "h265" => vec![Codec::Hevc, Codec::H264],
@@ -262,6 +372,8 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
         gpu: s.encoder_gpu.clone(),
         audio,
         audio_kbps,
+        avoid: avoid.to_vec(),
+        constant_rate: s.frame_timing == "constant",
     }
 }
 
@@ -362,6 +474,7 @@ impl App {
             return;
         }
         let restart = recording_changed(&self.settings, &s);
+        let s_fps_changed = s.fps != self.settings.fps;
         if s.start_with_windows != self.settings.start_with_windows {
             startup::set(s.start_with_windows);
         }
@@ -371,7 +484,17 @@ impl App {
         self.sync_voice();
         self.publish();
         if restart {
-            self.session = None; // restarts with the new quality on this tick
+            // A new frame rate gets a fresh try; other changes keep the step-down.
+            if s_fps_changed {
+                self.fps_cap = None;
+            }
+            // A failed game gets a fresh try with new settings.
+            self.blocked = None;
+            self.failed_window = None;
+            if self.starting.is_some() {
+                self.stop_after_start = true;
+            }
+            self.stop_session("settings changed"); // restarts with the new settings on this tick
             self.paused = false;
         }
         log("settings applied");
@@ -448,43 +571,141 @@ impl App {
         self.sync_voice();
     }
 
+    /// Whether the encoder has been skipping a real share of frames (over 15%
+    /// for three checks in a row, ~6 s) at more than 60 fps: a GPU that can't
+    /// keep up makes uneven clips, and 60 fps is smooth everywhere.
+    fn falling_behind(&mut self) -> bool {
+        let Some(s) = &self.session else { return false };
+        let (sent, skipped) = s.recorder.frame_counts();
+        let (last_sent, last_skipped, strikes) = self.keep_up;
+        let (ds, dk) = (sent.saturating_sub(last_sent), skipped.saturating_sub(last_skipped));
+        let behind = s.recorder.info.fps > 60 && ds + dk > 30 && dk * 100 > (ds + dk) * 15;
+        let strikes = if behind { strikes + 1 } else { 0 };
+        self.keep_up = (sent, skipped, strikes);
+        strikes >= 3
+    }
+
     fn watch(&mut self) {
         self.pick_up_settings();
         self.revive_voice();
+        self.expire_previous();
+        // A recording being started on the worker thread: take its result, or wait.
+        if let Some(s) = &self.starting {
+            match s.rx.try_recv() {
+                Ok(done) => {
+                    let s = self.starting.take().expect("checked above");
+                    self.finish_start(s, done);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.starting = None,
+            }
+        }
+        // The picked game's window, looked up once per tick.
+        let picked = Some(&self.settings.record_target)
+            .filter(|t| !t.is_empty())
+            .and_then(|t| watch::find(t));
+        let behind = self.falling_behind();
+        self.ticks = self.ticks.wrapping_add(1);
+        let check_discord = self.ticks % 5 == 0 && self.settings.audio_sources().1;
         if let Some(s) = &self.session {
-            let ended = !watch::alive(s.hwnd) || s.recorder.status() != RecorderStatus::Recording;
-            if !ended {
+            let window_gone = !watch::alive(s.hwnd);
+            let ended = window_gone || s.recorder.status() != RecorderStatus::Recording;
+            // The user picked another game and it's open: switch to it.
+            let target = &self.settings.record_target;
+            let switch = !ended
+                && !target.is_empty()
+                && !s.exe.eq_ignore_ascii_case(target)
+                && picked.as_ref().is_some_and(|w| !w.minimized);
+            // A minimized game gives no new frames: encoding the same frozen
+            // picture for hours is pure waste. Stop (the buffer is kept) and start
+            // again when it's back.
+            let minimized = !ended && s.window_target && unsafe { IsIconic(s.hwnd) }.as_bool();
+            self.minimized_ticks = if minimized { self.minimized_ticks + 1 } else { 0 };
+            let minimized = self.minimized_ticks >= 2;
+            // Discord opened after recording started: restart once to add its track.
+            let discord = !ended
+                && check_discord
+                && !s.recorder.audio_tracks().iter().any(|t| t == "Discord")
+                && archy_audio::find_root_process("Discord.exe").is_some();
+            let slow = !ended && !switch && behind;
+            if !ended && !switch && !slow && !minimized && !discord {
                 return; // keep recording even while alt-tabbed
             }
-            let reason = if !watch::alive(s.hwnd) {
+            if slow {
+                let fps = s.recorder.info.fps;
+                self.fps_cap = Some((s.exe.clone(), 60));
+                notify(
+                    self.window.0 as isize,
+                    "Recording at 60 fps",
+                    &format!("Your graphics chip couldn't keep up with {fps} fps in this game, so Archy switched to 60 to keep clips smooth."),
+                    true,
+                );
+            }
+            let failed = s.recorder.status() == RecorderStatus::Failed;
+            let reason = if slow {
+                "the GPU couldn't keep up; continuing at 60 fps".to_string()
+            } else if switch {
+                format!("switching to the picked game ({target})")
+            } else if window_gone {
                 "the game window closed".to_string()
+            } else if minimized {
+                "the game was minimized (recording resumes when it's back)".to_string()
+            } else if discord {
+                "Discord started; adding its track".to_string()
             } else {
                 s.recorder.stop_reason()
             };
-            let health = s.recorder.health();
-            if health.is_empty() {
-                log(&format!("stopped recording {}: {reason}", s.game));
-            } else {
-                log(&format!("stopped recording {}: {reason} ({health})", s.game));
+            let (exe, game, key) = (s.exe.clone(), s.game.clone(), s.recorder.info.encoder_key.clone());
+            if failed {
+                // An encoder that stopped working is skipped from now on (C3/C4):
+                // the next start uses the next encoder, GPU or codec.
+                if reason.to_ascii_lowercase().contains("encoder") && !self.avoid.contains(&key) {
+                    self.encoder_strikes.push(key.clone());
+                    if self.encoder_strikes.iter().filter(|k| **k == key).count() >= 2 {
+                        log(&format!("won't use {key} again until Archy restarts (failed twice)"));
+                        self.avoid.push(key);
+                    }
+                }
+                self.note_failure(&exe, &game, &reason);
             }
-            self.session = None;
-            self.publish();
+            self.stop_session(&reason);
         }
         if self.paused {
             return;
         }
-        let Some(fg) = watch::foreground() else {
-            return;
+        // A game the user picked is recorded whenever it's open (not minimized),
+        // in front or not; otherwise, the game being played.
+        let fg = match picked {
+            Some(w) if !w.minimized => w,
+            Some(_) => return, // the picked game is minimized: wait for it
+            None => {
+                let Some(fg) = watch::foreground() else {
+                    return;
+                };
+                if !fg.is_game(&self.settings.games, self.settings.record_fullscreen_apps, &self.settings.never_record) {
+                    return;
+                }
+                fg
+            }
         };
-        if !fg.is_game(&self.settings.games, self.settings.record_fullscreen_apps, &self.settings.never_record) {
-            return;
-        }
         if self.failed_window == Some(fg.hwnd.0 as isize) {
             if watch::alive(fg.hwnd) {
                 return;
             }
             self.failed_window = None;
         }
+        if let Some((exe, until)) = &self.blocked {
+            if std::time::Instant::now() < *until && exe.eq_ignore_ascii_case(&fg.exe) {
+                return;
+            }
+        }
+        self.start(fg);
+    }
+
+    /// Starts recording `fg` on a worker thread: creating an encoder can take
+    /// seconds (and a broken driver can hang), and the tray must keep answering
+    /// hotkeys, voice and its menu meanwhile.
+    fn start(&mut self, fg: watch::Foreground) {
         let target = if self.settings.capture.eq_ignore_ascii_case("screen") {
             // The screen picked in settings, else (or if it was unplugged) the game's.
             let chosen = archy_core::monitors::find(&self.settings.capture_monitor);
@@ -496,48 +717,95 @@ impl App {
         };
         let game = watch::game_name(&fg.exe);
         // Fallbacks, in order: some hardware encoders (or their drivers) refuse
-        // 120/144 fps, so try 60 on the same window; some games can't be captured
-        // as a window at all (exclusive fullscreen, protected windows), so then
-        // record the screen the game is on.
-        let mut at60 = self.settings.clone();
-        at60.fps = 60;
+        // 120/144 fps, so try 60 on the same window; some refuse sizes above
+        // 1080p; some games can't be captured as a window at all (exclusive
+        // fullscreen, protected windows), so then record the screen the game is on.
+        // A game this GPU couldn't keep up with earlier starts at the lower rate.
+        let mut base = self.settings.clone();
+        if let Some((exe, fps)) = &self.fps_cap {
+            if exe.eq_ignore_ascii_case(&fg.exe) {
+                base.fps = base.fps.min(*fps);
+            }
+        }
         let screen = Target::Monitor(unsafe { MonitorFromWindow(fg.hwnd, MONITOR_DEFAULTTONEAREST) });
-        let mut attempts = vec![(&self.settings, target)];
-        if self.settings.fps > 60 {
-            attempts.push((&at60, target));
+        let config = |s: &Settings, t: Target, max_height: Option<u32>| {
+            let mut c = recorder_config(s, t, fg.pid, &self.volumes, &self.avoid);
+            if let Some(h) = max_height {
+                c.max_height = c.max_height.min(h);
+            }
+            c
+        };
+        let mut at60 = base.clone();
+        at60.fps = 60;
+        let mut attempts: Vec<(RecorderConfig, String)> = Vec::new();
+        let first = config(&base, target, None);
+        let tall = first.max_height > 1080;
+        attempts.push((first, format!("{} fps", base.fps)));
+        if base.fps > 60 {
+            attempts.push((config(&at60, target, None), "60 fps".into()));
+        }
+        if tall {
+            attempts.push((config(&at60, target, Some(1080)), "1080p at 60 fps".into()));
         }
         if let Target::Window(_) = target {
-            attempts.push((&self.settings, screen));
-            if self.settings.fps > 60 {
-                attempts.push((&at60, screen));
+            attempts.push((config(&base, screen, None), format!("its screen at {} fps", base.fps)));
+            if base.fps > 60 {
+                attempts.push((config(&at60, screen, None), "its screen at 60 fps".into()));
             }
         }
-        let mut started = Err(windows::core::Error::empty());
-        for (i, (s, t)) in attempts.into_iter().enumerate() {
-            if let Err(e) = &started {
-                if i > 0 {
-                    let how = if matches!(t, Target::Monitor(_)) { "its screen" } else { "the window" };
-                    log(&format!("recording {game} failed ({}); trying {how} at {} fps", e.message(), s.fps));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let window = self.window.0 as isize;
+        let label = game.clone();
+        let spawned = std::thread::Builder::new().name("archy-start".into()).spawn(move || {
+            let _ = archy_core::init_thread();
+            let mut notes = Vec::new();
+            let mut last = String::from("no way to record it");
+            for (cfg, how) in attempts {
+                let fps = cfg.fps;
+                match Recorder::start(cfg) {
+                    Ok(rec) => {
+                        let _ = tx.send(Started { result: Ok(rec), notes, fps });
+                        unsafe {
+                            let _ = PostMessageW(Some(HWND(window as *mut _)), WM_STARTED, WPARAM(0), LPARAM(0));
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        last = e.message();
+                        notes.push(format!("recording {label} failed ({last}) at {how}"));
+                    }
                 }
             }
-            started = Recorder::start(recorder_config(s, t, fg.pid, &self.volumes));
-            if started.is_ok() {
-                if s.fps < self.settings.fps {
-                    notify(
-                        self.window.0 as isize,
-                        "Recording at 60 fps",
-                        &format!("Your graphics chip couldn't record {} fps, so Archy uses 60 for this game.", self.settings.fps),
-                        true,
-                    );
-                }
-                break;
+            let _ = tx.send(Started { result: Err(last), notes, fps: 0 });
+            unsafe {
+                let _ = PostMessageW(Some(HWND(window as *mut _)), WM_STARTED, WPARAM(0), LPARAM(0));
             }
+        });
+        if spawned.is_err() {
+            log("couldn't start the recording thread");
+            return;
         }
-        match started {
+        self.starting = Some(Starting {
+            rx,
+            hwnd: fg.hwnd.0 as isize,
+            game,
+            exe: fg.exe,
+            window_target: matches!(target, Target::Window(_)),
+        });
+    }
+
+    /// The worker thread finished starting a recording.
+    fn finish_start(&mut self, s: Starting, done: Started) {
+        for n in &done.notes {
+            log(n);
+        }
+        let hwnd = HWND(s.hwnd as *mut _);
+        match done.result {
             Ok(rec) => {
                 let i = &rec.info;
                 log(&format!(
-                    "recording {game}: {} {}x{}@{} via {} on {}; audio: {}",
+                    "recording {}: {} {}x{}@{} via {} on {}; audio: {}",
+                    s.game,
                     i.codec,
                     i.width,
                     i.height,
@@ -546,30 +814,137 @@ impl App {
                     i.gpu,
                     rec.audio_report.join(", ")
                 ));
+                if done.fps < self.settings.fps && !done.notes.is_empty() {
+                    notify(
+                        self.window.0 as isize,
+                        &format!("Recording at {} fps", done.fps),
+                        &format!("Your graphics chip couldn't record {} fps, so Archy uses {} for this game.", self.settings.fps, done.fps),
+                        true,
+                    );
+                }
+                // HDR desktops are tone-mapped for SDR capture: say so once.
+                let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+                if !self.hdr_warned && archy_core::monitors::hdr_on(monitor) {
+                    self.hdr_warned = true;
+                    log("HDR is on for the game's screen: clips are recorded in SDR");
+                    notify(
+                        self.window.0 as isize,
+                        "HDR is on",
+                        "Clips are recorded in standard colour, so they can look a little washed out. For exact colours, turn HDR off in Windows display settings while you play.",
+                        true,
+                    );
+                }
+                self.keep_up = (0, 0, 0);
+                self.minimized_ticks = 0;
                 self.session = Some(Session {
                     recorder: Arc::new(rec),
-                    hwnd: fg.hwnd,
-                    game,
+                    hwnd,
+                    game: s.game,
+                    exe: s.exe,
+                    window_target: s.window_target,
                 });
+                // A settings change or pause arrived while it was starting.
+                if std::mem::take(&mut self.stop_after_start) {
+                    self.stop_session("settings changed while starting");
+                }
             }
             Err(e) => {
-                log(&format!("could not record {game}: {}", e.message()));
-                notify(
-                    self.window.0 as isize,
-                    "Archy can't record this game",
-                    &e.message(),
-                    true,
-                );
+                log(&format!("could not record {}: {e}", s.game));
+                notify(self.window.0 as isize, "Archy can't record this game", &e, true);
                 // Don't retry this window every 2 s; other games still record.
-                self.failed_window = Some(fg.hwnd.0 as isize);
+                self.failed_window = Some(s.hwnd);
+                self.stop_after_start = false;
+                self.note_failure(&s.exe, &s.game, &e);
             }
         }
         self.publish();
     }
 
+    /// Ends the current recording. The recorder stops at once; its buffer is kept
+    /// as `previous` (a clip saved right after still has the full length), and
+    /// the older one is dropped on another thread (joining its threads can take
+    /// seconds, and the tray must never wait for that).
+    fn stop_session(&mut self, reason: &str) {
+        let Some(s) = self.session.take() else { return };
+        let health = s.recorder.health();
+        if health.is_empty() {
+            log(&format!("stopped recording {}: {reason}", s.game));
+        } else {
+            log(&format!("stopped recording {}: {reason} ({health})", s.game));
+        }
+        s.recorder.stop();
+        let old = self.previous.replace(Previous {
+            recorder: s.recorder,
+            game: s.game,
+            ended: std::time::Instant::now(),
+        });
+        if let Some(old) = old {
+            std::thread::spawn(move || drop(old));
+        }
+        self.publish();
+    }
+
+    /// Lets go of the previous recording's buffer once no clip could need it.
+    fn expire_previous(&mut self) {
+        let keep = std::time::Duration::from_secs(self.settings.buffer_seconds() as u64 + 15);
+        if self.previous.as_ref().is_some_and(|p| p.ended.elapsed() > keep) {
+            if let Some(old) = self.previous.take() {
+                std::thread::spawn(move || drop(old));
+            }
+        }
+    }
+
+    /// Counts failures per game; three within five minutes pause that game for
+    /// five minutes (it was restarted every 2 s forever, silently), with one
+    /// notification saying why.
+    fn note_failure(&mut self, exe: &str, game: &str, why: &str) {
+        let now = std::time::Instant::now();
+        self.failures.retain(|(_, t)| now.duration_since(*t).as_secs() < 300);
+        self.failures.push((exe.to_string(), now));
+        let count = self.failures.iter().filter(|(e, _)| e.eq_ignore_ascii_case(exe)).count();
+        if count >= 3 {
+            self.failures.retain(|(e, _)| !e.eq_ignore_ascii_case(exe));
+            self.blocked = Some((exe.to_string(), now + std::time::Duration::from_secs(300)));
+            log(&format!("recording {game} failed 3 times in 5 minutes ({why}); retrying in 5 minutes"));
+            notify(
+                self.window.0 as isize,
+                &format!("Archy paused recording {game}"),
+                &format!("It failed 3 times in a few minutes ({why}). Archy tries again in 5 minutes."),
+                true,
+            );
+        }
+    }
+
+    /// A clip hotkey: a ping right away (the save itself takes a moment), then save.
+    fn hotkey_save(&self, seconds: u32) {
+        if self.settings.sound_on_hotkey && (self.session.is_some() || self.previous.is_some()) {
+            play(VOICE_WAV, self.settings.voice_sound_volume);
+        }
+        self.save(seconds);
+    }
+
     fn save(&self, seconds: u32) {
         let window = self.window.0 as isize;
-        let Some(session) = &self.session else {
+        // What to save from: the current recording, plus the previous one when the
+        // current started less than `seconds` ago (a restart: settings changed, the
+        // encoder failed, the game was minimized). The earlier part is saved as its
+        // own clip, so nothing from before the restart is lost.
+        let mut parts: Vec<(Arc<Recorder>, String)> = Vec::new();
+        if let Some(s) = &self.session {
+            parts.push((s.recorder.clone(), s.game.clone()));
+        }
+        if let Some(p) = &self.previous {
+            let recent = p.ended.elapsed().as_secs_f64() < seconds as f64;
+            let short = self
+                .session
+                .as_ref()
+                .is_none_or(|s| s.recorder.buffered_seconds() + 2.0 < seconds as f64);
+            if recent && short {
+                let name = if parts.is_empty() { p.game.clone() } else { format!("{} (before restart)", p.game) };
+                parts.push((p.recorder.clone(), name));
+            }
+        }
+        if parts.is_empty() {
             let why = if self.paused {
                 "Archy is paused."
             } else {
@@ -577,7 +952,17 @@ impl App {
             };
             notify(window, "No clip saved", why, true);
             return;
-        };
+        }
+        let folder = self.settings.save_folder.clone();
+        let _ = std::fs::create_dir_all(&folder);
+        // A full drive: say so instead of failing halfway through writing.
+        if let Some(free) = archy_core::files::free_bytes(&folder) {
+            if free < 300_000_000 {
+                log(&format!("save refused: only {} MB free", free / 1_000_000));
+                notify(window, "Clip not saved: the drive is full", &format!("Only {} MB free on the drive with your clips. Free some space, or pick another folder in Archy.", free / 1_000_000), true);
+                return;
+            }
+        }
         if self.saving.swap(true, Ordering::AcqRel) {
             // A save is running: do this one right after it, instead of dropping
             // it (a second "Archer clip that" or F8 used to do nothing).
@@ -585,56 +970,67 @@ impl App {
             log("clip request queued: a save is still running");
             return;
         }
-        let recorder = session.recorder.clone();
-        let folder = self.settings.save_folder.clone();
-        let game = session.game.clone();
         let copy = self.settings.copy_after_save;
         let show = self.settings.notify_on_save;
         let chime = self.settings.sound_on_save;
         let chime_volume = self.settings.clip_sound_volume;
+        let limit_gb = self.settings.clips_max_gb;
         let saving = self.saving.clone();
         let queued = self.queued.clone();
         std::thread::spawn(move || {
             archy_core::eco::boost_current_thread();
             let mut seconds = seconds;
             loop {
-                let _ = std::fs::create_dir_all(&folder);
-                let path = clip::new_path(&folder, &game);
-                match recorder.save_clip(seconds, &path) {
-                    Ok(c) => {
-                        let copied = copy && archy_core::clipboard::copy_file(&c.path);
-                        log(&format!(
-                            "saved {} ({:.1} s, {:.1} MB, {} ms)",
-                            c.path.display(),
-                            c.seconds,
-                            c.bytes as f64 / 1e6,
-                            c.save_time.as_millis()
-                        ));
-                        if chime {
-                            play(CLIP_WAV, chime_volume);
+                let mut saved: Vec<archy_core::recorder::ClipInfo> = Vec::new();
+                let mut error = None;
+                for (recorder, game) in &parts {
+                    let path = clip::new_path(&folder, game);
+                    match recorder.save_clip(seconds, &path) {
+                        Ok(c) => {
+                            log(&format!(
+                                "saved {} ({:.1} s, {:.1} MB, {} ms)",
+                                c.path.display(),
+                                c.seconds,
+                                c.bytes as f64 / 1e6,
+                                c.save_time.as_millis()
+                            ));
+                            saved.push(c);
                         }
-                        if show {
-                            let mb = c.bytes as f64 / 1e6;
-                            let mut extra = if copied {
-                                " · copied, paste it anywhere".to_string()
-                            } else {
-                                String::new()
-                            };
-                            if mb > 10.0 {
-                                extra.push_str(" · over Discord's 10 MB: use Discord copy in Archy");
-                            }
-                            notify(
-                                window,
-                                &format!("Clip saved · last {:.0} s", c.seconds),
-                                &format!("{mb:.1} MB{extra}"),
-                                false,
-                            );
+                        Err(e) => {
+                            log(&format!("save failed: {}", e.message()));
+                            error = Some(e.message());
                         }
                     }
-                    Err(e) => {
-                        log(&format!("save failed: {}", e.message()));
-                        notify(window, "Clip not saved", &e.message(), true);
+                }
+                if let Some(c) = saved.first() {
+                    let copied = copy && archy_core::clipboard::copy_file(&c.path);
+                    if chime {
+                        play(CLIP_WAV, chime_volume);
                     }
+                    if show {
+                        let mb = c.bytes as f64 / 1e6;
+                        let mut extra = if copied {
+                            " · copied, paste it anywhere".to_string()
+                        } else {
+                            String::new()
+                        };
+                        if saved.len() > 1 {
+                            extra.push_str(" · plus the part before Archy restarted recording");
+                        }
+                        if mb > 10.0 {
+                            extra.push_str(" · over Discord's 10 MB: use Discord copy in Archy");
+                        }
+                        notify(
+                            window,
+                            &format!("Clip saved · last {:.0} s", c.seconds),
+                            &format!("{mb:.1} MB{extra}"),
+                            false,
+                        );
+                    }
+                    trim_clips_folder(&folder, limit_gb);
+                    warn_low_disk(window, &folder);
+                } else if let Some(e) = error {
+                    notify(window, "Clip not saved", &e, true);
                 }
                 if let next @ 1.. = queued.swap(0, Ordering::AcqRel) {
                     seconds = next;
@@ -654,7 +1050,10 @@ impl App {
     fn toggle_pause(&mut self) {
         self.paused = !self.paused;
         if self.paused {
-            self.session = None; // dropping the recorder stops it: zero load while paused
+            if self.starting.is_some() {
+                self.stop_after_start = true;
+            }
+            self.stop_session("paused"); // zero load while paused
         }
         self.sync_voice();
         notify(
@@ -803,10 +1202,9 @@ fn app_icon(recording: bool) -> HICON {
 fn recording_changed(a: &Settings, b: &Settings) -> bool {
     a.quality != b.quality
         || a.clip_seconds != b.clip_seconds
-        || a.audio_everything != b.audio_everything
-        || a.audio_game != b.audio_game
-        || a.audio_discord != b.audio_discord
-        || a.audio_mic != b.audio_mic
+        // Which tracks exist (volumes alone apply live)
+        || a.audio_sources() != b.audio_sources()
+        || a.mic_wanted() != b.mic_wanted()
         || a.audio_kbps != b.audio_kbps
         || a.mic_device != b.mic_device
         || a.output_device != b.output_device
@@ -817,7 +1215,9 @@ fn recording_changed(a: &Settings, b: &Settings) -> bool {
         || a.encoder_gpu != b.encoder_gpu
         || a.buffer_seconds() != b.buffer_seconds()
         // So excluding the app being recorded stops it right away.
+        || a.frame_timing != b.frame_timing
         || a.never_record != b.never_record
+        || a.record_target != b.record_target
 }
 
 /// Opens the Archy window, or brings it to the front if it is already open.
@@ -856,9 +1256,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     match msg {
         WM_TIMER if wp.0 == TIMER_WATCH => with_app(|a| a.watch()),
         WM_VOICE => with_app(|a| a.heard(wp.0, lp.0)),
+        WM_STARTED => with_app(|a| a.watch()),
         WM_HOTKEY => with_app(|a| match wp.0 as i32 {
-            HK_SAVE => a.save(a.settings.clip_seconds),
-            HK_SAVE_LONG => a.save(a.settings.long_clip_seconds),
+            HK_SAVE => a.hotkey_save(a.settings.clip_seconds),
+            HK_SAVE_LONG => a.hotkey_save(a.settings.long_clip_seconds),
             HK_PAUSE => a.toggle_pause(),
             _ => {}
         }),
@@ -871,6 +1272,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         WM_DESTROY => {
             APP.with(|a| {
                 if let Some(app) = a.borrow_mut().take() {
+                    // A clip being saved finishes first (an update or quit used to cut it off).
+                    let t = std::time::Instant::now();
+                    while app.saving.load(Ordering::Acquire) && t.elapsed().as_secs() < 15 {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
                     unsafe {
                         let _ = Shell_NotifyIconW(NIM_DELETE, &tray_data(app.window));
                     }
@@ -885,6 +1291,29 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     LRESULT(0)
 }
 
+/// `archy.exe --self-test <fps> <ffmpeg.exe>`: records a test window at `fps`
+/// and checks every frame (archy_core::selftest); prints the report as JSON.
+fn self_test_main(args: &[String]) {
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    // The same low-priority, throttled process the tray records in.
+    archy_core::eco::apply();
+    let fps = args.first().and_then(|a| a.parse().ok()).unwrap_or(60u32).clamp(24, 144);
+    let opts = archy_core::selftest::Options {
+        fps,
+        seconds: 8,
+        mbps: 5,
+        ffmpeg: args.get(1).map(std::path::PathBuf::from).unwrap_or_default(),
+    };
+    let line = match archy_core::selftest::run(&opts) {
+        Ok(r) => serde_json::to_string(&r).unwrap_or_default(),
+        Err(e) => serde_json::json!({ "fps": fps, "error": e }).to_string(),
+    };
+    log(&format!("self-test: {line}"));
+    println!("{line}");
+}
+
 fn main() {
     // The voice helper process (see voice.rs) shares this exe.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -894,6 +1323,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("--voice-test") {
         voice::test_main();
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--self-test") {
+        self_test_main(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("--voice-host") {
@@ -917,6 +1350,12 @@ fn main() {
         archy_core::eco::apply();
     }
     log("Archy started");
+    // The installer keeps the replaced program files until this version runs.
+    if let Ok(exe) = std::env::current_exe() {
+        for old in ["archy.exe.old", "archy-ui.exe.old"] {
+            let _ = std::fs::remove_file(exe.with_file_name(old));
+        }
+    }
 
     let instance = unsafe { GetModuleHandleW(None) }.expect("module handle");
     let class = WNDCLASSW {
@@ -959,6 +1398,8 @@ fn main() {
         window,
         settings,
         session: None,
+        fps_cap: None,
+        keep_up: (0, 0, 0),
         paused: false,
         saving: Arc::new(AtomicBool::new(false)),
         settings_modified: Settings::modified(),
@@ -970,6 +1411,16 @@ fn main() {
         voice_started: None,
         queued: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         voice_warned: std::cell::Cell::new(None),
+        starting: None,
+        stop_after_start: false,
+        previous: None,
+        avoid: Vec::new(),
+        encoder_strikes: Vec::new(),
+        failures: Vec::new(),
+        blocked: None,
+        minimized_ticks: 0,
+        ticks: 0,
+        hdr_warned: false,
     };
     app.volumes.update(&app.settings);
     app.register_hotkeys();
