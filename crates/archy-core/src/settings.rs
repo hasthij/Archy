@@ -22,6 +22,20 @@ pub struct Settings {
     pub save_folder: PathBuf,
     pub hotkey_save: String,
     pub hotkey_save_long: String,
+    /// Saves a full-size PNG of the game ("" = off, the default).
+    pub hotkey_screenshot: String,
+    /// Whole-session recording: "off" (default), "hotkey" (started and stopped
+    /// with `hotkey_session`) or "always" (whenever a game is recorded).
+    pub session_mode: String,
+    /// Starts/stops session recording in "hotkey" mode ("" = none).
+    pub hotkey_session: String,
+    /// Push-to-talk: the mic is silent in clips except while `push_to_talk_key`
+    /// is held (off by default). Voice clipping still hears you.
+    pub push_to_talk: bool,
+    /// A key ("V", "Ctrl+Space") or a mouse side button ("Mouse4", "Mouse5").
+    pub push_to_talk_key: String,
+    /// More clip hotkeys, each with its own length (empty = just the two above).
+    pub extra_hotkeys: Vec<HotkeyClip>,
     pub hotkey_pause: String,
     /// Executable names that always count as games.
     pub games: Vec<String>,
@@ -160,6 +174,26 @@ pub struct VoicePhrase {
     pub seconds: u32,
 }
 
+/// An extra clip hotkey with its own length (e.g. Ctrl+F8 = last 2 minutes).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HotkeyClip {
+    pub key: String,
+    pub seconds: u32,
+}
+
+impl Default for HotkeyClip {
+    fn default() -> Self {
+        Self { key: String::new(), seconds: 120 }
+    }
+}
+
+/// Longest clip any hotkey or phrase can save (5 minutes). The replay buffer
+/// holds this much in RAM while you play: about 6 MB a second at 1080p60.
+pub const MAX_CLIP_SECONDS: u32 = 300;
+/// Most extra clip hotkeys.
+pub const MAX_EXTRA_HOTKEYS: usize = 8;
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -171,6 +205,12 @@ impl Default for Settings {
             save_folder: default_save_folder(),
             hotkey_save: "F8".into(),
             hotkey_save_long: "Shift+F8".into(),
+            extra_hotkeys: Vec::new(),
+            hotkey_screenshot: String::new(),
+            session_mode: "off".into(),
+            hotkey_session: String::new(),
+            push_to_talk: false,
+            push_to_talk_key: String::new(),
             // Off by default: a key that silently stops recording is easy to hit by accident.
             hotkey_pause: String::new(),
             games: vec!["RobloxPlayerBeta.exe".into()],
@@ -293,7 +333,7 @@ impl Settings {
 
     fn clamped(mut self) -> Self {
         for p in &mut self.voice_phrases {
-            p.seconds = p.seconds.clamp(5, 60);
+            p.seconds = p.seconds.clamp(5, MAX_CLIP_SECONDS);
             // The voice model only knows real words: "Archy" was never heard, while
             // "Archer" (said almost the same) is. Old default phrases move over.
             p.text = p
@@ -310,8 +350,12 @@ impl Settings {
         if self.voice_sensitivity == 0 && self.voice_tuning.is_none() {
             self.voice_sensitivity = 50;
         }
-        self.clip_seconds = self.clip_seconds.clamp(5, 60);
-        self.long_clip_seconds = self.long_clip_seconds.clamp(5, 60);
+        self.clip_seconds = self.clip_seconds.clamp(5, MAX_CLIP_SECONDS);
+        self.long_clip_seconds = self.long_clip_seconds.clamp(5, MAX_CLIP_SECONDS);
+        self.extra_hotkeys.truncate(MAX_EXTRA_HOTKEYS);
+        for h in &mut self.extra_hotkeys {
+            h.seconds = h.seconds.clamp(5, MAX_CLIP_SECONDS);
+        }
         self.fps = self.fps.clamp(24, 144);
         self.clip_sound_volume = self.clip_sound_volume.min(200);
         for v in [
@@ -376,7 +420,9 @@ impl Settings {
     /// resize the buffer (a resize restarts the recording and empties it).
     pub fn buffer_seconds(&self) -> u32 {
         let voice = self.voice_phrases.iter().map(|p| p.seconds).max().unwrap_or(0);
-        self.clip_seconds.max(self.long_clip_seconds).max(voice)
+        // An extra hotkey that's turned off (no key) doesn't make the buffer longer.
+        let extra = self.extra_hotkeys.iter().filter(|h| !h.key.trim().is_empty()).map(|h| h.seconds).max().unwrap_or(0);
+        self.clip_seconds.max(self.long_clip_seconds).max(voice).max(extra)
     }
 }
 
@@ -419,5 +465,25 @@ mod tests {
         let text = format!("\u{feff}{}", serde_json::to_string(&Settings { fps: 144, ..Default::default() }).unwrap());
         let s: Settings = serde_json::from_str(text.trim_start_matches('\u{feff}')).unwrap();
         assert_eq!(s.fps, 144);
+    }
+
+    #[test]
+    fn longer_clips_and_extra_hotkeys() {
+        // Off (the default): exactly the old buffer.
+        let s = Settings::default();
+        assert!(s.extra_hotkeys.is_empty());
+        assert_eq!(s.buffer_seconds(), 60);
+        // Up to 5 minutes, never more.
+        let s: Settings = serde_json::from_str(r#"{"clip_seconds": 900, "extra_hotkeys": [{"key": "Ctrl+F8", "seconds": 120}]}"#).unwrap();
+        let s = s.clamped();
+        assert_eq!(s.clip_seconds, 300);
+        assert_eq!(s.buffer_seconds(), 300);
+        // An extra hotkey with no key doesn't grow the buffer.
+        let s: Settings = serde_json::from_str(r#"{"extra_hotkeys": [{"key": "", "seconds": 300}]}"#).unwrap();
+        assert_eq!(s.clamped().buffer_seconds(), 60);
+        // At most 8 extra hotkeys.
+        let many = (0..20).map(|i| format!(r#"{{"key":"Ctrl+F{}","seconds":30}}"#, i % 12 + 1)).collect::<Vec<_>>().join(",");
+        let s: Settings = serde_json::from_str(&format!(r#"{{"extra_hotkeys":[{many}]}}"#)).unwrap();
+        assert_eq!(s.clamped().extra_hotkeys.len(), MAX_EXTRA_HOTKEYS);
     }
 }

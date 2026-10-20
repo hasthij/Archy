@@ -198,7 +198,7 @@ function renderClips() {
   // thumbnail), so a new clip adds one card instead of rebuilding them all.
   const next = new Map();
   grid.replaceChildren(...shown.map((c, i) => {
-    const featured = i === 0 && filter === "all" && !q;
+    const featured = i === 0 && filter === "all" && !q && c.kind !== "shot";
     const id = `${c.path}|${c.bytes}|${featured}`;
     const card = cardCache.get(id) || clipCard(c, featured);
     next.set(id, card);
@@ -219,7 +219,49 @@ const playIcon = () => {
   return svg;
 };
 
+/// A screenshot in the library: the picture is its own thumbnail.
+function shotCard(c) {
+  const img = el("img", { alt: "", class: "thumb-img", decoding: "async", loading: "lazy", src: fileSrc(c.path) });
+  img.onload = () => img.classList.add("ready");
+  let confirming = false;
+  const del = el("button", { class: "btn danger", text: "Delete", "aria-label": `Move ${c.name} to Recycle Bin` });
+  del.addEventListener("click", async () => {
+    if (!confirming) {
+      confirming = true;
+      del.textContent = "Sure?";
+      setTimeout(() => { confirming = false; del.textContent = "Delete"; }, 3000);
+      return;
+    }
+    try { await invoke("recycle_clip", { path: c.path }); toast("Moved to Recycle Bin"); loadClips(); }
+    catch (e) { toast(String(e)); }
+  });
+  return el("article", { class: "clip shot" },
+    el("button", { class: "thumb", "aria-label": `View ${c.name}`, onclick: () => viewShot(c) },
+      img, el("span", { class: "size-tag", text: "Screenshot" })),
+    el("div", { class: "clip-body" },
+      el("div", { class: "clip-name", title: c.name, text: c.name }),
+      el("div", { class: "clip-meta", text: when(c.modified) }),
+      el("div", { class: "clip-actions" },
+        el("button", { class: "btn primary", text: "Copy", onclick: async () => {
+          try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); }
+          catch (e) { toast(String(e)); }
+        } }),
+        el("button", { class: "btn", text: "Folder", onclick: () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e))) }),
+        del)));
+}
+
+/// Shows a screenshot full size; a click or Escape closes it.
+function viewShot(c) {
+  const close = () => { box.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const box = el("div", { class: "shot-view", role: "dialog", "aria-label": c.name, onclick: close },
+    el("img", { src: fileSrc(c.path), alt: c.name }));
+  document.addEventListener("keydown", onKey);
+  document.body.append(box);
+}
+
 function clipCard(c, hero = false) {
+  if (c.kind === "shot") return shotCard(c);
   // A small cached JPEG, fetched when the card scrolls into view (decoding a
   // video per card to show one frame made the library lag).
   const video = el("img", { alt: "", class: "thumb-img", decoding: "async" });
@@ -348,6 +390,21 @@ function settingCard(def) {
         hasMeters ? el("div", { class: "meters" }, meter("FPS cost", sel.f, FPS_WORD, true), meter("Quality", sel.q, Q_WORD), meter("File size", sel.z, Z_WORD)) : null)));
 }
 
+/// About how much RAM `seconds` of replay buffer takes at the current quality,
+/// frame rate and audio tracks (MB). Video at its average bitrate, as the tray sets it.
+function bufferMB(seconds) {
+  const p = presets.find((x) => x.name === settings.quality);
+  const videoMbps = p
+    ? p.mbps * Math.pow(Math.max(60, settings.fps) / 60, 0.6)
+    : 80 / Math.max(1, settings.clip_seconds); // Discord preset: ~10 MB per clip
+  const tracks = settings.audio_mode === "separate"
+    ? 1 + [settings.volume_game, settings.volume_discord, settings.volume_mic].filter((v) => v > 0).length
+    : (settings.record_stems ? 4 : 1);
+  return Math.round(((videoMbps + (tracks * settings.audio_kbps) / 1000) * seconds) / 8);
+}
+const ramNote = (s) => `Uses about ${bufferMB(s)} MB of RAM while you play (not FPS).`;
+const lengthLabel = (s) => (s < 60 ? `${s} s` : s % 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s / 60} min`);
+
 function qualityDef() {
   const info = {
     "360p": ["Smallest files. Fine on phones and for quick memes; text and far-away details get soft.", 0, 0, 0],
@@ -379,6 +436,16 @@ const RECORDING_TIMING = {
     { value: "constant", label: "For video editors", best: "After Effects, Premiere and Resolve: every frame exactly evenly spaced, so editors read the clip perfectly. If your screen's refresh rate isn't a multiple of the clip's (60 fps on a 144 Hz screen), motion looks slightly uneven." },
   ],
 };
+
+const RECORDING_SESSION = () => ({
+  key: "session_mode", name: "Record whole sessions", rec: "off",
+  what: `Also writes everything you play to one long video in your clips folder, besides the replay buffer. No extra encoding (it's the same video), so no FPS cost; it uses disk space: about ${(bufferMB(3600) / 1000).toFixed(1)} GB per hour at your quality. While it records, your clip key also adds a bookmark you can jump to in the editor.`,
+  options: [
+    { value: "off", label: "Off", best: "Most people: save the moments with your clip key." },
+    { value: "hotkey", label: "With a hotkey", best: "Recording a match or a stream on purpose: press your session key (Hotkeys page) to start and stop." },
+    { value: "always", label: "Always", best: "Never missing anything: every game is recorded start to finish. Watch your disk space (the clips folder limit applies)." },
+  ],
+});
 
 const RECORDING_LIMIT = {
   key: "clips_max_gb", name: "Clips folder size limit", rec: 0,
@@ -422,14 +489,16 @@ const RECORDING = () => [
     ] },
   { key: "clip_seconds", name: "Clip length", rec: 30,
     what: "How far back a clip goes when you press your save hotkey. Longer clips use more RAM while you play, not more FPS.",
-    options: [15, 30, 45, 60].map((s) => ({ value: s, label: `${s} s`, best: { 15: "Quick reactions and single kills.", 30: "Most moments.", 45: "Plays with a longer build-up.", 60: "Whole fights or rounds." }[s] })) },
+    options: [15, 30, 45, 60, 90, 120, 180, 300].map((s) => ({ value: s, label: lengthLabel(s),
+      best: `${{ 15: "Quick reactions and single kills.", 30: "Most moments.", 45: "Plays with a longer build-up.", 60: "Whole fights or rounds.", 90: "Long fights.", 120: "Full rounds and comebacks.", 180: "Whole matches in short games.", 300: "Everything in the last 5 minutes." }[s]} ${ramNote(s)}` })) },
   { key: "long_clip_seconds", name: "Long clip length", rec: 60,
     what: "What your long-clip hotkey saves. Archy keeps this much in memory.",
-    options: [30, 45, 60].map((s) => ({ value: s, label: `${s} s`, best: s === 60 ? "Catch everything that just happened. About 2× the RAM of a 30 s buffer." : "Less RAM if your PC is short on memory." })) },
+    options: [30, 60, 90, 120, 180, 300].map((s) => ({ value: s, label: lengthLabel(s),
+      best: `${s <= 60 ? "Catch what just happened." : "Catch a whole round or match."} ${ramNote(s)}` })) },
 ];
 
 function renderRecording() {
-  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), screenPicker(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_LIMIT));
+  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), screenPicker(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_SESSION()), settingCard(RECORDING_LIMIT));
   loadMonitors();
   loadGpus();
 }
@@ -640,9 +709,8 @@ function keyName(e) {
 // Keys you type with: bound alone, Windows would swallow them everywhere (chat, Discord).
 const TYPING_KEY = /^([A-Z0-9]|[\[\];',./\\=`-]|Space|Tab|Enter|Backspace)$/;
 
-function hotkeyRow(key, label, desc) {
-  const shown = () => settings[key] || "Off";
-  const box = el("button", { class: "input keybox", text: shown(), "aria-label": `Change hotkey for ${label}` });
+/// Turns `box` into a "press keys" button; `onValue(text)` gets the new key.
+function captureKey(box, shown, onValue) {
   box.addEventListener("click", () => {
     box.classList.add("listening");
     box.textContent = "Press keys…";
@@ -661,11 +729,17 @@ function hotkeyRow(key, label, desc) {
     const done = (value) => {
       window.removeEventListener("keydown", onKey, true);
       box.classList.remove("listening");
-      if (value) save({ [key]: value }, `Hotkey set to ${value}`);
+      if (value) onValue(value);
       else box.textContent = shown();
     };
     window.addEventListener("keydown", onKey, true);
   });
+}
+
+function hotkeyRow(key, label, desc) {
+  const shown = () => settings[key] || "Off";
+  const box = el("button", { class: "input keybox", text: shown(), "aria-label": `Change hotkey for ${label}` });
+  captureKey(box, shown, (value) => save({ [key]: value }, `Hotkey set to ${value}`));
   const clear = settings[key]
     ? el("button", { class: "btn", text: "Turn off", onclick: () => save({ [key]: "" }, `${label} hotkey turned off`) })
     : null;
@@ -674,9 +748,40 @@ function hotkeyRow(key, label, desc) {
 
 function renderHotkeys() {
   $("#hotkey-settings").replaceChildren(el("div", { class: "card" },
-    hotkeyRow("hotkey_save", "Save clip", `Saves the last ${settings.clip_seconds} s`),
-    hotkeyRow("hotkey_save_long", "Save long clip", `Saves the last ${settings.long_clip_seconds} s`),
-    hotkeyRow("hotkey_pause", "Pause / resume", "Stops recording completely: zero load. Off by default so it can't be hit by accident; the tray menu can pause too.")));
+    hotkeyRow("hotkey_save", "Save clip", `Saves the last ${lengthLabel(settings.clip_seconds)}`),
+    hotkeyRow("hotkey_save_long", "Save long clip", `Saves the last ${lengthLabel(settings.long_clip_seconds)}`),
+    hotkeyRow("hotkey_pause", "Pause / resume", "Stops recording completely: zero load. Off by default so it can't be hit by accident; the tray menu can pause too."),
+    hotkeyRow("hotkey_screenshot", "Screenshot", "Saves a full-size picture (PNG) of the game into your clips. Off until you set a key; costs nothing until you press it."),
+    hotkeyRow("hotkey_session", "Start / stop session recording", "Records the whole session to one video. Only when Record whole sessions (Recording page) is set to With a hotkey.")),
+    extraHotkeysCard());
+}
+
+const EXTRA_MAX = 8;
+/// More clip hotkeys, each with its own length. Empty by default: no change.
+function extraHotkeysCard() {
+  const list = settings.extra_hotkeys || [];
+  const put = (next, msg) => save({ extra_hotkeys: next }, msg);
+  const rows = list.map((h, i) => {
+    const shown = () => h.key || "Press to set";
+    const box = el("button", { class: "input keybox", text: shown(), "aria-label": `Key for extra clip hotkey ${i + 1}` });
+    captureKey(box, shown, (value) => put(list.map((x, j) => (j === i ? { ...x, key: value } : x)), `Hotkey set to ${value}`));
+    const length = el("select", { class: "input", "aria-label": `Clip length for extra hotkey ${i + 1}` },
+      [15, 30, 60, 90, 120, 180, 300].map((s) => el("option", { value: s, text: lengthLabel(s), selected: s === h.seconds ? "" : null })));
+    length.addEventListener("change", () => put(list.map((x, j) => (j === i ? { ...x, seconds: Number(length.value) } : x)), `Saves the last ${lengthLabel(Number(length.value))}`));
+    const remove = el("button", { class: "btn", text: "Remove", onclick: () => put(list.filter((_, j) => j !== i), "Hotkey removed") });
+    return el("div", { class: "row" },
+      el("div", { class: "label" }, el("b", { text: `Clip key ${i + 1}` }), el("span", { text: h.key ? `Saves the last ${lengthLabel(h.seconds)}` : "Not set yet" })),
+      el("div", { class: "field" }, box, length, remove));
+  });
+  const longest = Math.max(settings.clip_seconds, settings.long_clip_seconds,
+    ...settings.voice_phrases.map((p) => p.seconds), ...list.filter((h) => h.key).map((h) => h.seconds));
+  const add = el("button", { class: "btn", text: "+ Add a clip hotkey", disabled: list.length >= EXTRA_MAX ? "" : null,
+    onclick: () => put([...list, { key: "", seconds: 120 }], "Added: now press its key") });
+  return el("div", { class: "card" },
+    el("h3", { text: "More clip hotkeys" }),
+    el("p", { class: "sub", text: `Each key saves its own length, e.g. Ctrl+F8 for the last 2 minutes. Archy keeps the longest of all your clip lengths in memory: now ${lengthLabel(longest)}, about ${bufferMB(longest)} MB of RAM. It never costs FPS.` }),
+    ...rows,
+    el("div", { class: "field", style: "margin-top:10px" }, add));
 }
 
 const onOff = (key, name, what, onBest, offBest, rec = true) => settingCard({ key, name, what, rec,
@@ -711,6 +816,8 @@ function renderAudio() {
     devicePicker("output_device", devices.outputs, "Speakers / headphones", "Which output track 1 (everything you heard) records from. Pick the one you actually listen on.",
       "If it's unplugged, Archy uses Windows' default output instead."),
     soundMixCard(),
+    pushToTalkCard(),
+    micTestCard(),
     ...(settings.audio_mode === "separate" ? [] : [onOff("record_stems", "Keep each source as its own track", "In One volume mode, also record the game, Discord and your mic as separate tracks, so the editor can rebalance them after the clip is saved.",
       "Fixing the mix later in the editor.", "The lightest recording: one audio track (one audio encoder instead of four).")]),
     settingCard({ key: "audio_kbps", name: "Audio quality", rec: 160,
@@ -729,6 +836,66 @@ function renderAudio() {
 
 // What's in a clip's sound, like the editor: one main volume, or each source on
 // its own. Only sliders; the mode decides which ones count (the others are off).
+// ---------- push-to-talk ----------
+function pushToTalkCard() {
+  const on = settings.push_to_talk;
+  const key = settings.push_to_talk_key;
+  const box = el("button", { class: "input keybox", text: key || "Press to set", "aria-label": "Push-to-talk key" });
+  // Any single key works here: push-to-talk only watches the key, it never takes
+  // it away from the game or chat.
+  box.addEventListener("click", () => {
+    box.classList.add("listening");
+    box.textContent = "Press a key…";
+    const onKey = (e) => {
+      e.preventDefault();
+      window.removeEventListener("keydown", onKey, true);
+      box.classList.remove("listening");
+      if (e.key === "Escape") { box.textContent = key || "Press to set"; return; }
+      const name = keyName(e);
+      if (name) save({ push_to_talk_key: name }, `Push-to-talk key: ${name}`);
+    };
+    window.addEventListener("keydown", onKey, true);
+  });
+  return el("div", { class: "card setting" },
+    el("div", { class: "about" }, el("h3", { text: "Push to talk" }),
+      el("p", { text: "Your mic is only heard in clips while you hold a key (or a mouse side button). Useful when your keyboard, fan or room is loud. Voice clipping still hears you." })),
+    el("div", { class: "pick" },
+      el("div", { class: "seg", role: "group", "aria-label": "Push to talk" },
+        [[false, "Off"], [true, "On"]].map(([v, label]) => el("button", {
+          "aria-pressed": String(on === v), onclick: () => save({ push_to_talk: v }, v ? "Push-to-talk on" : "Push-to-talk off"),
+        }, label))),
+      on ? el("div", { class: "field", style: "margin-top:8px" }, box,
+        el("button", { class: "btn", text: "Mouse 4", onclick: () => save({ push_to_talk_key: "Mouse4" }, "Push-to-talk: Mouse 4") }),
+        el("button", { class: "btn", text: "Mouse 5", onclick: () => save({ push_to_talk_key: "Mouse5" }, "Push-to-talk: Mouse 5") })) : null,
+      el("p", { class: "sub", text: on && !key ? "Pick a key: until then your mic is heard as normal." : "Costs nothing: Archy just checks the key 60 times a second." })));
+}
+
+// ---------- mic test ----------
+function micTestCard() {
+  const status = el("p", { class: "sub", text: "Records 5 seconds from the microphone picked above, then plays it back, so you hear what your clips will sound like." });
+  const player = el("audio", { controls: true, hidden: true, style: "width:100%;margin-top:8px" });
+  const btn = el("button", { class: "btn primary", text: "Test your mic" });
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "Recording… talk now";
+    player.hidden = true;
+    try {
+      const wav = await invoke("mic_test", { mic: settings.mic_device || "" });
+      player.src = fileSrc(wav) + "?t=" + Date.now();
+      player.hidden = false;
+      player.play().catch(() => {});
+      status.textContent = "Here's how you sound. Too quiet or noisy? Check the mic picked above and its level in Windows sound settings.";
+    } catch (e) {
+      status.textContent = "Couldn't test the mic: " + e;
+    }
+    btn.disabled = false;
+    btn.textContent = "Test again";
+  });
+  return el("div", { class: "card setting" },
+    el("div", { class: "about" }, el("h3", { text: "Mic test" }), status),
+    el("div", { class: "pick" }, el("div", { class: "field" }, btn), player));
+}
+
 function soundMixCard() {
   const separate = settings.audio_mode === "separate";
   const slider = (key, name, about, enabled, offAt0) => {
@@ -842,8 +1009,8 @@ function renderVoice() {
       save({ voice_phrases: phrases }, "Phrase saved");
     });
     const lengths = el("div", { class: "chips", role: "group", "aria-label": `Clip length for phrase ${i + 1}` },
-      [15, 30, 45, 60].map((sec) => el("button", {
-        class: "chip", "aria-pressed": String(p.seconds === sec), text: `${sec} s`,
+      [15, 30, 60, 120, 300].map((sec) => el("button", {
+        class: "chip", "aria-pressed": String(p.seconds === sec), text: lengthLabel(sec), title: ramNote(sec),
         onclick: () => save({ voice_phrases: settings.voice_phrases.map((x, j) => (j === i ? { ...x, seconds: sec } : x)) }),
       })));
     const remove = el("button", { class: "btn", text: "Remove", "aria-label": `Remove phrase ${i + 1}`,

@@ -63,6 +63,38 @@ impl Mp4Writer {
         audio: &[AudioTrack],
         base: Option<i64>,
     ) -> Result<Self> {
+        Self::open(path, codec, width, height, fps, first_keyframe, audio, base, false)
+    }
+
+    /// Like `create_with_audio`, but fragmented MP4: written in small pieces as it
+    /// goes, so the file plays even if writing stops without `finish` (a crash
+    /// mid-session). For long recordings.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_fragmented(
+        path: &Path,
+        codec: Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+        first_keyframe: &[u8],
+        audio: &[AudioTrack],
+        base: Option<i64>,
+    ) -> Result<Self> {
+        Self::open(path, codec, width, height, fps, first_keyframe, audio, base, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        path: &Path,
+        codec: Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+        first_keyframe: &[u8],
+        audio: &[AudioTrack],
+        base: Option<i64>,
+        fragmented: bool,
+    ) -> Result<Self> {
         unsafe {
             let ty = MFCreateMediaType()?;
             ty.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
@@ -89,7 +121,8 @@ impl Mp4Writer {
             let mut attrs: Option<IMFAttributes> = None;
             MFCreateAttributes(&mut attrs, 2)?;
             let attrs = attrs.expect("MFCreateAttributes succeeded without attributes");
-            attrs.SetGUID(&MF_TRANSCODE_CONTAINERTYPE, &MFTranscodeContainerType_MPEG4)?;
+            let container = if fragmented { MFTranscodeContainerType_FMPEG4 } else { MFTranscodeContainerType_MPEG4 };
+            attrs.SetGUID(&MF_TRANSCODE_CONTAINERTYPE, &container)?;
             attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
             // No "faststart" (MF_MPEG4SINK_MOOV_BEFORE_MDAT): Media Foundation then
             // re-reads the file it opened write-only, and every save failed with
