@@ -46,6 +46,8 @@ struct Clip {
     bytes: u64,
     /// Milliseconds since 1970, for sorting and "Today 21:14" labels.
     modified: u64,
+    /// "clip" (MP4) or "shot" (a PNG screenshot).
+    kind: &'static str,
 }
 
 #[derive(Serialize)]
@@ -149,8 +151,16 @@ fn list_clips() -> Vec<Clip> {
         .filter_map(|e| {
             let path = e.path();
             let name = path.file_name()?.to_string_lossy().into_owned();
-            // Skip clips still being written.
-            if !name.to_ascii_lowercase().ends_with(".mp4") || name.contains(".partial.") {
+            // Clips and screenshots; skip files still being written.
+            let lower = name.to_ascii_lowercase();
+            let kind = if lower.ends_with(".mp4") {
+                "clip"
+            } else if lower.ends_with(".png") {
+                "shot"
+            } else {
+                return None;
+            };
+            if name.contains(".partial.") {
                 return None;
             }
             let meta = e.metadata().ok()?;
@@ -162,14 +172,52 @@ fn list_clips() -> Vec<Clip> {
                 .as_millis() as u64;
             Some(Clip {
                 path: path.to_string_lossy().into_owned(),
-                name: name.trim_end_matches(".mp4").to_string(),
+                name: name.trim_end_matches(".mp4").trim_end_matches(".png").to_string(),
                 bytes: meta.len(),
                 modified,
+                kind,
             })
         })
         .collect();
     clips.sort_by(|a, b| b.modified.cmp(&a.modified));
     clips
+}
+
+/// Records 5 s from the chosen mic (`archy.exe --mic-test`) and returns the WAV
+/// for the page to play back.
+#[tauri::command]
+async fn mic_test(mic: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::os::windows::process::CommandExt;
+        let dir = editor::media_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let out = dir.join("mic-test.wav");
+        let _ = std::fs::remove_file(&out);
+        let mut exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        exe.set_file_name("archy.exe");
+        let r = std::process::Command::new(&exe)
+            .arg("--mic-test")
+            .arg(if mic.is_empty() { "-".to_string() } else { mic })
+            .arg("5")
+            .arg(&out)
+            .creation_flags(0x0800_0000)
+            .output()
+            .map_err(|e| e.to_string())?;
+        let said = String::from_utf8_lossy(&r.stdout).trim().to_string();
+        if said == "ok" && out.exists() {
+            Ok(out.to_string_lossy().into_owned())
+        } else {
+            Err(if said.is_empty() { "the mic test stopped unexpectedly".into() } else { said })
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Bookmark times (seconds) saved with a session recording (empty for clips).
+#[tauri::command]
+fn clip_bookmarks(path: String) -> Vec<f64> {
+    clip_path(&path).map(|p| archy_core::session::read_bookmarks(&p)).unwrap_or_default()
 }
 
 /// Only paths inside the clips folder are accepted from the page.
@@ -843,6 +891,8 @@ fn main() {
             calibrate_voice,
             test_voice,
             self_test,
+            clip_bookmarks,
+            mic_test,
             calibration_input,
             stop_calibration,
             read_log,

@@ -128,6 +128,10 @@ struct Shared {
     last_input: AtomicI64,
     /// Repeats written as near-free skip frames (oneVPL).
     skip_frames: AtomicU64,
+    /// A screenshot waiting for the capture loop (see `Recorder::screenshot`).
+    screenshot: Mutex<Option<crate::screenshot::Request>>,
+    /// The whole-session writer, while a session records (see `start_session`).
+    session: Arc<Mutex<Option<std::sync::mpsc::Sender<crate::session::Msg>>>>,
 }
 
 /// A GPU encoder that hasn't taken a single frame for this long while frames
@@ -175,6 +179,8 @@ impl Recorder {
             last_output: AtomicI64::new(0),
             last_input: AtomicI64::new(0),
             skip_frames: AtomicU64::new(0),
+            screenshot: Mutex::new(None),
+            session: Arc::new(Mutex::new(None)),
         });
         let (ready_tx, ready_rx) = sync_channel::<Result<RecorderInfo>>(1);
         let thread_shared = shared.clone();
@@ -214,10 +220,16 @@ impl Recorder {
         for src in audio_sources {
             let ring = Arc::new(Mutex::new(ReplayBuffer::new(buffer_seconds)));
             let sink = ring.clone();
+            let session = shared.session.clone();
+            let track = audio.len(); // its index if it starts
             match AudioCapture::start(src.source.clone(), audio_kbps, src.volumes.clone(), move |p| {
+                let packet = StoredPacket { data: Arc::from(p.data), time: p.time, duration: p.duration, keyframe: true };
+                if let Some(tx) = session.lock().ok().and_then(|s| s.clone()) {
+                    let _ = tx.send(crate::session::Msg::Audio(track, packet.clone()));
+                }
                 if let Ok(mut r) = sink.lock() {
                     r.push(StoredPacket {
-                        data: Arc::from(p.data),
+                        data: packet.data,
                         time: p.time,
                         duration: p.duration,
                         keyframe: true,
@@ -254,6 +266,71 @@ impl Recorder {
         for a in &self.audio {
             a._capture.stop();
         }
+    }
+
+    /// Starts writing everything recorded from now on to `path` (fragmented MP4,
+    /// from the next keyframe). No extra encoding: the same packets as the replay
+    /// buffer. Does nothing if a session is already running.
+    pub fn start_session(&self, path: &Path) -> bool {
+        let Ok(mut slot) = self.shared.session.lock() else { return false };
+        if slot.is_some() {
+            return false;
+        }
+        let format = crate::session::Format {
+            codec: self.info.codec,
+            width: self.info.width,
+            height: self.info.height,
+            fps: self.info.fps,
+            audio: self
+                .audio
+                .iter()
+                .map(|a| crate::session::TrackFormat {
+                    sample_rate: a.info.sample_rate,
+                    channels: a.info.channels,
+                    bytes_per_second: a.info.bytes_per_second,
+                    user_data: a.info.user_data.clone(),
+                })
+                .collect(),
+        };
+        *slot = Some(crate::session::start(path.to_path_buf(), format));
+        true
+    }
+
+    /// Whether a session is being written.
+    pub fn session_active(&self) -> bool {
+        self.shared.session.lock().map(|s| s.is_some()).unwrap_or(false)
+    }
+
+    /// Marks this moment in the session (the clip key while a session records).
+    pub fn bookmark(&self) -> bool {
+        match self.shared.session.lock().ok().and_then(|s| s.clone()) {
+            Some(tx) => tx.send(crate::session::Msg::Bookmark).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Ends the session and finishes its file (waits up to 10 s).
+    pub fn end_session(&self) -> Option<crate::session::Summary> {
+        let tx = self.shared.session.lock().ok()?.take()?;
+        let (reply, summary) = sync_channel(1);
+        tx.send(crate::session::Msg::Stop(reply)).ok()?;
+        summary.recv_timeout(Duration::from_secs(10)).ok()
+    }
+
+    /// A full-size PNG of what's being recorded, written to `path`. The capture
+    /// loop takes the next frame (or, on a still screen, the last recorded one);
+    /// returns once the file is written (about 0.1-0.3 s).
+    pub fn screenshot(&self, path: &Path) -> std::result::Result<PathBuf, String> {
+        if self.status() != RecorderStatus::Recording {
+            return Err("not recording".into());
+        }
+        let (reply, result) = sync_channel(1);
+        let request = crate::screenshot::Request { path: path.to_path_buf(), reply, asked: Instant::now() };
+        match self.shared.screenshot.lock() {
+            Ok(mut slot) => *slot = Some(request),
+            Err(_) => return Err("recorder state poisoned".into()),
+        }
+        result.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| Err("the picture didn't come back in time".into()))
     }
 
     /// Seconds of video in the replay buffer.
@@ -681,6 +758,9 @@ fn capture_loop(
                     duration: p.duration,
                     keyframe,
                 };
+                if let Some(tx) = enc_shared.session.lock().ok().and_then(|s| s.clone()) {
+                    let _ = tx.send(crate::session::Msg::Video(packet.clone()));
+                }
                 if let Ok(mut ring) = enc_shared.ring.lock() {
                     ring.push(packet);
                 }
@@ -705,6 +785,8 @@ fn capture_loop(
     // A stale first frame held back (see below).
     let mut stale: Option<ID3D11Texture2D> = None;
     let constant = cfg.constant_rate;
+    // A screenshot being read back from the GPU.
+    let mut pending_shot: Option<crate::screenshot::Pending> = None;
     // Time of the last frame sent (smooth timing keeps times strictly increasing).
     let mut last_time = i64::MIN;
     // Since when every frame has found the encoder's queue full.
@@ -766,6 +848,10 @@ fn capture_loop(
         if vpl && gpu_boost {
             contest.check(shared);
         }
+        // A screenshot copy on its way back from the GPU (never waits for it).
+        if let Some(p) = pending_shot.take() {
+            pending_shot = crate::screenshot::poll(&gpu.context, p);
+        }
         // Frames went in after the last packet came out, and nothing for 8 s: the
         // encoder has stopped. (A still screen sends nothing in smooth timing, so
         // "no output" alone isn't a stall.)
@@ -812,6 +898,21 @@ fn capture_loop(
                 }
                 continue;
             }
+            // A still screen sends no frames: a screenshot asked for a while ago
+            // takes the last recorded frame instead.
+            if let (None, Some(tex)) = (&pending_shot, &last) {
+                let waiting = shared.screenshot.lock().ok().and_then(|mut s| {
+                    s.take_if(|r| r.asked.elapsed() > Duration::from_millis(250))
+                });
+                if let Some(req) = waiting {
+                    match crate::screenshot::begin_nv12(&gpu.device, &gpu.context, tex, req) {
+                        Ok(p) => pending_shot = Some(p),
+                        Err(req) => {
+                            let _ = req.reply.try_send(Err("couldn't copy the picture".into()));
+                        }
+                    }
+                }
+            }
             // Nothing new: repeat the last frame on every slot that's due (unless
             // the encoder is behind: those slots stay open and are filled later).
             // Smooth timing has no slots to fill.
@@ -822,6 +923,17 @@ fn capture_loop(
             }
             continue;
         };
+        if pending_shot.is_none() {
+            let waiting = shared.screenshot.lock().ok().and_then(|mut s| s.take());
+            if let Some(req) = waiting {
+                match crate::screenshot::begin_bgra(&gpu.device, &gpu.context, &frame.texture, frame.content_width, frame.content_height, req) {
+                    Ok(p) => pending_shot = Some(p),
+                    Err(req) => {
+                        let _ = req.reply.try_send(Err("couldn't copy the picture".into()));
+                    }
+                }
+            }
+        }
         // The first frame of a capture is what was last on screen, often from a
         // second ago: hold it back and start with a fresh one if one comes soon.
         if !pacer.started() && stale.is_none() && clock_now() - frame.time > 2_500_000 {

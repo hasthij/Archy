@@ -31,6 +31,11 @@ fn main() {
             println!("window showed {:.0} fps · recorder sent {} frames, {} skipped · CPU {:.1}% of one core", r.window_fps, r.sent, r.skipped, r.cpu_core_pct);
             println!("decoded {} frames · tearing {} · smudged {} · backwards {} · wrong colours {} · repeats {} · uneven {} · decode errors: {}",
                 r.frames, r.tears, r.smudges, r.backwards, r.wrong_colours, r.repeats, r.uneven, if r.decode_errors.is_empty() { "none" } else { &r.decode_errors });
+            if r.session_seconds > 0.0 || !r.session_problem.is_empty() {
+                println!("session file: {:.1} s, {:.1} MB, {} uneven, {} bookmark(s){}", r.session_seconds, r.session_mb, r.session_uneven, r.session_bookmarks,
+                    if r.session_problem.is_empty() { String::new() } else { format!(", problem: {}", r.session_problem) });
+            }
+            println!("buffer {:.0} MB · process {:.0} MB · saved {:.1} s clip in {} ms", r.buffer_mb, r.process_mb, r.clip_seconds, r.save_ms);
             println!("{}", if r.pass { "PASS" } else if r.clean { "CLEAN BUT NOT SMOOTH (the GPU can't keep up at this frame rate)" } else { "FAIL" });
             std::process::exit(if r.pass { 0 } else { 1 });
         }

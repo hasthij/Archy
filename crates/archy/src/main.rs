@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clip;
+mod ptt;
 mod hotkey;
 mod startup;
 mod voice;
@@ -48,6 +49,10 @@ const WM_STARTED: u32 = WM_APP + 3;
 const TIMER_WATCH: usize = 1;
 const HK_SAVE: i32 = 1;
 const HK_SAVE_LONG: i32 = 2;
+const HK_SCREENSHOT: i32 = 4;
+const HK_SESSION: i32 = 5;
+/// Extra clip hotkeys use ids HK_EXTRA.. (one per entry in `extra_hotkeys`).
+const HK_EXTRA: i32 = 100;
 const HK_PAUSE: i32 = 3;
 const MENU_SAVE: usize = 10;
 const MENU_PAUSE: usize = 11;
@@ -139,6 +144,10 @@ struct App {
     minimized_ticks: u32,
     ticks: u32,
     hdr_warned: bool,
+    /// "hotkey" session mode: the user has turned session recording on.
+    session_wanted: bool,
+    /// Push-to-talk, while it's on.
+    ptt: Option<ptt::PushToTalk>,
 }
 
 thread_local! {
@@ -162,6 +171,30 @@ fn log(msg: &str) {
             t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
         );
     }
+}
+
+/// Finishes a recorder's session file on another thread (never the tray's) and
+/// logs it; a problem (full drive, write error) is shown once.
+fn end_session_file(recorder: &Arc<Recorder>, window: isize) {
+    if !recorder.session_active() {
+        return;
+    }
+    let recorder = recorder.clone();
+    std::thread::spawn(move || {
+        if let Some(sum) = recorder.end_session() {
+            log(&format!(
+                "session: saved {} ({:.1} min, {:.0} MB, {} bookmarks){}",
+                sum.path.display(),
+                sum.seconds / 60.0,
+                sum.bytes as f64 / 1e6,
+                sum.bookmarks,
+                sum.problem.as_ref().map(|p| format!("; stopped early: {p}")).unwrap_or_default()
+            ));
+            if let Some(p) = &sum.problem {
+                notify(window, "Session recording stopped", &format!("{p}. What was recorded is saved."), true);
+            }
+        }
+    });
 }
 
 /// Keeps the clips folder under the user's limit (GB, 0 = none) by moving the
@@ -379,11 +412,22 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
 
 impl App {
     fn register_hotkeys(&self) {
-        let keys = [
+        let mut keys = vec![
             (HK_SAVE, &self.settings.hotkey_save),
             (HK_SAVE_LONG, &self.settings.hotkey_save_long),
             (HK_PAUSE, &self.settings.hotkey_pause),
+            (HK_SCREENSHOT, &self.settings.hotkey_screenshot),
+            (HK_SESSION, &self.settings.hotkey_session),
         ];
+        // Every possible extra id is released first, so a removed one stops working.
+        for i in 0..archy_core::settings::MAX_EXTRA_HOTKEYS as i32 {
+            unsafe {
+                let _ = UnregisterHotKey(Some(self.window), HK_EXTRA + i);
+            }
+        }
+        for (i, h) in self.settings.extra_hotkeys.iter().enumerate() {
+            keys.push((HK_EXTRA + i as i32, &h.key));
+        }
         for (id, text) in keys {
             unsafe {
                 let _ = UnregisterHotKey(Some(self.window), id);
@@ -481,6 +525,8 @@ impl App {
         self.settings = s;
         self.volumes.update(&self.settings);
         self.register_hotkeys();
+        self.sync_session();
+        self.sync_ptt();
         self.sync_voice();
         self.publish();
         if restart {
@@ -846,6 +892,8 @@ impl App {
                 // A settings change or pause arrived while it was starting.
                 if std::mem::take(&mut self.stop_after_start) {
                     self.stop_session("settings changed while starting");
+                } else {
+                    self.sync_session();
                 }
             }
             Err(e) => {
@@ -872,6 +920,7 @@ impl App {
         } else {
             log(&format!("stopped recording {}: {reason} ({health})", s.game));
         }
+        end_session_file(&s.recorder, self.window.0 as isize);
         s.recorder.stop();
         let old = self.previous.replace(Previous {
             recorder: s.recorder,
@@ -923,8 +972,117 @@ impl App {
         self.save(seconds);
     }
 
+    /// Starts or ends the whole-session file to match the setting (and, in
+    /// "hotkey" mode, the hotkey). Applies live: no restart.
+    fn sync_session(&mut self) {
+        let Some(s) = &self.session else { return };
+        let mode = self.settings.session_mode.as_str();
+        let want = mode == "always" || (mode == "hotkey" && self.session_wanted);
+        let active = s.recorder.session_active();
+        if want && !active {
+            let clip = clip::new_path(&self.settings.save_folder, &s.game);
+            let stem = clip.file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+            let path = clip.with_file_name(format!("{stem} (session).mp4"));
+            let _ = std::fs::create_dir_all(&self.settings.save_folder);
+            if s.recorder.start_session(&path) {
+                log(&format!("session: recording to {}", path.display()));
+            }
+        } else if !want && active {
+            end_session_file(&s.recorder, self.window.0 as isize);
+        }
+    }
+
+    /// Starts, restarts or stops push-to-talk to match the settings.
+    fn sync_ptt(&mut self) {
+        let level = self.settings.audio_volumes().3;
+        let want = self.settings.push_to_talk && !self.settings.push_to_talk_key.trim().is_empty();
+        match (&self.ptt, want) {
+            (Some(p), true) if p.key == self.settings.push_to_talk_key => p.set_level(level),
+            (_, true) => {
+                self.ptt = None; // the old key's thread ends first
+                match ptt::PushToTalk::start(&self.settings.push_to_talk_key, self.volumes.mic.clone(), level) {
+                    Some(p) => {
+                        log(&format!("push-to-talk on ({})", self.settings.push_to_talk_key));
+                        self.ptt = Some(p);
+                    }
+                    None => notify(self.window.0 as isize, "Push-to-talk", &format!("\"{}\" isn't a key Archy knows.", self.settings.push_to_talk_key), true),
+                }
+            }
+            (Some(_), false) => {
+                self.ptt = None;
+                self.volumes.update(&self.settings); // the mic back at its volume
+                log("push-to-talk off");
+            }
+            (None, false) => {}
+        }
+    }
+
+    /// The session hotkey ("hotkey" mode): starts or stops the session file.
+    fn toggle_session(&mut self) {
+        let window = self.window.0 as isize;
+        if self.settings.session_mode != "hotkey" {
+            notify(window, "Session recording is off", "Turn on Settings > Recording > Record whole sessions > With a hotkey.", true);
+            return;
+        }
+        self.session_wanted = !self.session_wanted;
+        // Two different sounds, so you can tell without looking: the voice ping
+        // when the session starts, the clip-saved chime when it stops.
+        if self.session_wanted {
+            play(VOICE_WAV, self.settings.voice_sound_volume.max(30));
+        } else {
+            play(CLIP_WAV, self.settings.clip_sound_volume.max(30));
+        }
+        if self.session_wanted {
+            if self.session.is_some() {
+                notify(window, "Recording the whole session", "Press the key again to stop. Your clip key adds bookmarks.", false);
+            } else {
+                notify(window, "Session recording on", "It starts with your next game.", false);
+            }
+        }
+        self.sync_session();
+    }
+
+    /// The screenshot hotkey: a PNG of the game into the clips folder.
+    fn screenshot(&self) {
+        let window = self.window.0 as isize;
+        let Some(s) = &self.session else {
+            notify(window, "No screenshot", "Archy takes screenshots of the game it's recording.", true);
+            return;
+        };
+        if self.settings.sound_on_hotkey {
+            play(VOICE_WAV, self.settings.voice_sound_volume);
+        }
+        let recorder = s.recorder.clone();
+        let folder = self.settings.save_folder.clone();
+        let path = clip::new_path(&folder, &s.game).with_extension("png");
+        let copy = self.settings.copy_after_save;
+        let show = self.settings.notify_on_save;
+        std::thread::spawn(move || {
+            let _ = std::fs::create_dir_all(&folder);
+            let t = std::time::Instant::now();
+            match recorder.screenshot(&path) {
+                Ok(p) => {
+                    log(&format!("screenshot {} ({} ms)", p.display(), t.elapsed().as_millis()));
+                    let copied = copy && archy_core::clipboard::copy_file(&p);
+                    if show {
+                        notify(window, "Screenshot saved", if copied { "Copied, paste it anywhere" } else { "In your clips folder" }, false);
+                    }
+                }
+                Err(e) => {
+                    log(&format!("screenshot failed: {e}"));
+                    notify(window, "Screenshot not saved", &e, true);
+                }
+            }
+        });
+    }
+
     fn save(&self, seconds: u32) {
         let window = self.window.0 as isize;
+        if let Some(s) = &self.session {
+            if s.recorder.bookmark() {
+                log("session: bookmark added");
+            }
+        }
         // What to save from: the current recording, plus the previous one when the
         // current started less than `seconds` ago (a restart: settings changed, the
         // encoder failed, the game was minimized). The earlier part is saved as its
@@ -1261,6 +1419,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             HK_SAVE => a.hotkey_save(a.settings.clip_seconds),
             HK_SAVE_LONG => a.hotkey_save(a.settings.long_clip_seconds),
             HK_PAUSE => a.toggle_pause(),
+            HK_SCREENSHOT => a.screenshot(),
+            HK_SESSION => a.toggle_session(),
+            id if id >= HK_EXTRA => {
+                if let Some(h) = a.settings.extra_hotkeys.get((id - HK_EXTRA) as usize) {
+                    let seconds = h.seconds;
+                    a.hotkey_save(seconds);
+                }
+            }
             _ => {}
         }),
         WM_TRAY => match (lp.0 as u32) & 0xffff {
@@ -1289,6 +1455,52 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         _ => return unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
     LRESULT(0)
+}
+
+/// `archy.exe --mic-test <device|-> <seconds> <out.wav>`: records the mic to a
+/// WAV for the window to play back ("Test your mic"). Prints "ok" or the error.
+fn mic_test_main(args: &[String]) {
+    let device = args.first().filter(|d| d.as_str() != "-").cloned();
+    let seconds: f32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5.0f32).clamp(1.0, 15.0);
+    let Some(out) = args.get(2).map(std::path::PathBuf::from) else {
+        println!("no output file");
+        return;
+    };
+    const RATE: u32 = 48_000;
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut samples: Vec<i16> = Vec::with_capacity((RATE as f32 * seconds) as usize);
+    let want = (RATE as f32 * seconds) as usize;
+    let flag = stop.clone();
+    let result = archy_audio::listen_microphone(device.as_deref(), RATE, &stop, &mut |pcm| {
+        samples.extend_from_slice(pcm);
+        if samples.len() >= want {
+            flag.store(true, Ordering::Release);
+        }
+    });
+    if let Err(e) = result {
+        println!("couldn't open the microphone: {}", e.message());
+        return;
+    }
+    // 16-bit mono WAV.
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut wav = Vec::with_capacity(44 + data.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&RATE.to_le_bytes());
+    wav.extend_from_slice(&(RATE * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&data);
+    match std::fs::write(&out, wav) {
+        Ok(()) => println!("ok"),
+        Err(e) => println!("couldn't save the recording: {e}"),
+    }
 }
 
 /// `archy.exe --self-test <fps> <ffmpeg.exe>`: records a test window at `fps`
@@ -1323,6 +1535,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("--voice-test") {
         voice::test_main();
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--mic-test") {
+        mic_test_main(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("--self-test") {
@@ -1421,6 +1637,8 @@ fn main() {
         minimized_ticks: 0,
         ticks: 0,
         hdr_warned: false,
+        session_wanted: false,
+        ptt: None,
     };
     app.volumes.update(&app.settings);
     app.register_hotkeys();
@@ -1466,6 +1684,7 @@ fn main() {
     }
     with_app(|a| {
         a.watch();
+        a.sync_ptt();
         a.sync_voice();
         a.publish();
     });

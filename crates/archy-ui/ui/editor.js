@@ -115,11 +115,17 @@ async function openEditor(clip, opts = {}) {
     solo: -1,
     items: [], lanes: { text: 1, image: 1, video: 1, audio: 1 }, audioLanes: [], media: [], selected: null,
     format: opts.format || "mp4", gifWidth: 480, gifFps: 15,
+    // Shape of the result: "original" or a crop like "9:16"; where the frame sits.
+    aspect: "original", cropX: 0.5, cropY: 0.5,
+    // Sections made by splitting: each kept or removed, with its own speed and zoom.
+    secs: [{ from: 0, to: info.duration, speed: 1, zoom: 1, keep: true }],
+    secIndex: -1, quietSpeed: false,
     audio: { ctx: null, buffers: null, gains: [], sources: [], t0: 0, at: 0 },
     busy: false, dirty: true, sig: "", lastT: -1, lastLabel: "", driftAt: 0, dom: {},
   };
   buildEditor();
   loadPreviewAudio();
+  loadBookmarks();
 }
 
 function closeEditor() {
@@ -199,8 +205,12 @@ function buildEditor() {
   d.video = el("video", { muted: true, playsinline: true, preload: "auto" });
   d.video.muted = true;
   d.video.src = fileSrc(ed.clip.path);
+  d.video.addEventListener("seeked", () => { if (ed) { ed.secIndex = secAt(d.video.currentTime); renderSections(); } });
   d.canvas = el("canvas", { class: "ed-canvas" });
-  d.stage = el("div", { class: "ed-stage", style: `aspect-ratio:${info.width}/${info.height};width:min(100%, calc(56vh * ${info.width} / ${info.height}))` }, d.video, d.canvas);
+  d.cropGrip = el("div", { class: "ed-crop-grip", text: "Drag to move", role: "slider", "aria-label": "Move the crop frame", tabindex: "0" });
+  d.crop = el("div", { class: "ed-crop", hidden: true }, d.cropGrip);
+  d.stage = el("div", { class: "ed-stage", style: `aspect-ratio:${info.width}/${info.height};width:min(100%, calc(56vh * ${info.width} / ${info.height}))` }, d.video, d.canvas, d.crop);
+  cropDrag(d.cropGrip);
   stagePointer(d.canvas);
   dropTarget(d.stage, (m, e) => {
     const r = d.canvas.getBoundingClientRect();
@@ -213,7 +223,8 @@ function buildEditor() {
   d.hStart = el("div", { class: "ed-handle", "aria-label": "Trim start", role: "slider", tabindex: "0" });
   d.hEnd = el("div", { class: "ed-handle", "aria-label": "Trim end", role: "slider", tabindex: "0" });
   d.head = el("div", { class: "ed-head" });
-  d.timeline = el("div", { class: "ed-timeline" }, d.range, d.hStart, d.hEnd, d.head);
+  d.secLayer = el("div", { class: "ed-secs" });
+  d.timeline = el("div", { class: "ed-timeline" }, d.secLayer, d.range, d.hStart, d.hEnd, d.head);
   timelineDrag(d.timeline);
   d.lanes = el("div", { class: "ed-lanes" });
   d.laneButtons = el("div", { class: "ed-row ed-lane-add" });
@@ -225,6 +236,7 @@ function buildEditor() {
   d.export = el("div");
   const side = el("div", { class: "ed-side" },
     section("Trim", trimPanel()),
+    section("Split, speed and zoom", (d.secPanel = el("div"))),
     section("Audio", d.audio),
     section("Selected", d.props),
     section("Export", d.export));
@@ -265,7 +277,7 @@ function buildEditor() {
   ed.resize.observe(d.canvas);
 
   ed.raf = requestAnimationFrame(tick);
-  renderBay(); renderAudio(); renderLanes(); renderProps(); renderExport(); updateTrim();
+  renderBay(); renderAudio(); renderLanes(); renderProps(); renderExport(); updateTrim(); renderSections();
 }
 
 function section(title, body) {
@@ -284,6 +296,7 @@ function tick(now) {
   const t = v.currentTime;
   // Play only the trimmed part, looping back to its start.
   if (!v.paused && !v.seeking && t >= ed.end - 0.03) v.currentTime = ed.start;
+  followSections(t);
   if (t !== ed.lastT) {
     ed.lastT = t;
     const p = pct(t);
@@ -455,6 +468,106 @@ function timelineDrag(line) {
     updateTrim();
     e.preventDefault();
   });
+}
+
+// ---------- bookmarks (from session recordings) ----------
+async function loadBookmarks() {
+  let marks = [];
+  try { marks = await invoke("clip_bookmarks", { path: ed.clip.path }); } catch {}
+  if (!ed || !marks.length) return;
+  ed.dom.marks = el("div", { class: "ed-marks" }, marks.map((t) => el("button", {
+    class: "ed-mark", style: `left:${pct(t)}`, title: `Bookmark at ${fmt(t)}`, "aria-label": `Jump to bookmark at ${fmt(t)}`,
+    onclick: (e) => { e.stopPropagation(); ed.dom.video.currentTime = t; },
+  })));
+  ed.dom.timeline.append(ed.dom.marks);
+  toast(`${marks.length} bookmark${marks.length === 1 ? "" : "s"} on the Clip track: click one to jump there`);
+}
+
+// ---------- split, speed and zoom ----------
+const SPEEDS = [[0.25, "0.25×"], [0.5, "0.5×"], [1, "1×"], [2, "2×"]];
+const ZOOMS = [[1, "None"], [1.5, "1.5×"], [2, "2×"]];
+
+function secAt(t) {
+  const i = ed.secs.findIndex((s) => t >= s.from && t < s.to);
+  return i < 0 ? ed.secs.length - 1 : i;
+}
+
+function trivialSections() {
+  return ed.secs.length === 1 && ed.secs[0].speed === 1 && ed.secs[0].zoom === 1 && ed.secs[0].keep;
+}
+
+/// What the export gets: the kept sections (the backend clips them to the trim).
+function exportSections() {
+  if (trivialSections()) return [];
+  return ed.secs.filter((s) => s.keep).map((s) => ({ start: s.from, end: s.to, speed: s.speed, zoom: s.zoom }));
+}
+
+function splitHere() {
+  const t = ed.dom.video.currentTime;
+  const i = secAt(t);
+  const s = ed.secs[i];
+  if (t - s.from < 0.2 || s.to - t < 0.2) { toast("Too close to a split: move a little further in"); return; }
+  ed.secs.splice(i, 1, { ...s, to: t }, { ...s, from: t });
+  renderSections();
+}
+
+/// Called every frame: skips removed sections, and plays each at its speed and zoom.
+function followSections(t) {
+  const v = ed.dom.video;
+  let i = secAt(t);
+  let s = ed.secs[i];
+  if (!s.keep && !v.seeking) {
+    // Jump to the next kept section (or back to the start of the trim).
+    const next = ed.secs.slice(i + 1).find((x) => x.keep && x.to > ed.start && x.from < ed.end);
+    v.currentTime = next ? Math.max(next.from, ed.start) : ed.start;
+    return;
+  }
+  if (v.playbackRate !== s.speed) v.playbackRate = s.speed;
+  const z = s.zoom === 1 ? "" : `scale(${s.zoom})`;
+  if (ed.dom.video.style.transform !== z) { ed.dom.video.style.transform = z; ed.dom.canvas.style.transform = z; }
+  // The sound preview can't follow other speeds: quiet there (the export has it).
+  const quiet = s.speed !== 1;
+  if (quiet !== ed.quietSpeed) {
+    ed.quietSpeed = quiet;
+    if (quiet) stopAudio(); else if (!v.paused) startAudio(t);
+  }
+  if (i !== ed.secIndex) { ed.secIndex = i; renderSections(); }
+}
+
+function renderSections() {
+  const d = ed.dom;
+  // Timeline: boundaries, removed parts greyed out, speeds labelled.
+  d.secLayer.replaceChildren(...ed.secs.map((s) => el("div", {
+    class: "ed-sec" + (s.keep ? "" : " cut"),
+    style: `left:${pct(s.from)};width:${pct(s.to - s.from)}`,
+    text: !s.keep ? "removed" : s.speed !== 1 || s.zoom !== 1 ? [s.speed !== 1 ? `${s.speed}×` : "", s.zoom !== 1 ? `zoom ${s.zoom}×` : ""].filter(Boolean).join(" · ") : "",
+  })));
+  // Always the section under the playhead right now (never a remembered one).
+  const here = () => ed.secs[secAt(d.video.currentTime)];
+  const i = secAt(d.video.currentTime);
+  const s = ed.secs[i];
+  const set = (patch) => { Object.assign(here(), patch); ed.lastT = -1; renderSections(); };
+  d.secPanel.replaceChildren(
+    el("div", { class: "ed-row" },
+      el("button", { class: "btn primary", text: "Split here", onclick: splitHere }),
+      trivialSections() ? null : el("button", { class: "btn", text: "Undo splits", onclick: () => {
+        ed.secs = [{ from: 0, to: ed.info.duration, speed: 1, zoom: 1, keep: true }];
+        ed.secIndex = -1;
+        renderSections();
+      } })),
+    el("p", { class: "ed-note", text: ed.secs.length > 1
+      ? `Section ${i + 1} of ${ed.secs.length} (where the playhead is): ${fmt(s.from)} to ${fmt(s.to)}.`
+      : "Play to a moment and press Split here to cut the clip into sections. Then remove a section, or change its speed or zoom." }),
+    chipGroup("Speed", SPEEDS, s.speed, (v) => set({ speed: v })),
+    chipGroup("Zoom", ZOOMS, s.zoom, (v) => set({ zoom: v })),
+    ed.secs.length > 1 ? el("div", { class: "ed-row" },
+      el("button", { class: "btn" + (s.keep ? " danger" : ""), text: s.keep ? "Remove this section" : "Bring it back",
+        onclick: () => {
+          const now = here();
+          if (now.keep && ed.secs.filter((x) => x.keep).length === 1) { toast("Keep at least one section"); return; }
+          set({ keep: !now.keep });
+        } })) : null,
+    s.speed !== 1 ? el("p", { class: "ed-note", text: "The preview is quiet at other speeds; the saved video has the sound, slowed or sped up without changing its pitch." }) : null);
 }
 
 function trimPanel() {
@@ -991,6 +1104,66 @@ function renderProps() {
 }
 
 // ---------- export ----------
+// ---------- crop (9:16, 1:1, ...) ----------
+const ASPECTS = [["original", "Original"], ["9:16", "9:16 TikTok / Shorts"], ["1:1", "1:1 Square"], ["4:5", "4:5 Instagram"], ["16:9", "16:9"]];
+
+/// The crop frame as fractions of the clip: the biggest box of the chosen shape,
+/// centred on (cropX, cropY) and kept inside the picture. `null` = no crop.
+function cropRect() {
+  if (ed.aspect === "original") return null;
+  const [a, b] = ed.aspect.split(":").map(Number);
+  const want = a / b;
+  const clip = ed.info.width / ed.info.height;
+  const w = want < clip ? want / clip : 1;
+  const h = want < clip ? 1 : clip / want;
+  const clampTo = (v, size) => Math.min(Math.max(v - size / 2, 0), 1 - size);
+  return { x: clampTo(ed.cropX, w), y: clampTo(ed.cropY, h), w, h };
+}
+
+function showCrop() {
+  const r = cropRect();
+  const box = ed.dom.crop;
+  box.hidden = !r;
+  if (!r) return;
+  Object.assign(box.style, { left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` });
+}
+
+/// Dragging the grip moves the frame; the arrow keys nudge it.
+function cropDrag(grip) {
+  grip.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    const stage = ed.dom.stage.getBoundingClientRect();
+    const start = { x: e.clientX, y: e.clientY, cx: ed.cropX, cy: ed.cropY };
+    const r0 = cropRect();
+    // Start from where the frame really is (it may sit against an edge).
+    start.cx = r0.x + r0.w / 2;
+    start.cy = r0.y + r0.h / 2;
+    const move = (ev) => {
+      ed.cropX = start.cx + (ev.clientX - start.x) / stage.width;
+      ed.cropY = start.cy + (ev.clientY - start.y) / stage.height;
+      const r = cropRect();
+      ed.cropX = r.x + r.w / 2;
+      ed.cropY = r.y + r.h / 2;
+      showCrop();
+    };
+    const up = () => { grip.removeEventListener("pointermove", move); grip.removeEventListener("pointerup", up); };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+  });
+  grip.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 0.1 : 0.02;
+    const dx = { ArrowLeft: -step, ArrowRight: step }[e.key] || 0;
+    const dy = { ArrowUp: -step, ArrowDown: step }[e.key] || 0;
+    if (!dx && !dy) return;
+    e.preventDefault();
+    const r = cropRect();
+    ed.cropX = r.x + r.w / 2 + dx;
+    ed.cropY = r.y + r.h / 2 + dy;
+    showCrop();
+  });
+}
+
 function renderExport() {
   const gif = ed.format === "gif";
   const len = ed.end - ed.start;
@@ -1014,12 +1187,19 @@ function renderExport() {
     el("p", { class: "ed-note", text: "Keep the editor open until it's done. Your original clip is never changed." }));
   ed.dom.save = el("button", { class: "btn primary", text: "Save as…", onclick: () => runExport(false) });
   ed.dom.copy = el("button", { class: "btn", text: "Copy to clipboard", onclick: () => runExport(true) });
-  ed.dom.export.replaceChildren(fmtSeg, gifOpts, el("div", { class: "ed-row" }, ed.dom.save, ed.dom.copy), ed.dom.progress);
+  const shape = el("div", {},
+    el("div", { class: "chips ed-chips", role: "group", "aria-label": "Shape" },
+      ASPECTS.map(([v, label]) => el("button", { class: "chip", "aria-pressed": String(ed.aspect === v),
+        onclick: () => { ed.aspect = v; ed.cropX = 0.5; ed.cropY = 0.5; renderExport(); } }, label))),
+    ed.aspect === "original" ? null
+      : el("p", { class: "ed-note", text: "Drag the frame on the video to choose what's in shot. Put text inside the frame; anything outside is cut off." }));
+  showCrop();
+  ed.dom.export.replaceChildren(fmtSeg, shape, gifOpts, el("div", { class: "ed-row" }, ed.dom.save, ed.dom.copy), ed.dom.progress);
 }
 
 function untouched() {
   const sound = ed.ev >= 0 ? ed.mode === "simple" && ed.main === 100 : ed.sep.every((v) => v === 100);
-  return ed.format === "mp4" && ed.start < 0.05 && ed.end > ed.info.duration - 0.05 && !ed.items.length && sound;
+  return ed.format === "mp4" && ed.aspect === "original" && trivialSections() && ed.start < 0.05 && ed.end > ed.info.duration - 0.05 && !ed.items.length && sound;
 }
 
 /// One item alone on a transparent clip-sized picture, for FFmpeg to lay over the video.
@@ -1073,6 +1253,8 @@ async function runExport(toClipboard) {
     const out = await invoke("export_clip", { request: {
       path: mine.clip.path, start: mine.start, end: mine.end, volumes: volumes(), overlays, media,
       format: mine.format, gif_width: mine.gifWidth, gif_fps: mine.gifFps, to_clipboard: toClipboard, save_to: saveTo,
+      crop: cropRect(),
+      sections: exportSections(),
     } });
     const kind = mine.format === "gif" ? "GIF" : "Video";
     if (toClipboard) toast(`${kind} copied. Paste it into Discord or any chat`);

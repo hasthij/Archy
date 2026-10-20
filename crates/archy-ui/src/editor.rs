@@ -523,6 +523,128 @@ pub struct ExportRequest {
     /// Where to save it (chosen in the "Save as" dialog). `None`: next to the clip.
     #[serde(default)]
     pub save_to: Option<String>,
+    /// Part of the picture to keep (9:16 for TikTok/Shorts, 1:1, ...), as fractions
+    /// of the clip. `None`: the whole picture.
+    #[serde(default)]
+    pub crop: Option<Crop>,
+    /// The parts of the trimmed clip to keep, in order, each with its own speed
+    /// and zoom (clip seconds). Empty: the whole trimmed clip, as recorded.
+    #[serde(default)]
+    pub sections: Vec<Section>,
+}
+
+/// One kept part of the clip.
+#[derive(Deserialize, Debug, Clone, Copy)]
+pub struct Section {
+    pub start: f64,
+    pub end: f64,
+    /// 0.25-4 (0.5 = half speed slow motion).
+    pub speed: f64,
+    /// 1 = whole picture, 2 = twice as close (centred).
+    pub zoom: f64,
+}
+
+/// `atempo` steps for `speed` (each step must be 0.5-2): 0.25 = two halvings.
+fn tempo_chain(speed: f64) -> String {
+    let mut s = speed.clamp(0.25, 4.0);
+    let mut steps = Vec::new();
+    while s < 0.5 {
+        steps.push("atempo=0.5".to_string());
+        s /= 0.5;
+    }
+    while s > 2.0 {
+        steps.push("atempo=2".to_string());
+        s /= 2.0;
+    }
+    if (s - 1.0).abs() > 1e-6 {
+        steps.push(format!("atempo={s:.4}"));
+    }
+    steps.join(",")
+}
+
+/// Sections relative to the trimmed start, inside it, non-empty. `None` when
+/// they change nothing (one section, the whole range, normal speed and zoom).
+fn kept_sections(req: &ExportRequest, length: f64) -> Option<Vec<Section>> {
+    let v: Vec<Section> = req
+        .sections
+        .iter()
+        .map(|c| Section {
+            start: (c.start - req.start).clamp(0.0, length),
+            end: (c.end - req.start).clamp(0.0, length),
+            speed: c.speed.clamp(0.25, 4.0),
+            zoom: c.zoom.clamp(1.0, 4.0),
+        })
+        .filter(|c| c.end - c.start > 0.05)
+        .collect();
+    let plain = v.len() == 1
+        && v[0].start < 0.05
+        && v[0].end > length - 0.05
+        && (v[0].speed - 1.0).abs() < 1e-6
+        && (v[0].zoom - 1.0).abs() < 1e-6;
+    if v.is_empty() || plain { None } else { Some(v) }
+}
+
+/// Filters that cut `video` (and `audio`) into the sections, apply speed and
+/// zoom, and join them. Returns the filters and the new video/audio labels.
+fn section_filters(sections: &[Section], video: &str, audio: Option<&str>, cw: u32, ch: u32) -> (Vec<String>, String, Option<String>) {
+    let n = sections.len();
+    let mut f = Vec::new();
+    let vin: Vec<String> = if n == 1 {
+        vec![video.to_string()]
+    } else {
+        f.push(format!("[{video}]split={n}{}", (0..n).map(|i| format!("[sv{i}]")).collect::<String>()));
+        (0..n).map(|i| format!("sv{i}")).collect()
+    };
+    let ain: Option<Vec<String>> = audio.map(|a| {
+        if n == 1 {
+            vec![a.to_string()]
+        } else {
+            f.push(format!("[{a}]asplit={n}{}", (0..n).map(|i| format!("[sa{i}]")).collect::<String>()));
+            (0..n).map(|i| format!("sa{i}")).collect()
+        }
+    });
+    let mut joined = String::new();
+    for (i, c) in sections.iter().enumerate() {
+        let zoom = if c.zoom > 1.001 {
+            format!(",crop=iw/{z:.3}:ih/{z:.3},scale={cw}:{ch}", z = c.zoom)
+        } else {
+            String::new()
+        };
+        f.push(format!(
+            "[{}]trim=start={:.3}:end={:.3},setpts=(PTS-STARTPTS)/{:.4}{zoom},setsar=1[pv{i}]",
+            vin[i], c.start, c.end, c.speed
+        ));
+        joined.push_str(&format!("[pv{i}]"));
+        if let Some(ain) = &ain {
+            let tempo = tempo_chain(c.speed);
+            let tempo = if tempo.is_empty() { String::new() } else { format!(",{tempo}") };
+            f.push(format!("[{}]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS{tempo}[pa{i}]", ain[i], c.start, c.end));
+            joined.push_str(&format!("[pa{i}]"));
+        }
+    }
+    let a = if ain.is_some() { 1 } else { 0 };
+    let out_a = ain.as_ref().map(|_| "asec".to_string());
+    f.push(format!("{joined}concat=n={n}:v=1:a={a}[vsec]{}", if a == 1 { "[asec]" } else { "" }));
+    (f, "vsec".to_string(), out_a)
+}
+
+/// A rectangle as fractions (0-1) of the clip's width and height.
+#[derive(Deserialize, Debug, Clone, Copy)]
+pub struct Crop {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// FFmpeg crop for `c` on a `cw` x `ch` clip: even sizes (H.264 needs them),
+/// always inside the picture.
+fn crop_filter(c: &Crop, cw: u32, ch: u32) -> String {
+    let w = ((c.w.clamp(0.05, 1.0) * cw as f64).round() as u32).clamp(2, cw) & !1;
+    let h = ((c.h.clamp(0.05, 1.0) * ch as f64).round() as u32).clamp(2, ch) & !1;
+    let x = ((c.x.max(0.0) * cw as f64).round() as u32).min(cw - w);
+    let y = ((c.y.max(0.0) * ch as f64).round() as u32).min(ch - h);
+    format!("crop={w}:{h}:{x}:{y}")
 }
 
 /// First file name that's free: "<stem> (edit).mp4", "<stem> (edit 2).mp4", ...
@@ -653,16 +775,6 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
         graph.push(format!("[{last}][{k}:v]overlay=0:0:enable='between(t,{a:.3},{b:.3})'[{next}]"));
         last = next;
     }
-    if gif {
-        let fps = req.gif_fps.clamp(5, 30);
-        let width = req.gif_width.clamp(160, 1280);
-        graph.push(format!(
-            "[{last}]fps={fps},scale='min({width},iw)':-2:flags=lanczos,split[g1][g2];\
-             [g1]palettegen=stats_mode=diff[pal];[g2][pal]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle[vout]"
-        ));
-    } else {
-        graph.push(format!("[{last}]format=yuv420p[vout]"));
-    }
     // One mixed audio track (what every player plays). Track 1 already holds
     // everything you heard, so the others are added on top only when turned up.
     let active: Vec<(usize, u32)> = req
@@ -692,6 +804,35 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
         graph.push(format!("{mix}{limit}[aout]"));
     }
 
+    // Sections (split, speed, zoom) come after text and images, so those keep
+    // their place in the picture and speed up or slow down with the clip.
+    let mut audio_out = "aout".to_string();
+    let mut out_length = length;
+    if let Some(secs) = kept_sections(req, length) {
+        out_length = secs.iter().map(|c| (c.end - c.start) / c.speed).sum::<f64>().max(0.1);
+        let (filters, v, a) = section_filters(&secs, &last, has_audio.then_some("aout"), cw, ch);
+        graph.extend(filters);
+        last = v;
+        if let Some(a) = a {
+            audio_out = a;
+        }
+    }
+    // The crop comes last, so text and images placed inside the frame stay put.
+    if let Some(c) = &req.crop {
+        graph.push(format!("[{last}]{}[vcrop]", crop_filter(c, cw, ch)));
+        last = "vcrop".into();
+    }
+    if gif {
+        let fps = req.gif_fps.clamp(5, 30);
+        let width = req.gif_width.clamp(160, 1280);
+        graph.push(format!(
+            "[{last}]fps={fps},scale='min({width},iw)':-2:flags=lanczos,split[g1][g2];\
+             [g1]palettegen=stats_mode=diff[pal];[g2][pal]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle[vout]"
+        ));
+    } else {
+        graph.push(format!("[{last}]format=yuv420p[vout]"));
+    }
+
     let encoders: Vec<&'static str> = if gif {
         vec!["gif"]
     } else {
@@ -714,14 +855,14 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
             cmd.args(opts).arg("-i").arg(path);
         }
         cmd.args(["-filter_complex", &graph.join(";"), "-map", "[vout]"]);
-        // Never longer than the trimmed clip (a looping video or delayed sound can't stretch it).
-        cmd.args(["-t", &format!("{length:.3}")]);
+        // Never longer than the edit (a looping video or delayed sound can't stretch it).
+        cmd.args(["-t", &format!("{out_length:.3}")]);
         if gif {
             cmd.args(["-loop", "0"]);
         } else {
             cmd.args(["-c:v", enc]).args(encoder_args(enc));
             if has_audio {
-                cmd.args(["-map", "[aout]", "-c:a", "aac", "-b:a", "160k"]);
+                cmd.args(["-map", &format!("[{audio_out}]"), "-c:a", "aac", "-b:a", "160k"]);
             }
             cmd.args(["-movflags", "+faststart"]);
         }
@@ -745,7 +886,7 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
                     let _ = child.kill();
                 }
                 if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.parse::<f64>().ok()) {
-                    progress((us / 1e6 / length).clamp(0.0, 1.0));
+                    progress((us / 1e6 / out_length).clamp(0.0, 1.0));
                 }
             }
         }
@@ -772,6 +913,46 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn speed_becomes_valid_atempo_steps() {
+        assert_eq!(super::tempo_chain(1.0), "");
+        assert_eq!(super::tempo_chain(0.5), "atempo=0.5000");
+        assert_eq!(super::tempo_chain(0.25), "atempo=0.5,atempo=0.5000");
+        assert_eq!(super::tempo_chain(4.0), "atempo=2,atempo=2.0000");
+    }
+
+    #[test]
+    fn sections_split_slow_and_zoom() {
+        let secs = [
+            Section { start: 0.0, end: 1.5, speed: 1.0, zoom: 1.0 },
+            Section { start: 3.0, end: 5.0, speed: 0.5, zoom: 2.0 },
+        ];
+        let (f, v, a) = super::section_filters(&secs, "v3", Some("aout"), 1920, 1080);
+        assert_eq!((v.as_str(), a.as_deref()), ("vsec", Some("asec")));
+        assert_eq!(f[0], "[v3]split=2[sv0][sv1]");
+        assert_eq!(f[1], "[aout]asplit=2[sa0][sa1]");
+        assert!(f[4].contains("trim=start=3.000:end=5.000,setpts=(PTS-STARTPTS)/0.5000,crop=iw/2.000:ih/2.000,scale=1920:1080"));
+        assert!(f[5].contains("atempo=0.5000"));
+        assert_eq!(f.last().unwrap(), "[pv0][pa0][pv1][pa1]concat=n=2:v=1:a=1[vsec][asec]");
+        // A GIF has no sound.
+        let (f, _, a) = super::section_filters(&secs[..1], "v0", None, 640, 360);
+        assert!(a.is_none());
+        assert_eq!(f.last().unwrap(), "[pv0]concat=n=1:v=1:a=0[vsec]");
+    }
+
+    #[test]
+    fn crop_sizes_are_even_and_inside_the_picture() {
+        // 9:16 from 1920x1080: full height, 607.5 px wide -> 606 (even), centred.
+        let c = Crop { x: (1.0 - 0.3164) / 2.0, y: 0.0, w: 0.3164, h: 1.0 };
+        assert_eq!(super::crop_filter(&c, 1920, 1080), "crop=606:1080:656:0");
+        // Pushed past the right edge: kept inside.
+        let c = Crop { x: 0.95, y: 0.0, w: 0.3164, h: 1.0 };
+        assert_eq!(super::crop_filter(&c, 1920, 1080), "crop=606:1080:1314:0");
+        // Odd clip size (1920x1019): even height.
+        let c = Crop { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+        assert_eq!(super::crop_filter(&c, 1920, 1019), "crop=1920:1018:0:0");
+    }
+
     use super::*;
 
     #[test]
@@ -878,6 +1059,8 @@ mod export_tests {
             to_clipboard: false,
             save_to: None,
             media: Vec::new(),
+            crop: None,
+            sections: Vec::new(),
         };
         let last = std::cell::Cell::new(0.0);
         let mp4 = export(&src, &req, &|p| last.set(p)).unwrap();
@@ -886,6 +1069,31 @@ mod export_tests {
         assert!((out.duration - 5.0).abs() < 0.3, "{}", out.duration);
         assert_eq!(out.tracks.len(), usize::from(!clip_info.tracks.is_empty()));
         assert!(last.get() > 0.5);
+
+        // 9:16 (TikTok / Shorts): full height, as wide as the shape allows.
+        let clip_ratio = clip_info.width as f64 / clip_info.height as f64;
+        req.crop = Some(Crop { x: 0.3, y: 0.0, w: (9.0 / 16.0) / clip_ratio, h: 1.0 });
+        let tall = export(&src, &req, &|_| {}).unwrap();
+        let t = info(&tall).unwrap();
+        println!("9:16 export: {}x{}", t.width, t.height);
+        assert!(t.height > t.width && t.height + 2 >= clip_info.height, "{}x{}", t.width, t.height);
+        assert!(((t.width as f64 / t.height as f64) - 9.0 / 16.0).abs() < 0.01);
+        // Split + slow motion + zoom: 1.5 s as is, then 2 s at half speed (4 s): 5.5 s.
+        req.crop = None;
+        req.sections = vec![
+            Section { start: 2.0, end: 3.5, speed: 1.0, zoom: 1.0 },
+            Section { start: 5.0, end: 7.0, speed: 0.5, zoom: 2.0 },
+        ];
+        let cut = export(&src, &req, &|_| {}).unwrap();
+        let c = info(&cut).unwrap();
+        println!("sections export: {:.2} s, {}x{}", c.duration, c.width, c.height);
+        assert!((c.duration - 5.5).abs() < 0.3, "{}", c.duration);
+        assert_eq!((c.width, c.height), (clip_info.width, clip_info.height));
+        req.sections = Vec::new();
+        // Original shape again (crop off): the full picture.
+        let full = export(&src, &req, &|_| {}).unwrap();
+        let f = info(&full).unwrap();
+        assert_eq!((f.width, f.height), (clip_info.width, clip_info.height));
 
         // A 3 s video with sound and a 2 s GIF, imported the way the editor does,
         // laid over the clip (the video loops to fill 4 s).

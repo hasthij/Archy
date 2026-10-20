@@ -12,6 +12,8 @@ pub mod presets;
 pub mod process;
 pub mod recorder;
 pub mod ring;
+pub mod screenshot;
+pub mod session;
 pub mod selftest;
 pub mod settings;
 pub mod status;

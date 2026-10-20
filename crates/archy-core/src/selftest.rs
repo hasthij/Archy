@@ -65,6 +65,20 @@ pub struct Report {
     pub clean: bool,
     /// Clean AND smooth: an even frame rate and almost nothing skipped.
     pub pass: bool,
+    /// Video held in the replay buffer just before saving (MB).
+    pub buffer_mb: f64,
+    /// The whole process's private memory just before saving (MB).
+    pub process_mb: f64,
+    /// Length of the saved clip and how long saving it took.
+    pub clip_seconds: f64,
+    pub save_ms: u64,
+    /// With ARCHY_TEST_SESSION: the session file's length, size, uneven frames,
+    /// bookmarks and any problem ("" when fine).
+    pub session_seconds: f64,
+    pub session_mb: f64,
+    pub session_uneven: u32,
+    pub session_bookmarks: usize,
+    pub session_problem: String,
 }
 
 const W: u32 = 1280;
@@ -216,7 +230,8 @@ pub fn run(opts: &Options) -> Result<Report, String> {
         max_bitrate: mbps * 2_000_000,
         target_bitrate: Some(mbps * 1_000_000),
         quality: 70,
-        buffer_seconds: 30,
+        // Long tests hold their whole length (to measure long clips' RAM and save time).
+        buffer_seconds: secs.max(30),
         convert: ConvertMode::VideoEngine,
         gpu: String::new(),
         audio: Vec::new(),
@@ -227,14 +242,28 @@ pub fn run(opts: &Options) -> Result<Report, String> {
     let cpu0 = process_cpu();
     let wall0 = Instant::now();
     let out = std::env::temp_dir().join(format!("archy-selftest-{fps}.mp4"));
-    let recorded = (|| -> Result<(String, String, u64, u64, u64), String> {
+    #[allow(clippy::type_complexity)]
+    let recorded = (|| -> Result<(String, String, u64, u64, u64, (usize, u64, u64, f64), Option<crate::session::Summary>), String> {
         let rec = Recorder::start(cfg).map_err(|e| e.message())?;
+        // ARCHY_TEST_SESSION=1: also record the whole session to a file (feature test).
+        let session_path = std::env::temp_dir().join(format!("archy-selftest-{fps}-session.mp4"));
+        let with_session = std::env::var_os("ARCHY_TEST_SESSION").is_some();
+        if with_session {
+            let _ = std::fs::remove_file(&session_path);
+            rec.start_session(&session_path);
+        }
         let frames0 = shown.load(Ordering::Acquire);
         pump(Duration::from_secs(secs as u64));
         let rendered = shown.load(Ordering::Acquire).wrapping_sub(frames0) & 0xFFFF;
-        rec.save_clip(secs.saturating_sub(2).max(2), &out).map_err(|e| e.message())?;
+        if with_session {
+            rec.bookmark();
+        }
+        let ring = rec.buffer_bytes();
+        let memory = process_memory();
+        let clip = rec.save_clip(secs.saturating_sub(2).max(2), &out).map_err(|e| e.message())?;
         let (sent, skipped) = rec.frame_counts();
-        Ok((rec.info.encoder.clone(), rec.info.gpu.clone(), rendered, sent, skipped))
+        let session = if with_session { rec.end_session() } else { None };
+        Ok((rec.info.encoder.clone(), rec.info.gpu.clone(), rendered, sent, skipped, (ring, memory, clip.save_time.as_millis() as u64, clip.seconds), session))
     })();
     stop.store(true, Ordering::Release);
     let joined = renderer.join();
@@ -242,7 +271,7 @@ pub fn run(opts: &Options) -> Result<Report, String> {
         let _ = DestroyWindow(hwnd);
     }
     joined.map_err(|_| "the test window failed".to_string())?;
-    let (encoder, gpu, rendered, sent, skipped) = recorded?;
+    let (encoder, gpu, rendered, sent, skipped, (ring, memory, save_ms, clip_seconds), session) = recorded?;
     let wall = wall0.elapsed().as_secs_f64();
     let recorder_cpu = (process_cpu() - cpu0).saturating_sub(render_cpu.load(Ordering::Acquire)) as f64 / 1e7;
 
@@ -365,6 +394,15 @@ pub fn run(opts: &Options) -> Result<Report, String> {
         decode_errors,
         clean,
         pass: clean && uneven == 0 && skipped * 100 <= (sent + skipped).max(1),
+        buffer_mb: ring as f64 / 1e6,
+        process_mb: memory as f64 / 1e6,
+        clip_seconds,
+        save_ms,
+        session_seconds: session.as_ref().map_or(0.0, |s| probe_num_f(&opts.ffmpeg, &s.path)),
+        session_mb: session.as_ref().map_or(0.0, |s| s.bytes as f64 / 1e6),
+        session_uneven: session.as_ref().map_or(0, |s| pts_gaps(&opts.ffmpeg, &s.path, fps)),
+        session_bookmarks: session.as_ref().map_or(0, |s| crate::session::read_bookmarks(&s.path).len()),
+        session_problem: session.as_ref().and_then(|s| s.problem.clone()).unwrap_or_default(),
     })
 }
 
@@ -420,4 +458,23 @@ pub fn windows_build() -> String {
     }
     let major = if build.parse::<u32>().unwrap_or(0) >= 22000 { "Windows 11" } else { "Windows 10" };
     format!("{major} {release} ({build}.{ubr})")
+}
+
+/// This process's private memory in bytes.
+fn process_memory() -> u64 {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
+    let mut c = PROCESS_MEMORY_COUNTERS_EX::default();
+    let ok = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut c as *mut _ as *mut PROCESS_MEMORY_COUNTERS,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        )
+    };
+    if ok.is_ok() { c.PrivateUsage as u64 } else { 0 }
+}
+
+/// A file's duration in seconds (0 if unknown).
+fn probe_num_f(ffmpeg: &Path, out: &Path) -> f64 {
+    probe(ffmpeg, out, "format=duration", "v:0").trim().parse().unwrap_or(0.0)
 }
