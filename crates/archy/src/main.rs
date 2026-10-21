@@ -134,6 +134,8 @@ struct App {
     previous: Option<Previous>,
     /// Encoders that failed twice (`RecorderInfo::encoder_key`); skipped until restart.
     avoid: Vec<String>,
+    /// When the last encoder was banned; bans are forgotten 15 minutes later.
+    avoid_since: Option<std::time::Instant>,
     /// Each encoder failure (avoided from the second one).
     encoder_strikes: Vec<String>,
     /// Recent failures: (exe, when).
@@ -710,6 +712,7 @@ impl App {
                     if self.encoder_strikes.iter().filter(|k| **k == key).count() >= 2 {
                         log(&format!("won't use {key} again until Archy restarts (failed twice)"));
                         self.avoid.push(key);
+                        self.avoid_since = Some(std::time::Instant::now());
                     }
                 }
                 self.note_failure(&exe, &game, &reason);
@@ -752,6 +755,13 @@ impl App {
     /// seconds (and a broken driver can hang), and the tray must keep answering
     /// hotkeys, voice and its menu meanwhile.
     fn start(&mut self, fg: watch::Foreground) {
+        // A ban is a guess about a driver; give the encoder another chance later.
+        if self.avoid_since.is_some_and(|t| t.elapsed().as_secs() > 15 * 60) {
+            log("encoder bans expired; trying every encoder again");
+            self.avoid.clear();
+            self.encoder_strikes.clear();
+            self.avoid_since = None;
+        }
         let target = if self.settings.capture.eq_ignore_ascii_case("screen") {
             // The screen picked in settings, else (or if it was unplugged) the game's.
             let chosen = archy_core::monitors::find(&self.settings.capture_monitor);
@@ -1631,6 +1641,7 @@ fn main() {
         stop_after_start: false,
         previous: None,
         avoid: Vec::new(),
+        avoid_since: None,
         encoder_strikes: Vec::new(),
         failures: Vec::new(),
         blocked: None,

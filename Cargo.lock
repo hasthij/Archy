@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "archy"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "archy-audio",
  "archy-core",
@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "archy-setup"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "archy-core",
  "bzip2-rs",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "archy-ui"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "archy-audio",
  "archy-core",

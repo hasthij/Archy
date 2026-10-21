@@ -612,6 +612,9 @@ fn open_encoder(
         Ok("vpl") => &[Backend::Vpl],
         _ => &[Backend::Vpl, Backend::MediaFoundation],
     };
+    // An encoder that failed earlier is only used when nothing else works:
+    // recording must never stop entirely because of a ban.
+    let mut fallback: Option<(Encoder, Codec)> = None;
     for &backend in backends {
         for &codec in &cfg.codecs {
             let enc_cfg = Config {
@@ -628,14 +631,16 @@ fn open_encoder(
             };
             match Encoder::new(backend, gpu, &enc_cfg) {
                 Ok(e) if cfg.avoid.contains(&encoder_key(e.name(), codec)) => {
-                    last = Error::new(E_FAIL, format!("{} failed earlier on this PC", e.name()));
+                    if fallback.is_none() {
+                        fallback = Some((e, codec));
+                    }
                 }
                 Ok(e) => return Ok((e, codec)),
                 Err(e) => last = e,
             }
         }
     }
-    Err(last)
+    fallback.ok_or(last)
 }
 
 fn capture_loop(
@@ -852,11 +857,14 @@ fn capture_loop(
         if let Some(p) = pending_shot.take() {
             pending_shot = crate::screenshot::poll(&gpu.context, p);
         }
-        // Frames went in after the last packet came out, and nothing for 8 s: the
-        // encoder has stopped. (A still screen sends nothing in smooth timing, so
-        // "no output" alone isn't a stall.)
+        // Frames are still going in (the last one under a second ago), yet nothing
+        // has come out for 8 s: the encoder has stopped. A still screen sends no
+        // frames, and an encoder keeps its last few frames until more arrive, so
+        // "no output" alone isn't a stall (that false alarm banned working
+        // encoders in 0.5.0 whenever a window stood still).
         let out = shared.last_output.load(Ordering::Acquire);
-        if out != 0 && clock_now() - out > OUTPUT_STALL && shared.last_input.load(Ordering::Acquire) > out {
+        let now = clock_now();
+        if out != 0 && now - out > OUTPUT_STALL && now - shared.last_input.load(Ordering::Acquire) < 10_000_000 {
             break Err(Error::new(E_FAIL, "the GPU encoder stopped producing video (no output for 8 s)"));
         }
         // Sleeps until the compositor has a new frame or the next slot is due,
@@ -894,6 +902,7 @@ fn capture_loop(
                     if let Err(e) = send(&tex, at, false) {
                         break Err(e);
                     }
+                    last_time = at;
                     last = Some(tex);
                 }
                 continue;
@@ -911,6 +920,20 @@ fn capture_loop(
                             let _ = req.reply.try_send(Err("couldn't copy the picture".into()));
                         }
                     }
+                }
+            }
+            // Smooth timing on a still screen: re-send the last frame twice a second.
+            // An encoder keeps its last few frames until more arrive, so without
+            // this a still screen (a menu, a paused game) never reached the clip
+            // buffer and saving said "nothing recorded yet". Repeats are near-free
+            // (skip frames on Intel).
+            if let (Some(tex), false, false) = (&last, busy(), constant) {
+                let now = clock_now();
+                if now.saturating_sub(last_time) >= 5_000_000 {
+                    if let Err(e) = send(tex, now, true) {
+                        break Err(e);
+                    }
+                    last_time = now;
                 }
             }
             // Nothing new: repeat the last frame on every slot that's due (unless
