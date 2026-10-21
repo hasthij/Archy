@@ -93,6 +93,10 @@ fn main() {
     // `--hold N`: just keep the (changing) window open N seconds, as a stand-in
     // game for end-to-end tests of the tray.
     let args: Vec<String> = std::env::args().collect();
+    // `--still`: the window stops changing after it first paints (a still screen).
+    if args.iter().any(|a| a == "--still") {
+        MOVING.store(false, Ordering::Relaxed);
+    }
     if let Some(i) = args.iter().position(|a| a == "--hold") {
         let secs = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(60);
         pump(Duration::from_secs(secs));
