@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 windows.workspace = true
 windows-core = "0.62.2"
+nnnoiseless = { version = "0.5", default-features = false }

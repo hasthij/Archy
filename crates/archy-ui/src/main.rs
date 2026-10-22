@@ -214,6 +214,68 @@ async fn mic_test(mic: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// The running "listen to yourself" monitor (`archy.exe --mic-monitor`) and its
+/// input, where filter changes go as "<denoise 0|1> <gate dB>" lines.
+static MIC_MONITOR: std::sync::Mutex<Option<(std::process::Child, std::process::ChildStdin)>> =
+    std::sync::Mutex::new(None);
+
+/// Plays the mic through `output` with the noise filter applied, emitting
+/// "mic-level" events ({db, open} or {error}) to the page until stopped.
+#[tauri::command]
+fn start_mic_monitor(app: AppHandle, mic: String, output: String, denoise: bool, gate: i32) -> Result<(), String> {
+    use std::io::{BufRead, Write};
+    use std::os::windows::process::CommandExt;
+    stop_mic_monitor();
+    let mut exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    exe.set_file_name("archy.exe");
+    let dash = |s: String| if s.is_empty() { "-".to_string() } else { s };
+    let mut child = std::process::Command::new(&exe)
+        .args(["--mic-monitor".to_string(), dash(mic), dash(output)])
+        .stdout(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::piped())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .spawn()
+        .map_err(|e| format!("{}: {e}", exe.display()))?;
+    let stdout = child.stdout.take().ok_or("no output from the mic monitor")?;
+    let mut input = child.stdin.take().ok_or("no input to the mic monitor")?;
+    writeln!(input, "{} {gate}", denoise as u8).map_err(|e| e.to_string())?;
+    *MIC_MONITOR.lock().map_err(|e| e.to_string())? = Some((child, input));
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            let event = match line.strip_prefix("error ") {
+                Some(e) => serde_json::json!({ "error": e }),
+                None => {
+                    let mut it = line.split_whitespace();
+                    let db: f32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(-100.0);
+                    serde_json::json!({ "db": db, "open": it.next() == Some("1") })
+                }
+            };
+            let _ = app.emit("mic-level", event);
+        }
+    });
+    Ok(())
+}
+
+/// Changes the running monitor's filter at once.
+#[tauri::command]
+fn set_mic_monitor(denoise: bool, gate: i32) {
+    use std::io::Write;
+    if let Ok(mut m) = MIC_MONITOR.lock() {
+        if let Some((_, input)) = m.as_mut() {
+            let _ = writeln!(input, "{} {gate}", denoise as u8);
+        }
+    }
+}
+
+#[tauri::command]
+fn stop_mic_monitor() {
+    if let Some((mut child, input)) = MIC_MONITOR.lock().ok().and_then(|mut m| m.take()) {
+        drop(input);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
 /// Bookmark times (seconds) saved with a session recording (empty for clips).
 #[tauri::command]
 fn clip_bookmarks(path: String) -> Vec<f64> {
@@ -893,6 +955,9 @@ fn main() {
             self_test,
             clip_bookmarks,
             mic_test,
+            start_mic_monitor,
+            set_mic_monitor,
+            stop_mic_monitor,
             calibration_input,
             stop_calibration,
             read_log,

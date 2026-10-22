@@ -214,6 +214,7 @@ pub fn list_devices(input: bool) -> Vec<AudioDevice> {
 }
 
 pub fn run(
+    mut filter: Option<crate::denoise::Filter>,
     source: Source,
     kbps: u32,
     volume: &Volume,
@@ -266,6 +267,7 @@ pub fn run(
         let mut next_time: Option<i64> = None;
         let mut silence: Vec<i16> = Vec::new();
         let mut scaled: Vec<i16> = Vec::new();
+        let mut filtered: Vec<i16> = Vec::new();
         let mut emit = |data: &[u8], time: i64, duration: i64| {
             on_packet(AudioPacket {
                 data,
@@ -306,7 +308,13 @@ pub fn run(
                     silence.resize(samples, 0);
                     encoder.encode(&silence, time, &mut emit)?;
                 } else {
-                    let pcm = unsafe { std::slice::from_raw_parts(data as *const i16, samples) };
+                    let mut pcm = unsafe { std::slice::from_raw_parts(data as *const i16, samples) };
+                    if let Some(f) = filter.as_mut().filter(|f| f.active()) {
+                        filtered.clear();
+                        filtered.extend_from_slice(pcm);
+                        f.process(&mut filtered, CHANNELS as usize);
+                        pcm = &filtered;
+                    }
                     let pcm = with_volume(pcm, volume.load(Ordering::Relaxed), &mut scaled);
                     encoder.encode(pcm, time, &mut emit)?;
                 }

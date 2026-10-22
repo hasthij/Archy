@@ -34,6 +34,10 @@ pub struct Settings {
     pub push_to_talk: bool,
     /// A key ("V", "Ctrl+Space") or a mouse side button ("Mouse4", "Mouse5").
     pub push_to_talk_key: String,
+    /// RNNoise noise suppression on the mic (fans, keyboards, hum). Off by default.
+    pub noise_suppression: bool,
+    /// Mic gate threshold in dBFS: quieter than this is muted (-100 = off).
+    pub mic_gate_db: i32,
     /// More clip hotkeys, each with its own length (empty = just the two above).
     pub extra_hotkeys: Vec<HotkeyClip>,
     pub hotkey_pause: String,
@@ -211,6 +215,8 @@ impl Default for Settings {
             hotkey_session: String::new(),
             push_to_talk: false,
             push_to_talk_key: String::new(),
+            noise_suppression: false,
+            mic_gate_db: -100,
             // Off by default: a key that silently stops recording is easy to hit by accident.
             hotkey_pause: String::new(),
             games: vec!["RobloxPlayerBeta.exe".into()],
