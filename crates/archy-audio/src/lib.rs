@@ -8,6 +8,7 @@
 
 mod aac;
 mod capture;
+mod denoise;
 mod mix;
 mod pcm;
 mod process;
@@ -18,7 +19,8 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 pub use aac::AacInfo;
-pub use pcm::listen_microphone;
+pub use denoise::{Filter, MicFilter, GATE_OFF};
+pub use pcm::{listen_microphone, monitor_microphone};
 pub use process::find_root_process;
 use windows::core::{Error, Result};
 use windows::Win32::Foundation::E_FAIL;
@@ -56,6 +58,8 @@ pub type Volume = Arc<AtomicU32>;
 pub struct Volumes {
     pub main: Volume,
     pub mic: Volume,
+    /// Noise suppression and gate for the microphone (wherever it is recorded).
+    pub mic_filter: MicFilter,
 }
 
 impl Default for Volumes {
@@ -63,6 +67,7 @@ impl Default for Volumes {
         Self {
             main: Arc::new(AtomicU32::new(100)),
             mic: Arc::new(AtomicU32::new(100)),
+            mic_filter: MicFilter::default(),
         }
     }
 }
@@ -157,6 +162,8 @@ impl AudioCapture {
                         &mut on_packet,
                     ),
                     other => capture::run(
+                        matches!(other, Source::Microphone { .. })
+                            .then(|| Filter::new(volumes.mic_filter.clone())),
                         other,
                         bitrate_kbps,
                         &volumes.main,

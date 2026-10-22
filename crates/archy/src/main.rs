@@ -46,6 +46,14 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_VOICE: u32 = WM_APP + 2;
 /// The worker thread finished starting a recording (see `App::start`).
 const WM_STARTED: u32 = WM_APP + 3;
+/// Archy was launched again while running: put the tray icon back (it may be missing).
+const WM_SHOW_TRAY: u32 = WM_APP + 4;
+/// Whether the tray icon is in the taskbar. At sign-in Archy can start before
+/// the taskbar exists, so adding it fails; it is retried until it works.
+static TRAY_SHOWN: AtomicBool = AtomicBool::new(false);
+/// Explorer's "TaskbarCreated" message: sent when the taskbar (re)starts, which
+/// drops every tray icon.
+static TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 const TIMER_WATCH: usize = 1;
 const HK_SAVE: i32 = 1;
 const HK_SAVE_LONG: i32 = 2;
@@ -256,6 +264,24 @@ fn tray_data(window: HWND) -> NOTIFYICONDATAW {
     }
 }
 
+/// Adds the tray icon (or puts it back). False while the taskbar isn't ready.
+fn add_tray(window: HWND) -> bool {
+    let mut nid = tray_data(window);
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAY;
+    nid.hIcon = app_icon(false);
+    wide_into(&mut nid.szTip, "Archy");
+    let ok = unsafe {
+        // Clears a stale copy first, or NIM_ADD fails when the icon is still there.
+        let _ = Shell_NotifyIconW(NIM_DELETE, &tray_data(window));
+        Shell_NotifyIconW(NIM_ADD, &nid).as_bool()
+    };
+    if ok != TRAY_SHOWN.swap(ok, Ordering::Relaxed) {
+        log(if ok { "tray icon added" } else { "tray icon not added yet (taskbar not ready)" });
+    }
+    ok
+}
+
 fn set_tooltip(window: HWND, text: &str) {
     let mut nid = tray_data(window);
     nid.uFlags = NIF_TIP;
@@ -306,6 +332,7 @@ struct TrackVolumes {
     game: archy_audio::Volume,
     discord: archy_audio::Volume,
     mic: archy_audio::Volume,
+    mic_filter: archy_audio::MicFilter,
 }
 
 impl TrackVolumes {
@@ -316,10 +343,15 @@ impl TrackVolumes {
         self.game.store(game, Relaxed);
         self.discord.store(discord, Relaxed);
         self.mic.store(mic, Relaxed);
+        self.mic_filter.set(s.noise_suppression, s.mic_gate_db);
     }
 
     fn of(&self, main: &archy_audio::Volume) -> archy_audio::Volumes {
-        archy_audio::Volumes { main: main.clone(), mic: self.mic.clone() }
+        archy_audio::Volumes {
+            main: main.clone(),
+            mic: self.mic.clone(),
+            mic_filter: self.mic_filter.clone(),
+        }
     }
 }
 
@@ -1422,7 +1454,18 @@ fn with_app(f: impl FnOnce(&mut App)) {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
-        WM_TIMER if wp.0 == TIMER_WATCH => with_app(|a| a.watch()),
+        WM_TIMER if wp.0 == TIMER_WATCH => {
+            if !TRAY_SHOWN.load(Ordering::Relaxed) {
+                add_tray(hwnd);
+            }
+            with_app(|a| a.watch())
+        }
+        WM_SHOW_TRAY => {
+            add_tray(hwnd);
+        }
+        m if m != 0 && m == TASKBAR_CREATED.load(Ordering::Relaxed) => {
+            add_tray(hwnd);
+        }
         WM_VOICE => with_app(|a| a.heard(wp.0, lp.0)),
         WM_STARTED => with_app(|a| a.watch()),
         WM_HOTKEY => with_app(|a| match wp.0 as i32 {
@@ -1469,6 +1512,48 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 
 /// `archy.exe --mic-test <device|-> <seconds> <out.wav>`: records the mic to a
 /// WAV for the window to play back ("Test your mic"). Prints "ok" or the error.
+/// `archy.exe --mic-monitor <mic|-> <output|->`: plays the filtered mic to the
+/// output device so the user can set the gate by ear. Reads "<denoise 0|1>
+/// <gate dB>" lines on stdin, prints "<level dB> <open 0|1>" about every 50 ms,
+/// and stops when stdin closes (the window stopped it or went away).
+fn mic_monitor_main(args: &[String]) {
+    use std::io::{BufRead, Write};
+    let pick = |i: usize| args.get(i).filter(|d| d.as_str() != "-").cloned();
+    let (mic, output) = (pick(0), pick(1));
+    let filter = archy_audio::MicFilter::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let (filter, stop) = (filter.clone(), stop.clone());
+        std::thread::spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                let mut it = line.split_whitespace();
+                let denoise = it.next() == Some("1");
+                let gate = it.next().and_then(|g| g.parse().ok()).unwrap_or(archy_audio::GATE_OFF);
+                filter.set(denoise, gate);
+            }
+            stop.store(true, Ordering::Release);
+        });
+    }
+    let mut last = std::time::Instant::now();
+    let (mut peak, mut open) = (-100f32, false);
+    let flag = stop.clone();
+    let result = archy_audio::monitor_microphone(mic.as_deref(), output.as_deref(), filter, &stop, &mut |db, o| {
+        peak = peak.max(db);
+        open |= o;
+        if last.elapsed().as_millis() >= 50 {
+            let mut out = std::io::stdout().lock();
+            if writeln!(out, "{peak:.1} {}", open as u8).and_then(|_| out.flush()).is_err() {
+                flag.store(true, Ordering::Release);
+            }
+            (peak, open, last) = (-100.0, false, std::time::Instant::now());
+        }
+    });
+    if let Err(e) = result {
+        println!("error {}", e.message());
+    }
+}
+
 fn mic_test_main(args: &[String]) {
     let device = args.first().filter(|d| d.as_str() != "-").cloned();
     let seconds: f32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5.0f32).clamp(1.0, 15.0);
@@ -1547,6 +1632,10 @@ fn main() {
         voice::test_main();
         return;
     }
+    if args.first().map(String::as_str) == Some("--mic-monitor") {
+        mic_monitor_main(&args[1..]);
+        return;
+    }
     if args.first().map(String::as_str) == Some("--mic-test") {
         mic_test_main(&args[1..]);
         return;
@@ -1563,13 +1652,23 @@ fn main() {
         // One Archy at a time.
         let _mutex = CreateMutexW(None, true, w!("Local\\ArchyRecorder"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            // Already running: tell it to show its tray icon, in case it's missing.
+            if let Ok(running) = FindWindowW(w!("ArchyTray"), w!("ArchyTray")) {
+                let _ = PostMessageW(Some(running), WM_SHOW_TRAY, WPARAM(0), LPARAM(0));
+            }
             return;
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
-    if let Err(e) = archy_core::init_thread() {
-        log(&format!("start-up failed: {}", e.message()));
-        return;
+    // Right after sign-in Windows can still be starting up; try a few times.
+    let mut tries = 0;
+    while let Err(e) = archy_core::init_thread() {
+        tries += 1;
+        log(&format!("start-up failed (try {tries}): {}", e.message()));
+        if tries >= 5 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
     }
     let (settings, settings_error) = Settings::load();
     if settings.efficiency_mode {
@@ -1611,14 +1710,8 @@ fn main() {
     }
     .expect("create window");
 
-    let mut nid = tray_data(window);
-    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    nid.uCallbackMessage = WM_TRAY;
-    nid.hIcon = app_icon(false);
-    wide_into(&mut nid.szTip, "Archy: waiting for a game");
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
-    }
+    TASKBAR_CREATED.store(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) }, Ordering::Relaxed);
+    add_tray(window);
 
     let app = App {
         window,

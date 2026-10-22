@@ -75,3 +75,91 @@ pub fn listen_microphone(
     }
     result
 }
+
+/// Plays microphone `mic` through output device `output` (`None` = defaults)
+/// with `filter` applied, so the user hears what clips will get, until `stop`.
+/// `on_level` gets the mic level (dBFS) and whether the gate is open, about
+/// every 10 ms.
+pub fn monitor_microphone(
+    mic: Option<&str>,
+    output: Option<&str>,
+    filter: crate::MicFilter,
+    stop: &AtomicBool,
+    on_level: &mut dyn FnMut(f32, bool),
+) -> Result<()> {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    const RATE: u32 = crate::SAMPLE_RATE;
+    // Never let more than 60 ms queue up, or the user hears themselves late.
+    const MAX_QUEUE: usize = RATE as usize * 60 / 1000;
+    let queue = Arc::new(Mutex::new(VecDeque::<i16>::new()));
+    let render_stop = Arc::new(AtomicBool::new(false));
+    let player = {
+        let (queue, render_stop) = (queue.clone(), render_stop.clone());
+        let output = output.map(str::to_owned);
+        std::thread::spawn(move || play(output.as_deref(), RATE, &queue, &render_stop))
+    };
+    let mut f = crate::Filter::new(filter);
+    let mut buf: Vec<i16> = Vec::new();
+    let result = listen_microphone(mic, RATE, stop, &mut |pcm| {
+        buf.clear();
+        buf.extend_from_slice(pcm);
+        f.process(&mut buf, 1);
+        if f.active() {
+            on_level(f.level_db, f.open);
+        } else {
+            on_level(crate::denoise::level_db(pcm), true);
+        }
+        let mut q = queue.lock().unwrap();
+        q.extend(buf.iter().copied());
+        let extra = q.len().saturating_sub(MAX_QUEUE);
+        q.drain(..extra);
+    });
+    render_stop.store(true, Ordering::Release);
+    let played = player.join().unwrap_or(Ok(()));
+    result.and(played)
+}
+
+/// Feeds mono 16-bit audio from `queue` to an output device until `stop`.
+fn play(
+    device: Option<&str>,
+    rate: u32,
+    queue: &std::sync::Mutex<std::collections::VecDeque<i16>>,
+    stop: &AtomicBool,
+) -> Result<()> {
+    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
+    let client = device_client(eRender, device)?;
+    let format = WAVEFORMATEX {
+        wFormatTag: WAVE_FORMAT_PCM as u16,
+        nChannels: 1,
+        nSamplesPerSec: rate,
+        nAvgBytesPerSec: rate * 2,
+        nBlockAlign: 2,
+        wBitsPerSample: 16,
+        cbSize: 0,
+    };
+    let flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 1_000_000, 0, &format, None)? };
+    let render: IAudioRenderClient = unsafe { client.GetService()? };
+    let size = unsafe { client.GetBufferSize()? };
+    unsafe { client.Start()? };
+    while !stop.load(Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let free = size - unsafe { client.GetCurrentPadding()? };
+        let mut q = queue.lock().unwrap();
+        let n = (free as usize).min(q.len());
+        if n == 0 {
+            continue;
+        }
+        let data = unsafe { render.GetBuffer(n as u32)? } as *mut i16;
+        let out = unsafe { std::slice::from_raw_parts_mut(data, n) };
+        for (o, s) in out.iter_mut().zip(q.drain(..n)) {
+            *o = s;
+        }
+        unsafe { render.ReleaseBuffer(n as u32, 0)? };
+    }
+    unsafe {
+        let _ = client.Stop();
+    }
+    Ok(())
+}

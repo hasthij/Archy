@@ -40,6 +40,7 @@ const SETTINGS_PAGES = ["recording", "games", "audio", "hotkeys", "storage", "ap
 
 function show(name) {
   view = name;
+  if (name !== "audio") stopMonitor();
   const inSettings = SETTINGS_PAGES.includes(name);
   document.querySelectorAll(".settings-nav .nav").forEach((b) => b.setAttribute("aria-current", b.dataset.view === name ? "page" : "false"));
   // The rail lights its own button, or the gear for any other settings page.
@@ -74,7 +75,7 @@ async function refreshStatus() {
     box.append(
       el("span", { class: "dot warn" }),
       el("b", { text: "Recorder isn't running" }),
-      el("button", { class: "btn primary", text: "Start Archy", onclick: async () => { await invoke("start_recorder").catch((e) => toast(String(e))); setTimeout(refreshStatus, 1500); } }));
+      el("button", { class: "btn primary", text: "Start in tray", onclick: startInTray }));
     return;
   }
   const states = {
@@ -84,7 +85,20 @@ async function refreshStatus() {
   };
   const [dot, title, detail, kind] = states[s.state] || ["dot", s.state, "", ""];
   if (kind) box.classList.add(kind);
-  box.append(el("span", { class: dot }), el("b", { text: title }), detail ? el("span", { class: "detail", text: detail }) : null);
+  box.append(el("span", { class: dot }), el("b", { text: title }), detail ? el("span", { class: "detail", text: detail }) : null,
+    // Running but no icon (e.g. Windows started it before the taskbar was ready): puts it back.
+    el("button", { class: "btn", text: "Show in tray", title: "Puts the Archy icon back in the tray if it's missing", onclick: startInTray }));
+}
+
+// Starts the recorder in the tray (or, if it's already running, makes it show
+// its tray icon again) and keeps it there by starting it with Windows too.
+async function startInTray() {
+  try {
+    await invoke("start_recorder");
+    if (settings && !settings.start_with_windows) await save({ start_with_windows: true }, "Archy is in the tray and will start with Windows");
+    else toast("Archy is in the tray");
+  } catch (e) { toast(String(e)); }
+  setTimeout(refreshStatus, 1500);
 }
 
 // ---------- which game to record ----------
@@ -818,6 +832,7 @@ function renderAudio() {
     soundMixCard(),
     pushToTalkCard(),
     micTestCard(),
+    micCleanCard(),
     ...(settings.audio_mode === "separate" ? [] : [onOff("record_stems", "Keep each source as its own track", "In One volume mode, also record the game, Discord and your mic as separate tracks, so the editor can rebalance them after the clip is saved.",
       "Fixing the mix later in the editor.", "The lightest recording: one audio track (one audio encoder instead of four).")]),
     settingCard({ key: "audio_kbps", name: "Audio quality", rec: 160,
@@ -895,6 +910,75 @@ function micTestCard() {
     el("div", { class: "about" }, el("h3", { text: "Mic test" }), status),
     el("div", { class: "pick" }, el("div", { class: "field" }, btn), player));
 }
+
+// ---------- noise suppression + gate ----------
+// The "listen to yourself" monitor survives re-renders (saving re-renders the page).
+let monitoring = false;
+const gateText = (v) => v <= -100 ? "Off" : `${v} dB`;
+function micCleanCard() {
+  const gate = settings.mic_gate_db ?? -100;
+  const pos = (db) => `${Math.max(0, Math.min(100, db + 100))}%`;
+  const fill = el("div", { id: "mic-meter-fill", class: "meter-fill" });
+  const mark = el("div", { class: "meter-mark", style: `left:${pos(gate)}`, hidden: gate <= -100 ? "" : null });
+  const meter = el("div", { class: "meter", "aria-hidden": "true" }, fill, mark);
+  const out = el("span", { class: "mix-val", text: gateText(gate) });
+  const range = el("input", { type: "range", min: -100, max: 0, step: 1, value: gate, "aria-label": "Mic gate threshold" });
+  const push = (g) => { if (monitoring) invoke("set_mic_monitor", { denoise: !!settings.noise_suppression, gate: g }).catch(() => {}); };
+  range.addEventListener("input", () => {
+    const g = Number(range.value);
+    out.textContent = gateText(g);
+    mark.hidden = g <= -100;
+    mark.style.left = pos(g);
+    push(g);
+  });
+  range.addEventListener("change", () => save({ mic_gate_db: Number(range.value) }, `Mic gate: ${gateText(Number(range.value))}`));
+  range.addEventListener("dblclick", () => save({ mic_gate_db: -100 }, "Mic gate: off"));
+  const status = el("p", { id: "mic-monitor-status", class: "sub", text: monitoring
+    ? "You're hearing your mic as clips will record it. Talk, then drag the slider until the bar turns blue only when you speak."
+    : "Hear your own mic, cleaned up, through the speakers / headphones picked above. Use headphones, or speakers will echo." });
+  const listen = el("button", { class: "btn" + (monitoring ? "" : " primary"), text: monitoring ? "Stop listening" : "Listen to yourself" });
+  listen.addEventListener("click", async () => {
+    if (monitoring) { stopMonitor(); renderAll(); return; }
+    try {
+      await invoke("start_mic_monitor", { mic: settings.mic_device || "", output: settings.output_device || "",
+        denoise: !!settings.noise_suppression, gate: Number(range.value) });
+      monitoring = true;
+    } catch (e) { toast("Couldn't start listening: " + e); }
+    renderAll();
+  });
+  push(gate);
+  const on = !!settings.noise_suppression;
+  return el("div", { class: "card" },
+    el("div", { class: "mix-head" },
+      el("div", {}, el("h3", { text: "Clean up your mic" }),
+        el("p", { class: "sub", style: "margin:0", text: "Noise suppression removes fans, keyboards and hum. The gate mutes your mic while you're not talking, like Discord's input sensitivity. Both apply to recordings at once." })),
+      el("div", { class: "seg", role: "group", "aria-label": "Noise suppression" },
+        [[true, "Noise suppression on"], [false, "Off"]].map(([v, label]) => el("button", {
+          "aria-pressed": String(on === v),
+          onclick: () => save({ noise_suppression: v }, v ? "Noise suppression on" : "Noise suppression off"),
+        }, label)))),
+    el("p", { class: "sub", text: on
+      ? "Best for: noisy rooms and loud keyboards. Costs under 1% of one CPU core (measured 6 ms per second of audio), never the GPU."
+      : "Best for: quiet rooms or a mic that already cleans itself up (e.g. NVIDIA Broadcast). Costs nothing when off." }),
+    el("div", { class: "mix-row" },
+      el("div", {}, el("b", { text: "Gate threshold" }), el("span", { class: "sub", text: "Sounds quieter than this are muted. Off records everything." })),
+      el("div", {}, meter, range), out),
+    el("div", { class: "field", style: "margin-top:12px" }, listen),
+    status);
+}
+function stopMonitor() {
+  if (!monitoring) return;
+  monitoring = false;
+  invoke("stop_mic_monitor").catch(() => {});
+}
+tauri?.event.listen("mic-level", (e) => {
+  const p = e.payload || {};
+  if (p.error) { stopMonitor(); toast("Listening stopped: " + p.error); renderAll(); return; }
+  const fill = document.getElementById("mic-meter-fill");
+  if (!fill) return;
+  fill.style.width = `${Math.max(0, Math.min(100, p.db + 100))}%`;
+  fill.classList.toggle("closed", !p.open);
+}).catch(() => {});
 
 function soundMixCard() {
   const separate = settings.audio_mode === "separate";

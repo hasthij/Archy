@@ -108,7 +108,12 @@ fn open(client: &IAudioClient, loopback: bool) -> Result<IAudioCaptureClient> {
     }
 }
 
-fn drain(capture: &IAudioCaptureClient, into: &mut Timeline) -> Result<()> {
+fn drain(
+    capture: &IAudioCaptureClient,
+    into: &mut Timeline,
+    mut filter: Option<&mut crate::denoise::Filter>,
+) -> Result<()> {
+    let mut filtered: Vec<i16> = Vec::new();
     loop {
         let pending = unsafe { capture.GetNextPacketSize()? };
         if pending == 0 {
@@ -123,9 +128,16 @@ fn drain(capture: &IAudioCaptureClient, into: &mut Timeline) -> Result<()> {
         if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data.is_null() {
             into.push(qpc as i64, &vec![0i16; samples]);
         } else {
-            into.push(qpc as i64, unsafe {
-                std::slice::from_raw_parts(data as *const i16, samples)
-            });
+            let pcm = unsafe { std::slice::from_raw_parts(data as *const i16, samples) };
+            match filter.as_deref_mut().filter(|f| f.active()) {
+                Some(f) => {
+                    filtered.clear();
+                    filtered.extend_from_slice(pcm);
+                    f.process(&mut filtered, CHANNELS as usize);
+                    into.push(qpc as i64, &filtered);
+                }
+                None => into.push(qpc as i64, pcm),
+            }
         }
         unsafe { capture.ReleaseBuffer(frames)? };
     }
@@ -150,6 +162,7 @@ pub fn run(
     let _ = ready.send(Ok(encoder.info.clone()));
 
     let (mut a, mut b) = (Timeline::default(), Timeline::default());
+    let mut mic_filter = crate::denoise::Filter::new(volumes.mic_filter.clone());
     let mut out_start: Option<i64> = None;
     let mut out_frames: i64 = 0;
     let mut mixed = vec![0i32; BLOCK * CHANNELS as usize];
@@ -165,8 +178,8 @@ pub fn run(
     while !stop.load(Ordering::Acquire) {
         // Two devices without a shared event: a 10 ms poll is cheap and keeps latency low.
         std::thread::sleep(Duration::from_millis(10));
-        drain(&sys, &mut a)?;
-        drain(&mic_cap, &mut b)?;
+        drain(&sys, &mut a, None)?;
+        drain(&mic_cap, &mut b, Some(&mut mic_filter))?;
         let ends = [a.end(), b.end()];
         let Some(latest) = ends.iter().flatten().copied().max() else {
             continue;

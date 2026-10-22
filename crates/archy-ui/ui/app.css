@@ -495,6 +495,10 @@ textarea { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid
 .mix-row b { display: block; }
 .mix-row .sub { margin: 0; font-size: 12px; }
 .mix-row input[type="range"] { width: 100%; accent-color: var(--accent); }
+.meter { position: relative; height: 8px; border-radius: 4px; background: var(--line-soft); overflow: hidden; margin-bottom: 4px; }
+.meter-fill { height: 100%; width: 0; background: var(--accent); transition: width 60ms linear; }
+.meter-fill.closed { background: var(--muted, #888); }
+.meter-mark { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text, #fff); }
 .mix-row.off { opacity: 0.45; }
 .mix-row.off input[type="range"] { cursor: not-allowed; }
 .mix-val { font: 600 13px var(--mono); text-align: right; }
