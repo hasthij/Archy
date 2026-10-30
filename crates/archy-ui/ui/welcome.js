@@ -9,7 +9,7 @@
 
   const TOUR = [
     { target: '.rail-btn[data-view="clips"]', title: "Your clips", text: "Every clip lands here, newest first. Click one to watch it; Edit trims it and adds text, images, video or music; GIF makes a GIF; Copy puts it on your clipboard for Discord." },
-    { target: "#game-btn", title: "Which game", text: "Automatic records the game you're playing. Pick a game here to always record that one, even in a window, and switch on “Record the whole screen” to include overlays." },
+    { target: "#game-btn", title: "Which game", text: "Automatic records the game you're playing. Pick a game here to always record that one, even in a window, Or choose a whole screen at the top of the menu: it records all the time, no game needed." },
     { target: '.rail-btn[data-group="settings"]', title: "Settings", text: "Quality, frame rate, games, hotkeys, sound and voice. Every option says what it's best for." },
     { target: "#theme-btn", title: "Light or dark", text: "One click switches the look. More colours are in Settings › Appearance." },
     { target: "#update-btn", title: "Updates", text: "Archy checks for new versions and asks before installing. A dot here means one is ready." },

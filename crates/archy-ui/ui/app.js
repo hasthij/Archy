@@ -122,8 +122,9 @@ async function startInTray() {
 // ---------- which game to record ----------
 // Automatic = the game being played; or a game the user picked from the open
 // apps, recorded whether or not it's in front (settings.record_target).
-const gameLabel = () => (settings?.record_target ? `Game: ${settings.record_target.replace(/\.exe$/i, "")}` : "Game: Automatic")
-  + (settings?.capture === "screen" ? " · whole screen" : "");
+const screenName = () => (monitors.find((m) => m.id === settings.capture_monitor)?.label || "Whole screen").split(" · ")[0];
+const gameLabel = () => settings?.capture === "screen" ? `Record: ${monitors.length > 1 ? screenName() : "whole screen"}`
+  : settings?.record_target ? `Game: ${settings.record_target.replace(/\.exe$/i, "")}` : "Game: Automatic";
 
 function closeGameMenu() {
   $("#game-menu").hidden = true;
@@ -138,26 +139,23 @@ async function openGameMenu() {
   $("#game-btn").setAttribute("aria-expanded", "true");
   let apps = [];
   try { apps = await invoke("running_apps"); } catch {}
+  await loadMonitors();
   const listed = (exe) => settings.games.some((g) => g.toLowerCase() === exe.toLowerCase());
   // Your listed games first, then everything else that's open.
   apps.sort((a, b) => Number(listed(b.exe)) - Number(listed(a.exe)) || a.title.localeCompare(b.title));
+  const whole = settings.capture === "screen";
   const current = (settings.record_target || "").toLowerCase();
   const item = (label, sub, exe) => el("button", {
-    class: "game-item", role: "menuitemradio", "aria-checked": String(current === exe.toLowerCase()),
-    onclick: () => { closeGameMenu(); save({ record_target: exe }, exe ? `Recording ${label}` : "Back to automatic"); },
+    class: "game-item", role: "menuitemradio", "aria-checked": String(!whole && current === exe.toLowerCase()),
+    onclick: () => { closeGameMenu(); save({ record_target: exe, capture: "window" }, exe ? `Recording ${label}` : "Back to automatic"); },
   }, el("b", { text: label }), el("span", { text: sub }));
-  // The one place to switch between the game's window and the whole screen.
-  const whole = settings.capture === "screen";
-  const screenSwitch = el("button", {
-    class: "screen-switch", role: "switch", "aria-checked": String(whole),
-    onclick: () => {
-      const next = whole ? "window" : "screen";
-      closeGameMenu();
-      save({ capture: next }, next === "screen" ? "Recording the whole screen" : "Recording just the game window");
-    },
-  }, el("span", { class: "track" }, el("i")),
-    el("span", {}, el("b", { text: "Record the whole screen" }),
-      el("span", { class: "sub", text: whole ? "On: overlays and popups show up in clips too." : "Off: just the game window, no popups." })));
+  // Whole screen: records all the time, no game needed (overlays and popups show in clips).
+  const screens = (monitors.length ? monitors : [{ id: "", label: "Whole screen" }]).map((m) => el("button", {
+    class: "game-item", role: "menuitemradio",
+    "aria-checked": String(whole && (settings.capture_monitor || "") === m.id),
+    onclick: () => { closeGameMenu(); save({ capture: "screen", capture_monitor: m.id, record_target: "" }, `Recording ${m.label}`); },
+  }, el("b", { text: monitors.length > 1 ? `Whole screen: ${m.label.split(" · ")[0]}` : "Record the whole screen" }),
+    el("span", { text: `${m.label} · records all the time, no game needed` })));
   const find = el("input", { class: "input game-find", type: "search", placeholder: "Search apps…", "aria-label": "Search open apps" });
   const list = el("div", {});
   const fill = () => {
@@ -170,7 +168,7 @@ async function openGameMenu() {
   };
   find.addEventListener("input", fill);
   fill();
-  menu.replaceChildren(screenSwitch, el("div", { class: "game-menu-head", text: "Record which game?" }), find, list);
+  menu.replaceChildren(el("div", { class: "game-menu-head", text: "Whole screen" }), ...screens, el("div", { class: "game-menu-head", text: "Or record one game" }), find, list);
 }
 $("#game-btn").addEventListener("click", openGameMenu);
 document.addEventListener("click", (e) => { if (!e.target.closest(".pick-game")) closeGameMenu(); });
@@ -557,8 +555,7 @@ const RECORDING = () => [
 ];
 
 function renderRecording() {
-  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), screenPicker(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_SESSION()), settingCard(RECORDING_LIMIT));
-  loadMonitors();
+  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_SESSION()), settingCard(RECORDING_LIMIT));
   loadGpus();
 }
 
@@ -657,27 +654,10 @@ function gpuPicker() {
       el("p", { class: "sub", text: gpus === null ? "Looking for GPUs…" : "If the chosen GPU can't record (driver problem, unplugged), Archy falls back to Automatic so you never miss a clip." })));
 }
 
-// ---------- screen picker (Whole screen mode) ----------
+// ---------- screens (listed in the Game menu) ----------
 let monitors = [];
 async function loadMonitors() {
   try { monitors = await invoke("monitors"); } catch { monitors = []; }
-  const box = $("#screen-picker");
-  if (box) box.replaceWith(screenPicker());
-}
-
-function screenPicker() {
-  if (settings.capture !== "screen") return el("div", { id: "screen-picker" });
-  const select = el("select", { class: "input", "aria-label": "Screen to record" },
-    el("option", { value: "", text: "The screen the game is on" }),
-    monitors.map((m) => el("option", { value: m.id, text: m.label })));
-  select.value = monitors.some((m) => m.id === settings.capture_monitor) ? settings.capture_monitor : "";
-  select.addEventListener("change", () => save({ capture_monitor: select.value }, `Recording: ${select.selectedOptions[0].text}`));
-  return el("div", { class: "card setting", id: "screen-picker" },
-    el("div", { class: "about" }, el("h3", { text: "Which screen" }),
-      el("p", { text: "With \u201cRecord the whole screen\u201d on (the Game button at the top), Archy records this screen while a game is open." })),
-    el("div", { class: "pick" },
-      el("div", { class: "field" }, select, el("button", { class: "btn", text: "Refresh", onclick: loadMonitors })),
-      el("p", { class: "sub", text: "If the screen is unplugged, Archy records the screen the game is on instead." })));
 }
 
 /// A list of program file names with "pick from open apps" and "type a name".
