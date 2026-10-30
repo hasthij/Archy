@@ -26,12 +26,12 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateMutexW, GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Shell::{
-    FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, IShellItem, SHCreateItemFromParsingName, SHFileOperationW,
-    FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FO_DELETE,
-    SHFILEOPSTRUCTW, SIGDN_FILESYSPATH,
+    FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, IShellItem, SHCreateItemFromParsingName,
+    FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowW, GetWindow, GetWindowTextLengthW, GetWindowTextW,
@@ -86,7 +86,16 @@ fn process_alive(pid: u32) -> bool {
             return false;
         };
         let mut code = 0u32;
-        let ok = GetExitCodeProcess(h, &mut code).is_ok() && code == STILL_ACTIVE.0 as u32;
+        let mut ok = GetExitCodeProcess(h, &mut code).is_ok() && code == STILL_ACTIVE.0 as u32;
+        if ok {
+            // A recycled pid belongs to some other program: it must still be archy.exe.
+            let mut buf = [0u16; 520];
+            let mut len = buf.len() as u32;
+            if QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok() {
+                let name = String::from_utf16_lossy(&buf[..len as usize]).to_ascii_lowercase();
+                ok = name.ends_with("\\archy.exe");
+            }
+        }
         let _ = CloseHandle(h);
         ok
     }
@@ -94,7 +103,7 @@ fn process_alive(pid: u32) -> bool {
 
 /// Lets the page play videos from the clips folder (and nothing else on disk).
 fn allow_folder(app: &AppHandle, folder: &Path) {
-    let _ = app.asset_protocol_scope().allow_directory(folder, false);
+    let _ = app.asset_protocol_scope().allow_directory(folder, true);
 }
 
 #[tauri::command]
@@ -238,7 +247,11 @@ fn start_mic_monitor(app: AppHandle, mic: String, output: String, denoise: bool,
         .map_err(|e| format!("{}: {e}", exe.display()))?;
     let stdout = child.stdout.take().ok_or("no output from the mic monitor")?;
     let mut input = child.stdin.take().ok_or("no input to the mic monitor")?;
-    writeln!(input, "{} {gate}", denoise as u8).map_err(|e| e.to_string())?;
+    if let Err(e) = writeln!(input, "{} {gate}", denoise as u8) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e.to_string());
+    }
     *MIC_MONITOR.lock().map_err(|e| e.to_string())? = Some((child, input));
     std::thread::spawn(move || {
         for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -320,26 +333,22 @@ fn reveal_clip(path: String) -> Result<(), String> {
 
 /// Moves a clip to the Recycle Bin (recoverable), never deletes it outright.
 #[tauri::command]
-fn recycle_clip(path: String) -> Result<(), String> {
+async fn recycle_clip(path: String) -> Result<(), String> {
     let p = clip_path(&path)?;
-    let from: Vec<u16> = p
-        .as_os_str()
-        .to_string_lossy()
-        .encode_utf16()
-        .chain([0, 0])
-        .collect();
-    let mut op = SHFILEOPSTRUCTW {
-        wFunc: FO_DELETE,
-        pFrom: PCWSTR(from.as_ptr()),
-        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT).0 as u16,
-        ..Default::default()
-    };
-    let r = unsafe { SHFileOperationW(&mut op) };
-    if r == 0 {
-        Ok(())
-    } else {
-        Err(format!("could not move to Recycle Bin (error {r})"))
-    }
+    // Off the UI thread; retry briefly in case WebView2/ffmpeg still holds the file.
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut r = archy_core::files::recycle(&p);
+        for _ in 0..4 {
+            if r.is_ok() || !p.exists() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            r = archy_core::files::recycle(&p);
+        }
+        r
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -663,7 +672,8 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
                 out.push(v);
                 i += 3;
                 continue;
@@ -740,6 +750,23 @@ fn running_apps() -> Vec<AppView> {
         let _ = EnumWindows(Some(visit), LPARAM(&mut apps as *mut _ as isize));
     }
     apps.sort_by_key(|a| a.title.to_lowercase());
+    // Tray and overlay apps (screenshot tools, launchers) often have no normal window,
+    // so they're added after the windowed ones, marked as background.
+    const NOISE: &[&str] = &[
+        "svchost.exe", "system", "registry", "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe", "services.exe",
+        "lsass.exe", "fontdrvhost.exe", "dwm.exe", "conhost.exe", "dllhost.exe", "taskhostw.exe", "sihost.exe",
+        "ctfmon.exe", "runtimebroker.exe", "searchhost.exe", "audiodg.exe", "spoolsv.exe", "wudfhost.exe",
+        "backgroundtaskhost.exe", "securityhealthservice.exe", "msmpeng.exe", "searchindexer.exe", "cmd.exe",
+    ];
+    let mut bg: Vec<AppView> = archy_core::process::all_names()
+        .into_iter()
+        .filter(|n| !NOISE.iter().any(|x| x.eq_ignore_ascii_case(n)) && !apps.iter().any(|a| a.exe.eq_ignore_ascii_case(n)))
+        .filter(|n| !["explorer.exe", "archy.exe", "archy-ui.exe"].iter().any(|x| x.eq_ignore_ascii_case(n)))
+        .map(|exe| AppView { title: format!("{} (background)", exe.trim_end_matches(".exe")), exe })
+        .collect();
+    bg.sort_by_key(|a| a.exe.to_lowercase());
+    bg.dedup_by(|a, b| a.exe.eq_ignore_ascii_case(&b.exe));
+    apps.extend(bg);
     apps
 }
 
@@ -863,6 +890,7 @@ async fn voice_child(
         if let Ok(mut input) = VOICE_INPUT.lock() {
             *input = child.stdin.take();
         }
+        let id = child.id();
         if let Ok(mut c) = CALIBRATION.lock() {
             if let Some(mut old) = c.replace(child) {
                 let _ = old.kill();
@@ -875,7 +903,11 @@ async fn voice_child(
                 let _ = progress.send(v);
             }
         }
-        let stopped = match CALIBRATION.lock().ok().and_then(|mut c| c.take()) {
+        // Only reap our own child: a newer run may have replaced (and killed) it.
+        let mine = CALIBRATION.lock().ok().and_then(|mut c| {
+            if c.as_ref().is_some_and(|ch| ch.id() == id) { c.take() } else { None }
+        });
+        let stopped = match mine {
             Some(mut child) => !matches!(child.wait(), Ok(s) if s.success()),
             None => true,
         };
@@ -904,11 +936,19 @@ fn main() {
         // Closing Archy mid-export would throw the export away: ask the page to
         // explain instead (it offers Cancel export).
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if editor::BUSY.load(std::sync::atomic::Ordering::Acquire) {
-                    api.prevent_close();
-                    let _ = window.emit("export-busy", ());
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if editor::BUSY.load(std::sync::atomic::Ordering::Acquire) {
+                        api.prevent_close();
+                        let _ = window.emit("export-busy", ());
+                    }
                 }
+                // Don't leave the mic monitor or a calibration running unseen.
+                tauri::WindowEvent::Destroyed => {
+                    stop_mic_monitor();
+                    stop_calibration();
+                }
+                _ => {}
             }
         })
         .setup(|app| {

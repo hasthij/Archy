@@ -46,10 +46,12 @@
 
   <nav class="settings-nav" id="settings-nav" aria-label="Settings" hidden>
     <h1>Settings</h1>
+    <button class="nav-search" id="settings-search" type="button" aria-label="Search settings"><span>Search settings…</span><kbd>Ctrl K</kbd></button>
     <button class="nav" data-view="recording">Recording</button>
     <button class="nav" data-view="games">Games</button>
     <button class="nav" data-view="audio">Audio &amp; voice</button>
     <button class="nav" data-view="hotkeys">Hotkeys</button>
+    <button class="nav" data-view="sounds">Sounds &amp; notifications</button>
     <button class="nav" data-view="storage">Storage &amp; sharing</button>
     <button class="nav" data-view="appearance">Appearance</button>
     <button class="nav" data-view="general">General</button>
@@ -113,6 +115,11 @@
         <div id="appearance-settings"></div>
       </section>
 
+      <section class="view" id="view-sounds" hidden>
+        <header class="head"><div><h1>Sounds &amp; notifications</h1><p class="sub">What Archy plays and shows for each moment. Try any sound with Play.</p></div></header>
+        <div id="sounds-settings"></div>
+      </section>
+
       <section class="view" id="view-general" hidden>
         <header class="head"><div><h1>General</h1><p class="sub">Notifications, sounds, updates and how Archy starts.</p></div></header>
         <div id="general-settings"></div>
@@ -141,6 +148,7 @@
 
 <div class="editor" id="editor" hidden></div>
 
+<div class="layout-switch" id="layout-switch" role="group" aria-label="Clip layout"></div>
 <div class="toast" id="toast" role="status" hidden></div>
 </body>
 </html>

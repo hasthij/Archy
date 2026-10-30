@@ -762,7 +762,7 @@ impl VplEncoder {
                 if !self.in_flight.is_empty() {
                     self.finish_oldest(on_packet, stats)?;
                 } else {
-                    std::thread::sleep(Duration::from_millis(1));
+                    crate::nap(Duration::from_millis(1));
                 }
                 continue;
             }

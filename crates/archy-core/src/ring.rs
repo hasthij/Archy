@@ -21,6 +21,10 @@ pub struct ReplayBuffer {
     /// How much history to keep (100 ns units).
     keep: i64,
     bytes: usize,
+    /// Sequence number of the front packet, and (sequence, time) of every
+    /// keyframe held, so trimming never scans the packets.
+    base: u64,
+    keys: VecDeque<(u64, i64)>,
 }
 
 impl ReplayBuffer {
@@ -29,6 +33,8 @@ impl ReplayBuffer {
             packets: VecDeque::new(),
             keep: seconds as i64 * 10_000_000,
             bytes: 0,
+            base: 0,
+            keys: VecDeque::new(),
         }
     }
 
@@ -47,16 +53,24 @@ impl ReplayBuffer {
     pub fn push(&mut self, packet: StoredPacket) {
         let latest = packet.time;
         self.bytes += packet.data.len();
+        if packet.keyframe {
+            self.keys.push_back((self.base + self.packets.len() as u64, packet.time));
+        }
         self.packets.push_back(packet);
         // Drop whole keyframe intervals from the front, but only while the next
         // keyframe still starts early enough to cover the full history window.
-        while let Some(next_key) = self.packets.iter().skip(1).position(|p| p.keyframe) {
-            let next_key = next_key + 1;
-            if self.packets[next_key].time > latest - self.keep {
+        loop {
+            let skip = usize::from(self.keys.front().is_some_and(|k| k.0 == self.base));
+            let Some(&(seq, time)) = self.keys.get(skip) else { break };
+            if time > latest - self.keep {
                 break;
             }
-            for p in self.packets.drain(..next_key) {
+            for p in self.packets.drain(..(seq - self.base) as usize) {
                 self.bytes -= p.data.len();
+            }
+            self.base = seq;
+            if skip == 1 {
+                self.keys.pop_front(); // the old front keyframe went with the drain
             }
         }
     }
