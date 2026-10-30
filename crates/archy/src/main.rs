@@ -757,6 +757,15 @@ impl App {
         // A game the user picked is recorded whenever it's open (not minimized),
         // in front or not; otherwise, the game being played.
         let fg = match picked {
+            // Whole-screen mode needs no game: record the screen all the time.
+            // The desktop window stands in for the game's, and never goes away.
+            _ if self.settings.capture.eq_ignore_ascii_case("screen") => watch::Foreground {
+                hwnd: unsafe { GetDesktopWindow() },
+                exe: "Screen".into(),
+                pid: 0,
+                fullscreen: true,
+                minimized: false,
+            },
             Some(w) if !w.minimized => w,
             Some(_) => return, // the picked game is minimized: wait for it
             None => {
