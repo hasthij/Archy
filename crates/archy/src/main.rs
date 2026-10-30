@@ -629,7 +629,7 @@ impl App {
         }
         log(&format!("voice: heard \"{}\"", phrase.text));
         if self.settings.sound_on_voice {
-            play(VOICE_WAV, self.settings.voice_sound_volume);
+            play_for(&self.settings, &self.settings.tone_voice, VOICE_WAV, self.settings.voice_sound_volume);
         }
         self.save(phrase.seconds);
     }
@@ -1009,7 +1009,7 @@ impl App {
     /// A clip hotkey: a ping right away (the save itself takes a moment), then save.
     fn hotkey_save(&self, seconds: u32) {
         if self.settings.sound_on_hotkey && (self.session.is_some() || self.previous.is_some()) {
-            play(VOICE_WAV, self.settings.voice_sound_volume);
+            play_for(&self.settings, &self.settings.tone_hotkey, VOICE_WAV, self.settings.voice_sound_volume);
         }
         self.save(seconds);
     }
@@ -1070,9 +1070,9 @@ impl App {
         // Two different sounds, so you can tell without looking: the voice ping
         // when the session starts, the clip-saved chime when it stops.
         if self.session_wanted {
-            play(VOICE_WAV, self.settings.voice_sound_volume.max(30));
+            play_for(&self.settings, &self.settings.tone_start, VOICE_WAV, self.settings.voice_sound_volume.max(30));
         } else {
-            play(CLIP_WAV, self.settings.clip_sound_volume.max(30));
+            play_for(&self.settings, &self.settings.tone_stop, CLIP_WAV, self.settings.clip_sound_volume.max(30));
         }
         if self.session_wanted {
             if self.session.is_some() {
@@ -1092,7 +1092,7 @@ impl App {
             return;
         };
         if self.settings.sound_on_hotkey {
-            play(VOICE_WAV, self.settings.voice_sound_volume);
+            play_for(&self.settings, &self.settings.tone_hotkey, VOICE_WAV, self.settings.voice_sound_volume);
         }
         let recorder = s.recorder.clone();
         let folder = self.settings.save_folder.clone();
@@ -1174,6 +1174,7 @@ impl App {
         let show = self.settings.notify_on_save;
         let chime = self.settings.sound_on_save;
         let chime_volume = self.settings.clip_sound_volume;
+        let chime_tone = self.settings.custom_sounds.then(|| self.settings.tone_clip.clone());
         let limit_gb = self.settings.clips_max_gb;
         let saving = self.saving.clone();
         let queued = self.queued.clone();
@@ -1205,7 +1206,10 @@ impl App {
                 if let Some(c) = saved.first() {
                     let copied = copy && archy_core::clipboard::copy_file(&c.path);
                     if chime {
-                        play(CLIP_WAV, chime_volume);
+                        match chime_tone.as_deref().and_then(|t| tone_bytes(t, chime_volume)) {
+                            Some(w) => play_bytes(w, chime_volume),
+                            None => play(CLIP_WAV, chime_volume),
+                        }
                     }
                     if show {
                         let mb = c.bytes as f64 / 1e6;
@@ -1327,12 +1331,45 @@ impl App {
 static CLIP_WAV: &[u8] = include_bytes!("../../../assets/clip.wav");
 static VOICE_WAV: &[u8] = include_bytes!("../../../assets/voice.wav");
 
+/// Plays the event's sound: the tone picked in Settings when "use my chosen
+/// sounds" is on, otherwise Archy's built-in `fallback`.
+fn play_for(settings: &Settings, tone: &str, fallback: &'static [u8], volume: u32) {
+    if settings.custom_sounds {
+        if let Some(w) = tone_bytes(tone, volume) {
+            return play_bytes(w, volume);
+        }
+    }
+    play(fallback, volume);
+}
+
+/// A synthesised tone at `volume`, built once and kept (PlaySound reads it while playing).
+fn tone_bytes(name: &str, volume: u32) -> Option<&'static [u8]> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<(String, u32), &'static [u8]>>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let map = cache.get_or_insert_with(HashMap::new);
+    if let Some(&d) = map.get(&(name.to_string(), volume)) {
+        return Some(d);
+    }
+    let leaked: &'static [u8] = Box::leak(archy_core::tones::wav(name, volume)?.into_boxed_slice());
+    map.insert((name.to_string(), volume), leaked);
+    Some(leaked)
+}
+
 /// Plays one of Archy's short sounds without blocking, at `volume` percent (0-200).
 fn play(sound: &'static [u8], volume: u32) {
     if volume == 0 {
         return;
     }
-    let data = if volume == 100 { sound } else { scaled(sound, volume) };
+    play_bytes(if volume == 100 { sound } else { scaled(sound, volume) }, volume);
+}
+
+/// Plays an already volume-scaled WAV without blocking (silent at 0%).
+fn play_bytes(data: &'static [u8], volume: u32) {
+    if volume == 0 {
+        return;
+    }
     unsafe {
         let _ = PlaySoundW(
             PCWSTR(data.as_ptr() as *const u16),
@@ -1801,4 +1838,34 @@ fn main() {
         }
     }
     log("Archy stopped");
+}
+
+#[cfg(test)]
+mod sound_tests {
+    use super::*;
+    use windows::Win32::Media::Audio::SND_SYNC;
+
+    /// Plays `data` to completion; true when Windows accepted and played it.
+    fn ping(data: &'static [u8]) -> bool {
+        unsafe { PlaySoundW(PCWSTR(data.as_ptr() as *const u16), None, SND_MEMORY | SND_SYNC | SND_NODEFAULT).as_bool() }
+    }
+
+    #[test]
+    fn every_chosen_tone_is_built_cached_and_silent_at_zero() {
+        for name in ["chime", "rise", "fall", "shutter", "blip", "double", "tick", "alert", "sparkle"] {
+            let a = tone_bytes(name, 100).expect(name);
+            assert!(std::ptr::eq(a, tone_bytes(name, 100).unwrap()), "{name}: cached");
+        }
+        assert!(tone_bytes("nope", 100).is_none());
+    }
+
+    #[test]
+    fn built_in_and_chosen_sounds_really_play() {
+        // Needs an audio output device; this is the real "did it ping" check.
+        assert!(ping(CLIP_WAV), "built-in clip sound");
+        assert!(ping(VOICE_WAV), "built-in voice sound");
+        for name in ["chime", "double", "tick", "rise", "fall"] {
+            assert!(ping(tone_bytes(name, 100).unwrap()), "chosen tone {name}");
+        }
+    }
 }

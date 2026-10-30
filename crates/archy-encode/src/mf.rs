@@ -285,7 +285,7 @@ impl MfEncoder {
             if Instant::now() > deadline {
                 return Err(Error::new(E_FAIL, "the encoder stopped releasing frames"));
             }
-            std::thread::sleep(Duration::from_millis(1));
+            crate::nap(Duration::from_millis(1));
         }
     }
 
@@ -413,7 +413,7 @@ fn next_event(events: &IMFMediaEventGenerator, limit: Duration) -> Result<Option
                 if Instant::now() > deadline {
                     return Ok(None);
                 }
-                std::thread::sleep(Duration::from_millis(1));
+                crate::nap(Duration::from_millis(1));
             }
             Err(e) => return Err(e),
         }

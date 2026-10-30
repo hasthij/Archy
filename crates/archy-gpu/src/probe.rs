@@ -24,6 +24,18 @@ const VENDOR_INTEL: u32 = 0x8086;
 /// Below this much dedicated VRAM an Intel/AMD adapter is treated as integrated.
 const IGPU_VRAM_LIMIT: usize = 512 * 1024 * 1024;
 
+/// AMD APUs reserve up to 2 GB of system RAM as "dedicated" memory, so a
+/// discrete AMD card is only assumed from more than that (smallest is 2 GB+).
+const AMD_APU_VRAM_LIMIT: usize = 1024 * 1024 * 1024;
+
+fn is_integrated(vendor_id: u32, dedicated_vram: usize) -> bool {
+    match vendor_id {
+        VENDOR_INTEL => dedicated_vram < IGPU_VRAM_LIMIT,
+        VENDOR_AMD => dedicated_vram <= AMD_APU_VRAM_LIMIT,
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     H264,
@@ -128,8 +140,7 @@ fn probe_adapters() -> Result<Vec<Adapter>> {
         if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
             continue;
         }
-        let integrated = matches!(desc.VendorId, VENDOR_INTEL | VENDOR_AMD)
-            && desc.DedicatedVideoMemory < IGPU_VRAM_LIMIT;
+        let integrated = is_integrated(desc.VendorId, desc.DedicatedVideoMemory);
         adapters.push(Adapter {
             index,
             name: wide_to_string(&desc.Description),
@@ -246,4 +257,58 @@ pub fn friendly_name(activate: &IMFActivate) -> String {
 fn wide_to_string(w: &[u16]) -> String {
     let end = w.iter().position(|&c| c == 0).unwrap_or(w.len());
     String::from_utf16_lossy(&w[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MB: usize = 1024 * 1024;
+
+    fn sim(vendor_id: u32, vram_mb: usize, codecs: &[Codec]) -> Adapter {
+        Adapter {
+            index: 0,
+            name: "sim".into(),
+            vendor_id,
+            id: format!("{vendor_id:04x}:0000"),
+            luid: LUID::default(),
+            dedicated_vram: vram_mb * MB,
+            shared_memory: 0,
+            integrated: is_integrated(vendor_id, vram_mb * MB),
+            displays: Vec::new(),
+            encoders: codecs.iter().map(|&codec| Encoder { codec, name: "sim".into() }).collect(),
+        }
+    }
+
+    #[test]
+    fn intel_igpu() {
+        let a = sim(VENDOR_INTEL, 128, &[Codec::H264, Codec::Hevc]);
+        assert!(a.integrated && a.vendor() == "Intel");
+        assert_eq!(a.best_codec(), Some(Codec::Hevc));
+        assert!(!sim(VENDOR_INTEL, 8192, &[Codec::Av1]).integrated); // Arc dGPU
+    }
+
+    #[test]
+    fn nvidia_with_codecs() {
+        let a = sim(VENDOR_NVIDIA, 8192, &[Codec::H264, Codec::Hevc, Codec::Av1]);
+        assert!(!a.integrated && a.vendor() == "NVIDIA");
+        assert_eq!(a.best_codec(), Some(Codec::Av1));
+        assert!(!sim(VENDOR_NVIDIA, 0, &[]).integrated); // never "integrated"
+    }
+
+    #[test]
+    fn nvidia_without_codec() {
+        let a = sim(VENDOR_NVIDIA, 2048, &[]);
+        assert_eq!(a.best_codec(), None);
+    }
+
+    #[test]
+    fn amd_apu_and_dgpu() {
+        for mb in [64, 512, 1024] {
+            assert!(sim(VENDOR_AMD, mb, &[Codec::H264]).integrated, "{mb} MB APU");
+        }
+        assert!(!sim(VENDOR_AMD, 2048, &[Codec::H264]).integrated);
+        assert!(!sim(VENDOR_AMD, 16384, &[Codec::H264, Codec::Av1]).integrated);
+        assert_eq!(sim(VENDOR_AMD, 512, &[Codec::H264]).best_codec(), Some(Codec::H264));
+    }
 }

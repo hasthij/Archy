@@ -17,6 +17,7 @@ pub mod session;
 pub mod selftest;
 pub mod settings;
 pub mod status;
+pub mod tones;
 pub mod update;
 
 pub use archy_capture::Target;

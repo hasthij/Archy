@@ -234,11 +234,7 @@ fn preview_dir() -> PathBuf {
 
 /// Where clip thumbnails are cached (made once, then shown instantly).
 pub fn thumbs_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Archy")
-        .join("thumbs")
+    temp_dir("thumbs")
 }
 
 /// A small JPEG of a clip for the library: one frame half a second in, 480 px

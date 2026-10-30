@@ -117,6 +117,13 @@ pub struct Settings {
     /// Play the same sound the moment a clip hotkey is pressed.
     pub sound_on_hotkey: bool,
     /// Volume of the clip-saved chime, 0-200 (%).
+    pub custom_sounds: bool,
+    /// Tone names (see `tones`) used when `custom_sounds` is on.
+    pub tone_clip: String,
+    pub tone_voice: String,
+    pub tone_hotkey: String,
+    pub tone_start: String,
+    pub tone_stop: String,
     pub clip_sound_volume: u32,
     /// Volume of the phrase-heard blip, 0-200 (%).
     pub voice_sound_volume: u32,
@@ -264,6 +271,12 @@ impl Default for Settings {
             sound_on_voice: true,
             sound_on_hotkey: true,
             voice_sensitivity: 50,
+            custom_sounds: false,
+            tone_clip: "chime".into(),
+            tone_voice: "double".into(),
+            tone_hotkey: "tick".into(),
+            tone_start: "rise".into(),
+            tone_stop: "fall".into(),
             clip_sound_volume: 100,
             voice_sound_volume: 100,
             voice_tuning: None,
@@ -315,6 +328,11 @@ impl Settings {
                     Some(format!("settings.json has an error ({e}); using defaults")),
                 ),
             },
+            // Any other read error (lock, antivirus) must not overwrite the user's file.
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => (
+                Self::default(),
+                Some(format!("could not read settings.json ({e}); using defaults")),
+            ),
             Err(_) => {
                 let s = Self::default();
                 let _ = std::fs::create_dir_all(app_dir());
@@ -327,9 +345,14 @@ impl Settings {
     pub fn save(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(app_dir())?;
         let text = serde_json::to_string_pretty(&self.clone().clamped())?;
-        let tmp = path().with_extension("json.tmp");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let tmp = path().with_extension(format!("json.{}.{nanos}.tmp", std::process::id()));
         std::fs::write(&tmp, text)?;
-        std::fs::rename(tmp, path())
+        std::fs::rename(&tmp, path()).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
     }
 
     /// When the settings file last changed (to pick up edits made elsewhere).
@@ -373,6 +396,17 @@ impl Settings {
             *v = (*v).min(200);
         }
         self.voice_sound_volume = self.voice_sound_volume.min(200);
+        for (t, d) in [
+            (&mut self.tone_clip, "chime"),
+            (&mut self.tone_voice, "double"),
+            (&mut self.tone_hotkey, "tick"),
+            (&mut self.tone_start, "rise"),
+            (&mut self.tone_stop, "fall"),
+        ] {
+            if !crate::tones::is_tone(t) {
+                *t = d.into();
+            }
+        }
         self.voice_fine_tune = self.voice_fine_tune.clamp(-50, 50);
         // Unknown look values (a hand edit, a newer Archy) fall back to the defaults.
         if self.audio_mode != "separate" {
@@ -435,6 +469,16 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_sounds_off_by_default_and_bad_tone_names_reset() {
+        assert!(!Settings::default().custom_sounds);
+        let s = Settings { tone_clip: "bogus".into(), tone_stop: "sparkle".into(), ..Default::default() }.clamped();
+        assert_eq!(s.tone_clip, "chime");
+        assert_eq!(s.tone_stop, "sparkle");
+        let old: Settings = serde_json::from_str("{\"fps\":60}").unwrap();
+        assert!(!old.custom_sounds, "an old settings.json keeps today's sounds");
+    }
 
     #[test]
     fn one_volume_records_every_source_and_only_the_main_volume_counts() {

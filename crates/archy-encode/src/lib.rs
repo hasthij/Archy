@@ -28,6 +28,37 @@ pub fn fault(name: &str) -> bool {
     std::env::var("ARCHY_FAULT").is_ok_and(|v| v == name)
 }
 
+/// Sleeps `d` with sub-15 ms accuracy. `thread::sleep` rounds short waits up to
+/// the 15.6 ms timer tick, so a 1 ms poll for a free encoder slot cost a whole
+/// frame; a high-resolution waitable timer wakes on time. `ARCHY_STD_SLEEP=1`
+/// switches back to `thread::sleep`.
+pub fn nap(d: std::time::Duration) {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Threading::{
+        CreateWaitableTimerExW, SetWaitableTimer, WaitForSingleObject, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+        TIMER_ALL_ACCESS,
+    };
+    thread_local! {
+        static TIMER: Option<HANDLE> = if std::env::var_os("ARCHY_STD_SLEEP").is_some() {
+            None
+        } else {
+            unsafe { CreateWaitableTimerExW(None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0) }.ok()
+        };
+    }
+    let waited = TIMER.with(|t| {
+        let t = (*t)?;
+        let due = -((d.as_nanos() / 100).max(1) as i64); // negative = relative, 100 ns units
+        unsafe {
+            SetWaitableTimer(t, &due, 0, None, None, false).ok()?;
+            WaitForSingleObject(t, 1000);
+        }
+        Some(())
+    });
+    if waited.is_none() {
+        std::thread::sleep(d);
+    }
+}
+
 pub struct Config {
     pub codec: Codec,
     pub width: u32,

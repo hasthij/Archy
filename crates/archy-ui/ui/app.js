@@ -36,7 +36,7 @@ function toast(msg) {
 
 // ---------- navigation ----------
 // Pages under Settings (the rail's gear); Games and Voice also have rail buttons.
-const SETTINGS_PAGES = ["recording", "games", "audio", "hotkeys", "storage", "appearance", "general"];
+const SETTINGS_PAGES = ["recording", "games", "audio", "hotkeys", "sounds", "storage", "appearance", "general"];
 
 function show(name) {
   view = name;
@@ -49,8 +49,26 @@ function show(name) {
     b.dataset.view === name || (!railHit && inSettings && b.dataset.group === "settings") ? "page" : "false"));
   $("#settings-nav").hidden = !inSettings;
   document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== `view-${name}`));
+  $("#layout-switch").hidden = name !== "clips";
   if (name === "clips") loadClips();
 }
+
+// Bottom-right layout switcher for the Clips page (window-only pref, like the Appearance picker).
+const LAYOUTS = [
+  ["grid", "Grid", '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>'],
+  ["list", "List", '<rect x="4" y="5" width="4" height="4" rx="1"/><rect x="4" y="15" width="4" height="4" rx="1"/><path d="M11 7h9M11 17h9"/>'],
+  ["table", "Table", '<path d="M4 6h16M4 10.5h16M4 15h16M4 19.5h16"/>'],
+  ["latest", "Latest + grid", '<rect x="4" y="4" width="16" height="8" rx="1.5"/><rect x="4" y="14" width="4.5" height="6" rx="1"/><rect x="9.75" y="14" width="4.5" height="6" rx="1"/><rect x="15.5" y="14" width="4.5" height="6" rx="1"/>']];
+function renderLayoutSwitch() {
+  const box = $("#layout-switch");
+  box.replaceChildren(...LAYOUTS.map(([v, name, svg]) => {
+    const b = el("button", { title: name, "aria-label": name, "aria-pressed": String(uiPrefs.library === v),
+      onclick: () => { setUi({ library: v }); $("#clips").dataset.key = ""; renderClips(); renderLayoutSwitch(); if (typeof renderAppearance === "function" && settings) renderAppearance(); } });
+    b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${svg}</svg>`;
+    return b;
+  }));
+}
+renderLayoutSwitch();
 document.querySelectorAll(".nav").forEach((b) => b.addEventListener("click", () => show(b.dataset.view)));
 window.showView = show; // for welcome.js
 
@@ -140,12 +158,19 @@ async function openGameMenu() {
   }, el("span", { class: "track" }, el("i")),
     el("span", {}, el("b", { text: "Record the whole screen" }),
       el("span", { class: "sub", text: whole ? "On: overlays and popups show up in clips too." : "Off: just the game window, no popups." })));
-  menu.replaceChildren(
-    screenSwitch,
-    el("div", { class: "game-menu-head", text: "Record which game?" }),
-    item("Automatic", "The game you're playing (from your list, or anything fullscreen)", ""),
-    ...apps.map((a) => item(a.title, `${a.exe}${listed(a.exe) ? " · on your games list" : ""}`, a.exe)),
-    ...(apps.length ? [] : [el("p", { class: "sub", text: "No other apps are open." })]));
+  const find = el("input", { class: "input game-find", type: "search", placeholder: "Search apps…", "aria-label": "Search open apps" });
+  const list = el("div", {});
+  const fill = () => {
+    const q = find.value.trim().toLowerCase();
+    const hits = apps.filter((a) => !q || a.title.toLowerCase().includes(q) || a.exe.toLowerCase().includes(q));
+    list.replaceChildren(
+      ...(q ? [] : [item("Automatic", "The game you're playing (from your list, or anything fullscreen)", "")]),
+      ...hits.map((a) => item(a.title, `${a.exe}${listed(a.exe) ? " · on your games list" : ""}`, a.exe)),
+      ...(hits.length ? [] : [el("p", { class: "sub", style: "margin:6px 10px", text: apps.length ? "No match." : "No other apps are open." })]));
+  };
+  find.addEventListener("input", fill);
+  fill();
+  menu.replaceChildren(screenSwitch, el("div", { class: "game-menu-head", text: "Record which game?" }), find, list);
 }
 $("#game-btn").addEventListener("click", openGameMenu);
 document.addEventListener("click", (e) => { if (!e.target.closest(".pick-game")) closeGameMenu(); });
@@ -207,12 +232,13 @@ function renderClips() {
   const key = shown.map((c) => c.path + c.bytes).join("|") + (q || filter);
   if (grid.dataset.key === key) return;
   grid.dataset.key = key;
+  grid.dataset.view = uiPrefs.library === "latest" ? "grid" : uiPrefs.library;
   // The newest clip gets the big card when you're looking at everything. Cards
   // that are still the same clip are reused (moving a node keeps its loaded
   // thumbnail), so a new clip adds one card instead of rebuilding them all.
   const next = new Map();
   grid.replaceChildren(...shown.map((c, i) => {
-    const featured = i === 0 && filter === "all" && !q && c.kind !== "shot";
+    const featured = uiPrefs.library === "latest" && i === 0 && filter === "all" && !q && c.kind !== "shot";
     const id = `${c.path}|${c.bytes}|${featured}`;
     const card = cardCache.get(id) || clipCard(c, featured);
     next.set(id, card);
@@ -234,16 +260,27 @@ const playIcon = () => {
 };
 
 /// A screenshot in the library: the picture is its own thumbnail.
+const ICON_D = {'copy': 'M9 9h10v10H9zM5 15V5h10', 'edit': 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4', 'gif': 'M4 5h16v14H4zM8 15l3-4 3 3 2-2 2 3', 'folder': 'M3 7h6l2 2h10v10H3z', 'trash': 'M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13', 'discord': 'M12 4v11M7 10l5 5 5-5M5 20h14'};
+// Turns a text button into icon + label; CSS shows one of them (Appearance > Clip buttons).
+function iconize(btn, key) {
+  const t = btn.textContent;
+  btn.textContent = "";
+  btn.append(svgEl(ICON_D[key]), el("span", { class: "lbl", text: t }));
+  if (!btn.title) btn.title = t;
+  if (!btn.getAttribute("aria-label")) btn.setAttribute("aria-label", t);
+  return btn;
+}
+function setLbl(btn, t) { btn.querySelector(".lbl").textContent = t; btn.classList.toggle("sure", t === "Sure?"); }
 function shotCard(c) {
   const img = el("img", { alt: "", class: "thumb-img", decoding: "async", loading: "lazy", src: fileSrc(c.path) });
   img.onload = () => img.classList.add("ready");
   let confirming = false;
-  const del = el("button", { class: "btn danger", text: "Delete", "aria-label": `Move ${c.name} to Recycle Bin` });
+  const del = iconize(el("button", { class: "btn danger", text: "Delete", "aria-label": `Move ${c.name} to Recycle Bin` }), "trash");
   del.addEventListener("click", async () => {
     if (!confirming) {
       confirming = true;
-      del.textContent = "Sure?";
-      setTimeout(() => { confirming = false; del.textContent = "Delete"; }, 3000);
+      setLbl(del, "Sure?");
+      setTimeout(() => { confirming = false; setLbl(del, "Delete"); }, 3000);
       return;
     }
     try { await invoke("recycle_clip", { path: c.path }); toast("Moved to Recycle Bin"); loadClips(); }
@@ -256,11 +293,11 @@ function shotCard(c) {
       el("div", { class: "clip-name", title: c.name, text: c.name }),
       el("div", { class: "clip-meta", text: when(c.modified) }),
       el("div", { class: "clip-actions" },
-        el("button", { class: "btn primary", text: "Copy", onclick: async () => {
+        iconize(el("button", { class: "btn primary", text: "Copy", onclick: async () => {
           try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); }
           catch (e) { toast(String(e)); }
-        } }),
-        el("button", { class: "btn", text: "Folder", onclick: () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e))) }),
+        } }), "copy"),
+        iconize(el("button", { class: "btn", text: "Folder", onclick: () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e))) }), "folder"),
         del)));
 }
 
@@ -282,12 +319,12 @@ function clipCard(c, hero = false) {
   video.dataset.clip = c.path;
   thumbObserver.observe(video);
   let confirming = false;
-  const del = el("button", { class: "btn danger", text: "Delete", "aria-label": `Move ${c.name} to Recycle Bin` });
+  const del = iconize(el("button", { class: "btn danger", text: "Delete", "aria-label": `Move ${c.name} to Recycle Bin` }), "trash");
   del.addEventListener("click", async () => {
     if (!confirming) {
       confirming = true;
-      del.textContent = "Sure?";
-      setTimeout(() => { confirming = false; del.textContent = "Delete"; }, 3000);
+      setLbl(del, "Sure?");
+      setTimeout(() => { confirming = false; setLbl(del, "Delete"); }, 3000);
       return;
     }
     try { await invoke("recycle_clip", { path: c.path }); toast("Moved to Recycle Bin"); loadClips(); }
@@ -301,23 +338,23 @@ function clipCard(c, hero = false) {
     el("div", { class: "clip-body" },
       el("div", { class: "clip-name", title: c.name, text: c.name }),
       el("div", { class: "clip-meta", text: when(c.modified) }),
-      c.bytes > 10e6 && !c.name.endsWith("(Discord)") ? discordButton(c) : null,
       el("div", { class: "clip-actions" },
-        el("button", { class: "btn primary", text: "Copy", onclick: async () => {
+        c.bytes > 10e6 && !c.name.endsWith("(Discord)") ? discordButton(c) : null,
+        iconize(el("button", { class: "btn primary", text: "Copy", onclick: async () => {
           try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); }
           catch (e) { toast(String(e)); }
-        } }),
-        el("button", { class: "btn", text: "Edit", onclick: () => openEditor(c) }),
-        el("button", { class: "btn", text: "GIF", title: "Make a GIF from this clip", onclick: () => openEditor(c, { format: "gif" }) }),
-        el("button", { class: "btn", text: "Folder", onclick: () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e))) }),
+        } }), "copy"),
+        iconize(el("button", { class: "btn", text: "Edit", onclick: () => openEditor(c) }), "edit"),
+        iconize(el("button", { class: "btn", text: "GIF", title: "Make a GIF from this clip", onclick: () => openEditor(c, { format: "gif" }) }), "gif"),
+        iconize(el("button", { class: "btn", text: "Folder", onclick: () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e))) }), "folder"),
         del)));
 }
 
 function discordButton(c) {
-  const b = el("button", { class: "btn discord", text: "Discord copy", title: "Makes a copy under 10 MB that Discord accepts, and copies it" });
+  const b = iconize(el("button", { class: "btn discord", text: "Discord copy", title: "Makes a copy under 10 MB that Discord accepts, and copies it" }), "discord");
   b.addEventListener("click", async () => {
     b.disabled = true;
-    b.textContent = "Making Discord copy…";
+    setLbl(b, "Making Discord copy…");
     try {
       await invoke("discord_copy", { path: c.path });
       toast("Discord copy ready and copied. Paste it into Discord");
@@ -325,7 +362,7 @@ function discordButton(c) {
     } catch (e) {
       toast("Discord copy failed: " + e);
       b.disabled = false;
-      b.textContent = "Discord copy";
+      setLbl(b, "Discord copy");
     }
   });
   return b;
@@ -356,12 +393,20 @@ $("#open-folder").addEventListener("click", () => invoke("open_clips_folder").ca
 
 // ---------- saving settings ----------
 let saveTimer;
+let pendingPatch = {};
 function save(patch, message = "Saved. Applies within 2 seconds") {
   Object.assign(settings, patch);
+  Object.assign(pendingPatch, patch);
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
+    const sent = pendingPatch;
+    pendingPatch = {};
     try {
-      settings = await invoke("save_settings", { settings });
+      const resp = await invoke("save_settings", { settings });
+      // Keep edits made while this save was in flight (they save next).
+      const newer = {};
+      for (const k in pendingPatch) newer[k] = pendingPatch[k];
+      settings = { ...resp, ...newer };
       applySettingsLook();
       toast(message);
       renderAll();
@@ -643,14 +688,19 @@ function appListCard(key, title, about, placeholder) {
   const input = el("input", { class: "input", placeholder, "aria-label": `Add to ${title}` });
   const add = () => { addName(input.value.trim()); input.value = ""; };
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
-  const running = el("select", { class: "input", "aria-label": `Running apps for ${title}` }, el("option", { value: "", text: "Pick from apps that are open now…" }));
-  const loadRunning = async () => {
-    const apps = await invoke("running_apps").catch(() => []);
-    running.replaceChildren(el("option", { value: "", text: apps.length ? "Pick from apps that are open now…" : "No apps found" }),
-      ...apps.map((a) => el("option", { value: a.exe, text: `${a.title}  (${a.exe})` })));
+  // Searchable list of open apps: type part of a name or file name to narrow it down.
+  let apps = [];
+  const search = el("input", { class: "input", type: "search", placeholder: "Search open apps…", "aria-label": `Search running apps for ${title}` });
+  const results = el("div", { class: "app-results", role: "listbox", "aria-label": "Open apps" });
+  const showRunning = () => {
+    const q = search.value.trim().toLowerCase();
+    const hits = apps.filter((a) => !q || a.title.toLowerCase().includes(q) || a.exe.toLowerCase().includes(q));
+    results.replaceChildren(...(hits.length ? hits.map((a) => el("button", { class: "app-opt", role: "option", onclick: () => addName(a.exe) },
+      el("b", { text: a.title }), el("span", { text: a.exe + (has(a.exe) ? " · added" : "") })))
+      : [el("p", { class: "sub", style: "margin:6px 10px", text: apps.length ? "No match. Type the file name below instead." : "No apps found." })]));
   };
-  running.addEventListener("focus", loadRunning);
-  running.addEventListener("change", () => addName(running.value));
+  const loadRunning = async () => { apps = await invoke("running_apps").catch(() => []); showRunning(); };
+  search.addEventListener("input", showRunning);
   loadRunning();
   return el("div", { class: "card" },
     el("h3", { text: title }),
@@ -658,7 +708,8 @@ function appListCard(key, title, about, placeholder) {
     el("div", { class: "chips", style: "margin:14px 0" }, list.length ? list.map((g) =>
       el("span", { class: "tag" }, g, el("button", { "aria-label": `Remove ${g}`, text: "×", onclick: () => save({ [key]: list.filter((x) => x !== g) }, `Removed ${g}`) })))
       : el("span", { class: "sub", text: "Nothing here yet." })),
-    el("div", { class: "field" }, running, el("button", { class: "btn", text: "Refresh", onclick: loadRunning })),
+    el("div", { class: "field" }, search, el("button", { class: "btn", text: "Refresh", onclick: loadRunning })),
+    results,
     el("p", { class: "sub", style: "margin:12px 0 6px", text: "Or type the program's file name:" }),
     el("div", { class: "field" }, input, el("button", { class: "btn", text: "Add", onclick: add })));
 }
@@ -989,7 +1040,7 @@ function soundMixCard() {
     range.addEventListener("input", () => { out.textContent = offAt0 && Number(range.value) === 0 ? "Off" : `${range.value}%`; });
     range.addEventListener("change", () => save({ [key]: Number(range.value) }, `${name}: ${offAt0 && Number(range.value) === 0 ? "not recorded" : range.value + "%"}`));
     range.addEventListener("dblclick", () => { if (enabled) save({ [key]: 100 }, `${name}: 100%`); });
-    return el("div", { class: "mix-row" + (enabled ? "" : " off") },
+    return el("div", { class: "sound-row" + (enabled ? "" : " off") },
       el("div", {}, el("b", { text: name }), el("span", { class: "sub", text: about })), range, out);
   };
   return el("div", { class: "card" },
@@ -1040,15 +1091,6 @@ function aboutCard() {
 function renderGeneral() {
   $("#general-settings").replaceChildren(
     aboutCard(),
-    onOff("notify_on_save", "Notification when a clip saves", "A small Windows notification with the clip's length and size.",
-      "Knowing the clip saved without leaving the game.", "No pop-ups at all; check the library instead."),
-    onOff("sound_on_save", "Sound when a clip saves", "Archy's short two-note chime.",
-      "Hearing it worked while you keep playing, even in fullscreen.", "Silence: for streams or quiet rooms."),
-    volumeRow("clip_sound_volume", "Clip sound volume", "How loud the clip-saved chime is."),
-    onOff("sound_on_hotkey", "Ping when you press the clip key", "The same soft blip as voice clipping, the moment you press it, before the clip finishes saving.",
-      "Knowing the key press registered, even in fullscreen.", "Only the saved chime."),
-    onOff("notify_on_start", "\"Archy is running\" notification", "A reminder when Archy starts that it's ready and what your hotkey is.",
-      "Remembering your hotkey.", "A quieter start-up."),
     onOff("start_with_windows", "Start with Windows", "Archy starts in the tray when you sign in, so clips are always ready.",
       "Never forgetting to open Archy before playing.", "Starting Archy yourself only when you want it.", false),
     onOff("tray_recording_dot", "Recording dot on the tray icon", "A small red dot on Archy's icon while a game is being recorded.",
@@ -1125,10 +1167,7 @@ function renderVoice() {
         { value: 80, label: "Loose", best: "Quiet rooms or a soft voice, if Balanced misses you. May clip on similar-sounding words." },
       ] }),
     fineTuneCard(),
-    voiceTestCard(),
-    onOff("sound_on_voice", "Sound when a phrase is heard", "A soft blip the moment Archy hears you, before the clip finishes saving.",
-      "Knowing Archy heard you.", "Silent voice clipping."),
-    volumeRow("voice_sound_volume", "Ping volume", "How loud the blip is when Archy hears your phrase or you press the clip key."));
+    voiceTestCard());
 }
 
 // ---------- voice fine-tuning and test ----------
@@ -1494,36 +1533,78 @@ $("#theme-btn").addEventListener("click", () => {
 
 function renderAppearance() {
   const pick = (patch, msg) => { Object.assign(settings, patch); applySettingsLook(); save(patch, msg); };
-  const themeCard = (value, title, about) => el("button", {
-    class: "theme-card", role: "radio", "aria-checked": String(settings.theme === value),
-    onclick: () => pick({ theme: value }, `${title} theme`),
-  }, el("div", { class: `mini ${value}` }, value === "system" ? null : [el("div", { class: "r" }), el("div", { class: "c" }, el("i"), el("i"), el("i"), el("u"))]),
+  // Window-only choices (never reach the recorder): kept in the window's own storage by theme.js.
+  const ui = (patch, msg, redo) => { setUi(patch); if (redo) { $("#clips").dataset.key = ""; renderClips(); } renderAppearance(); toast(msg); };
+  const themeCard = (value, title, about, on, onclick) => el("button", {
+    class: "theme-card", role: "radio", "aria-checked": String(on), onclick,
+  }, el("div", { class: `mini ${value === "oled" ? "dark" : value}`, style: value === "oled" ? "background:#000" : null },
+    value === "system" ? null : [el("div", { class: "r" }), el("div", { class: "c" }, el("i"), el("i"), el("i"), el("u"))]),
     el("b", { text: title }), el("span", { text: about }));
+  const seg = (label, cur, opts, onpick) => el("div", { class: "seg", role: "group", "aria-label": label },
+    opts.map(([v, text]) => el("button", { "aria-pressed": String(String(cur) === String(v)), text, onclick: () => onpick(v, text) })));
+  const row = (title, about, ...ctl) => el("div", { class: "card setting" },
+    el("div", { class: "about" }, el("h3", { text: title }), el("p", { text: about })), el("div", { class: "pick" }, ...ctl));
+  const u = uiPrefs, dark = settings.theme === "dark";
   const ACCENTS = [["blue", "Blue", "#4D8DFF"], ["violet", "Violet", "#8B7CFF"], ["teal", "Teal", "#2EC4A6"], ["orange", "Orange", "#FF9F43"]];
+  const EXTRA_ACCENTS = [["Rose", "#FF6B8A"], ["Green", "#4ADE80"], ["Cyan", "#22D3EE"], ["Amber", "#FFC53D"], ["Red", "#FF5C5C"], ["Silver", "#D4D8E0"]];
+  const TONES = [["neutral", "Neutral"], ["midnight", "Midnight"], ["graphite", "Graphite"], ["warm", "Warm"], ["forest", "Forest"]];
+  const customOn = /^#[0-9a-f]{6}$/i.test(u.accent_hex);
+  // Little drawings of each clip layout so the choice is visible, not guessed.
+  const LIB = [
+    ["grid", "Grid", "Even thumbnails, as many as fit. Best for browsing."],
+    ["list", "List", "One clip per row with a small thumbnail. Best for names."],
+    ["table", "Table", "Dense rows, tiny thumbnails. Best for big libraries."],
+    ["latest", "Latest + grid", "Newest clip big at the top, the rest below."]];
+  const libCard = ([v, title, about]) => el("button", { class: "theme-card", role: "radio", "aria-checked": String(u.library === v), onclick: () => ui({ library: v }, `${title} layout`, true) },
+    el("div", { class: `mini lib-${v}` }, Array.from({ length: v === "grid" ? 6 : v === "latest" ? 5 : 4 }, () => el("i"))),
+    el("b", { text: title }), el("span", { text: about }));
   $("#appearance-settings").replaceChildren(
     el("div", { class: "card" },
       el("h3", { text: "Theme" }),
-      el("p", { class: "sub", style: "margin:0 0 16px", text: "System follows Windows: light or dark, whatever Windows uses. The sun/moon button on the left switches at any time." }),
+      el("p", { class: "sub", style: "margin:0 0 16px", text: "OLED is pure black, best on OLED screens. System follows Windows. The sun/moon button on the left switches at any time." }),
       el("div", { class: "themes", role: "radiogroup", "aria-label": "Theme" },
-        themeCard("dark", "Dark", "Easy on the eyes next to a game"),
-        themeCard("light", "Light", "Bright rooms and daytime"),
-        themeCard("system", "System", "Follows your Windows setting"))),
-    el("div", { class: "card setting" },
-      el("div", { class: "about" }, el("h3", { text: "Accent colour" }), el("p", { text: "Buttons, highlights and progress bars." })),
-      el("div", { class: "pick" }, el("div", { class: "swatches", role: "radiogroup", "aria-label": "Accent colour" },
-        ACCENTS.map(([v, name, hex]) => el("button", { class: "swatch", role: "radio", "aria-checked": String(settings.accent === v), "aria-label": name, title: name, style: `background:${hex}`,
-          onclick: () => pick({ accent: v }, `${name} accent`) }))))),
-    el("div", { class: "card setting" },
-      el("div", { class: "about" }, el("h3", { text: "Density" }), el("p", { text: "How much fits on screen at once." })),
-      el("div", { class: "pick" }, el("div", { class: "seg", role: "group", "aria-label": "Density" },
-        [["comfortable", "Comfortable"], ["compact", "Compact"]].map(([v, label]) => el("button", { "aria-pressed": String(settings.density === v), text: label, onclick: () => pick({ density: v }, `${label} spacing`) }))))),
-    el("div", { class: "card setting" },
-      el("div", { class: "about" }, el("h3", { text: "Reduce motion" }), el("p", { text: "No animations in the window. Recording is never affected." })),
-      el("div", { class: "pick" }, el("div", { class: "seg", role: "group", "aria-label": "Reduce motion" },
-        [[false, "Off"], [true, "On"]].map(([v, label]) => el("button", { "aria-pressed": String(settings.reduce_motion === v), text: label, onclick: () => pick({ reduce_motion: v }, v ? "Animations off" : "Animations on") }))))));
+        themeCard("dark", "Dark", "Soft charcoal, easy next to a game", dark && !u.oled, () => { setUi({ oled: false }); pick({ theme: "dark" }, "Dark theme"); renderAppearance(); }),
+        themeCard("oled", "OLED", "True black, saves power on OLED", dark && u.oled, () => { setUi({ oled: true }); pick({ theme: "dark" }, "OLED theme"); renderAppearance(); }),
+        themeCard("light", "Light", "Bright rooms and daytime", settings.theme === "light", () => pick({ theme: "light" }, "Light theme")),
+        themeCard("system", "System", "Follows your Windows setting", settings.theme === "system", () => pick({ theme: "system" }, "System theme")))),
+    el("div", { class: "card" },
+      el("h3", { text: "Clip library layout" }),
+      el("p", { class: "sub", style: "margin:0 0 16px", text: "How the Clips page lays out your recordings." }),
+      el("div", { class: "themes", role: "radiogroup", "aria-label": "Clip library layout" }, LIB.map(libCard))),
+    row("Navigation", "Sidebar shows names next to the icons. Icon rail is slimmer and gives clips more room.",
+      seg("Navigation", u.nav, [["sidebar", "Sidebar"], ["rail", "Icon rail"]], (v, t) => ui({ nav: v }, `${t} navigation`))),
+    row("Surface style", "Outlined draws thin borders. Flat drops them for a quieter look. Raised adds a soft shadow.",
+      seg("Surface style", u.surface, [["flat", "Flat"], ["outlined", "Outlined"], ["raised", "Raised"]], (v, t) => ui({ surface: v }, `${t} surfaces`))),
+    row("Dark tone", "Tints the dark theme's greys. Only applies with Dark (not OLED black).",
+      seg("Dark tone", u.tone, TONES, (v, t) => { setUi({ tone: v, oled: v === "neutral" ? u.oled : false }); pick({ theme: "dark" }, `${t} tone`); renderAppearance(); })),
+    row("Accent colour", "Buttons, highlights and progress bars.",
+      el("div", { class: "swatches", role: "radiogroup", "aria-label": "Accent colour" },
+        ACCENTS.map(([v, name, hex]) => el("button", { class: "swatch", role: "radio", "aria-checked": String(!customOn && settings.accent === v), "aria-label": name, title: name, style: `background:${hex}`,
+          onclick: () => { setUi({ accent_hex: "" }); pick({ accent: v }, `${name} accent`); renderAppearance(); } })),
+        EXTRA_ACCENTS.map(([name, hex]) => el("button", { class: "swatch sm", role: "radio", "aria-checked": String(customOn && u.accent_hex.toLowerCase() === hex.toLowerCase()), "aria-label": name, title: name, style: `background:${hex}`,
+          onclick: () => ui({ accent_hex: hex }, `${name} accent`) })),
+        el("input", { type: "color", value: customOn ? u.accent_hex : "#4D8DFF", "aria-label": "Custom accent colour", title: "Custom colour",
+          onchange: (e) => ui({ accent_hex: e.target.value }, "Custom accent") }))),
+    row("Selected state", "How the chosen option in a group is shown. Tint is calmer; solid is louder.",
+      seg("Selected state", u.selected, [["tint", "Tint"], ["solid", "Solid"]], (v, t) => ui({ selected: v }, `${t} selection`))),
+    row("Corner radius", "How round buttons and cards are. 0 is sharp, 16 is soft.",
+      seg("Corner radius", u.radius, [[0, "0"], [4, "4"], [8, "8"], [12, "12"], [16, "16"]], (v) => ui({ radius: Number(v) }, `Corners ${v}px`))),
+    row("Density", "Compact fits more on screen. Roomy gives everything space.",
+      seg("Density", u.density, [["compact", "Compact"], ["cozy", "Cozy"], ["roomy", "Roomy"]],
+        (v, t) => { setUi({ density: v }); pick({ density: v === "compact" ? "compact" : "comfortable" }, `${t} spacing`); renderAppearance(); })),
+    row("Icon weight", "Thickness of the icon lines. Thin looks refined, bold reads faster.",
+      seg("Icon weight", u.icons, [[1.3, "Thin"], [1.6, "Regular"], [2, "Bold"]], (v, t) => ui({ icons: Number(v) }, `${t} icons`))),
+    row("Motion", "None turns animations off. Subtle is quick fades. Full adds hover lift. Recording is never affected.",
+      seg("Motion", u.motion, [["none", "None"], ["subtle", "Subtle"], ["full", "Full"]],
+        (v, t) => { setUi({ motion: v }); pick({ reduce_motion: v === "none" }, `${t} motion`); renderAppearance(); })),
+    row("Clip buttons", "Icons keep each clip tidy (hover for the name). Text shows the full words.",
+      seg("Clip buttons", u.actions, [["icons", "Icons"], ["text", "Text"]], (v, t) => ui({ actions: v }, `${t} on clip buttons`))),
+    row("Font", "Only fonts already on Windows, so nothing is downloaded.",
+      seg("Font", u.font, [["system", "Segoe UI"], ["bahnschrift", "Bahnschrift"], ["calibri", "Calibri"], ["cascadia", "Cascadia Mono"]], (v) => ui({ font: v }, "Font changed"))));
 }
 
 function renderAll() {
+  renderSounds();
   renderAppearance();
   renderRecording();
   renderGames();
@@ -1658,5 +1739,134 @@ const thumbObserver = new IntersectionObserver((entries) => {
   loadDevices();
   checkUpdate();
   setInterval(refreshStatus, 2000);
+  // Stop the pulsing dot (and its repaints) while the window is hidden, minimised or unfocused.
+  const syncIdle = () => document.body.classList.toggle("idle", document.hidden || !document.hasFocus());
+  for (const [t, o] of [["visibilitychange", document], ["blur", window], ["focus", window]]) o.addEventListener(t, syncIdle);
+  syncIdle();
   setInterval(() => { if (view === "clips" && !document.hidden) loadClips(); }, 4000);
 })();
+
+
+// ---------- sounds & notifications ----------
+// Tones are synthesised in the window (nothing downloaded). Events tied to a real
+// setting save to settings.json; the rest are kept in the window and previewed only,
+// until the recorder learns to play them.
+const TONES = {
+  chime: [[660, 0, .12], [880, .12, .22]], rise: [[440, 0, .1], [554, .1, .1], [659, .2, .18]],
+  fall: [[659, 0, .1], [554, .1, .1], [440, .2, .18]], shutter: [[1800, 0, .03], [900, .05, .05]],
+  blip: [[880, 0, .07]], double: [[740, 0, .06], [740, .1, .06]], tick: [[1200, 0, .03]],
+  alert: [[520, 0, .14], [390, .18, .2]], sparkle: [[988, 0, .06], [1319, .07, .06], [1568, .14, .14]],
+};
+let audioCtx;
+function playTone(name, vol) {
+  try {
+    audioCtx = audioCtx || new AudioContext();
+    const t0 = audioCtx.currentTime + .02;
+    for (const [f, at, dur] of TONES[name] || []) {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = "sine"; o.frequency.value = f;
+      g.gain.setValueAtTime(0, t0 + at);
+      g.gain.linearRampToValueAtTime(Math.min(1, vol / 100) * .25, t0 + at + .01);
+      g.gain.exponentialRampToValueAtTime(.0001, t0 + at + dur);
+      o.connect(g).connect(audioCtx.destination); o.start(t0 + at); o.stop(t0 + at + dur + .02);
+    }
+  } catch { /* no audio device */ }
+}
+const SOUND_EVENTS = [
+  ["clip_saved", "Clip saved", "chime", { on: "sound_on_save", vol: "clip_sound_volume", tone: "tone_clip" }],
+  ["long_clip", "Long clip saved", "rise"], ["screenshot", "Screenshot saved", "shutter"],
+  ["session_start", "Recording session started", "rise", { vol: "voice_sound_volume", tone: "tone_start" }],
+  ["session_stop", "Session saved", "fall", { vol: "clip_sound_volume", tone: "tone_stop" }], ["bookmark", "Bookmark added", "blip"],
+  ["voice", "Voice phrase heard", "double", { on: "sound_on_voice", vol: "voice_sound_volume", tone: "tone_voice" }],
+  ["hotkey", "Clip key pressed", "tick", { on: "sound_on_hotkey", vol: "voice_sound_volume", tone: "tone_hotkey" }],
+  ["warning", "Recording problem", "alert"], ["disk_full", "Disk almost full", "alert"], ["update", "Update ready", "sparkle"]];
+
+function svgEl(d, stroke) {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("viewBox", "0 0 24 24");
+  const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  p.setAttribute("d", d);
+  s.append(p);
+  return s;
+}
+document.addEventListener("click", () => document.querySelectorAll(".snd-menu").forEach((m) => { m.hidden = true; }));
+
+function renderSounds() {
+  if (!settings) return;
+  const ev = uiPrefs.events || {};
+  const setEv = (id, patch) => { setUi({ events: { ...ev, [id]: { ...ev[id], ...patch } } }); renderSounds(); };
+  const rows = SOUND_EVENTS.map(([id, name, def, real]) => {
+    const e = { sound: def, vol: 80, on: true, ...ev[id] };
+    if (real && real.tone) e.sound = settings[real.tone];
+    const live = (k) => real && real[k];
+    const cap = (t) => t[0].toUpperCase() + t.slice(1);
+    const tri = () => svgEl("M8 5v14l11-7z");
+    const menu = el("div", { class: "snd-menu", hidden: "", role: "listbox" }, Object.keys(TONES).map((t) =>
+      el("div", { class: "snd-opt" + (t === e.sound ? " sel" : ""), role: "option", "aria-selected": String(t === e.sound) },
+        el("button", { class: "pv", "aria-label": `Preview ${cap(t)}`, title: "Preview", onclick: (x) => { x.stopPropagation(); playTone(t, e.vol); } }, tri()),
+        el("button", { class: "pick", text: cap(t), onclick: () => { real && real.tone ? save({ [real.tone]: t }, `${name}: ${cap(t)}`) : setEv(id, { sound: t }); } }))));
+    const btn = el("button", { class: "snd-btn", "aria-haspopup": "listbox", "aria-label": `${name} sound: ${cap(e.sound)}`,
+      onclick: (x) => { x.stopPropagation(); const open = menu.hidden; document.querySelectorAll(".snd-menu").forEach((m) => { m.hidden = true; }); menu.hidden = !open; } },
+      el("span", { text: cap(e.sound) }), svgEl("M6 9l6 6 6-6", true));
+    const sel = el("div", { class: "snd-pick" }, btn, menu);
+    const vKey = live("vol");
+    const vol = el("input", { type: "range", min: 0, max: vKey ? 200 : 100, step: 5, value: vKey ? settings[vKey] : e.vol, "aria-label": `${name} volume`, style: "width:110px" });
+    vol.addEventListener("change", () => vKey ? save({ [vKey]: Number(vol.value) }, `${name}: ${vol.value}%`) : setEv(id, { vol: Number(vol.value) }));
+    const onKey = live("on");
+    const enabled = onKey ? settings[onKey] : e.on;
+    const active = real && real.tone && settings.custom_sounds;
+    const chk = el("input", { type: "checkbox", checked: enabled ? "" : null, "aria-label": `${name} on`,
+      onchange: (x) => onKey ? save({ [onKey]: x.target.checked }) : setEv(id, { on: x.target.checked }) });
+    return el("div", { class: "sound-row" + (enabled ? "" : " off") },
+      el("div", {}, el("b", { text: name }), el("span", { class: "sub", text: !real ? "Preview only: plays once the recorder is updated" : active ? "Plays your chosen sound" : "Plays Archy's built-in sound until \"Use my chosen sounds\" is on"  })),
+      chk, sel, vol, el("button", { class: "pv-main", "aria-label": `Play ${name} sound`, title: "Play", onclick: () => playTone(e.sound, vKey ? Math.min(100, settings[vKey]) : e.vol) }, svgEl("M8 5v14l11-7z")));
+  });
+  $("#sounds-settings").replaceChildren(
+    onOff("custom_sounds", "Use my chosen sounds", "Play the sounds picked below in the recorder, not just in this window. Off keeps Archy's original two sounds.",
+      "Telling a clip, a ping and a session apart by ear.", "The original chime and blip, exactly as before.", false),
+    onOff("notify_on_save", "Notification when a clip saves", "A small Windows notification with the clip's length and size.",
+      "Knowing the clip saved without leaving the game.", "No pop-ups at all; check the library instead."),
+    onOff("notify_on_start", "\"Archy is running\" notification", "A reminder when Archy starts that it's ready and what your hotkey is.",
+      "Remembering your hotkey.", "A quieter start-up."),
+    el("div", { class: "card" }, el("h3", { text: "Every moment" }),
+      el("p", { class: "sub", text: "Tick to turn a moment on, pick its sound, set its volume. Rows that say Plays use the recorder; the rest are saved for the next recorder update." }),
+      ...rows),
+    el("p", { class: "sub", text: "Notification style, position and game-fullscreen behaviour need a recorder update and are not available yet." }));
+}
+
+
+// ---------- settings search: Ctrl+K ----------
+// Searches page names and every setting title in the settings pages.
+(function palette() {
+  const box = el("div", { class: "palette", hidden: "" });
+  const input = el("input", { type: "search", placeholder: "Search settings…", "aria-label": "Search settings" });
+  const list = el("div", { class: "palette-list", role: "listbox" });
+  box.append(input, list);
+  document.body.append(box);
+  const close = () => { box.hidden = true; };
+  const items = () => {
+    const out = [];
+    for (const p of SETTINGS_PAGES) {
+      const nav = document.querySelector(`#settings-nav [data-view="${p}"]`);
+      out.push({ page: p, label: nav ? nav.textContent : p, title: null });
+      document.querySelectorAll(`#view-${p} .card h3`).forEach((h) => out.push({ page: p, label: h.textContent, title: h, in: nav ? nav.textContent : p }));
+    }
+    return out;
+  };
+  const draw = () => {
+    const q = input.value.trim().toLowerCase();
+    const hits = items().filter((i) => !q || i.label.toLowerCase().includes(q) || (i.in || "").toLowerCase().includes(q)).slice(0, 12);
+    list.replaceChildren(...hits.map((i) => el("button", { class: "palette-item", onclick: () => {
+      close(); show(i.page); if (i.title) i.title.scrollIntoView({ block: "center" });
+    } }, el("b", { text: i.label }), i.in ? el("span", { class: "sub", text: i.in }) : null)));
+  };
+  input.addEventListener("input", draw);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") list.querySelector("button")?.click(); });
+  box.addEventListener("click", (e) => { if (e.target === box) close(); });
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); box.hidden = false; input.value = ""; draw(); input.focus(); }
+    else if (e.key === "Escape" && !box.hidden) close();
+  });
+})();
+
+$("#settings-search")?.addEventListener("click", () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, cancelable: true })));

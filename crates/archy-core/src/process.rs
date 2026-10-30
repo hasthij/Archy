@@ -54,3 +54,22 @@ fn listed_name(pid: u32) -> Option<String> {
         found.filter(|n| !n.is_empty())
     }
 }
+
+/// File names of every running process (including tray apps with no window).
+pub fn all_names() -> Vec<String> {
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snap, &mut entry).is_ok();
+        while ok {
+            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+            if len > 0 {
+                out.push(String::from_utf16_lossy(&entry.szExeFile[..len]));
+            }
+            ok = Process32NextW(snap, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    out
+}

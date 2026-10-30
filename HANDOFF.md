@@ -1,4 +1,16 @@
-# Handoff 2026-10-22: v0.5.2 released
-- Tag v0.5.2 pushed, GitHub release Latest, Archy-Setup.exe sha256 03c7d710...
-- Contents: mic noise suppression + gate + listen-to-yourself, tray start fix + start-in-tray button.
-- Installer launched locally to update the user's app.
+# Handoff (uncommitted, awaiting "approved" for 0.5.3)
+- Fault suite (mf + vpl): ALL PASSED. Fixed output_stall: recorder.rs busy() branch now trips ENCODER_STALL.
+- FPS 1: capture interval 90% (was 75%); `ARCHY_CAPTURE_PCT=75` restores old.
+- FPS 2: `archy_encode::nap` high-res timer replaces 1 ms / 500 us sleeps; `ARCHY_STD_SLEEP=1` reverts.
+- FPS 3: ring.rs push keyframe scan now O(1) (seq-indexed keyframe deque); ring tests pass.
+- Earlier: AMD APU is_integrated, settings.rs hardening, recycle_clip async, percent_decode, app.js save merge.
+- Not yet measured with PresentMon (needs release build; kill archy-ui/archy first).
+- Fixed (archy-ui main.rs, cargo check + tests pass): voice_child race (reaps only its own child), MIC_MONITOR leak (kill on write fail; mic monitor + calibration killed on window Destroyed), process_alive pid reuse (image name must be archy.exe). Removed unused `mut` in recorder.rs.
+- Open: 15 s quit wait, app.js re-save. Export cancel only checks on ffmpeg progress lines (fine).
+- FPS idea (needs "approved"+off switch+A/B): voice spotter decodes all mic audio incl. silence (~12% core); an energy gate would cut it. NV12 extra copy skipped: tiny GPU cost, risky.
+- Sweep done (recorder, capture, convert, cadence, vpl copy): no more safe wins in code. Per-frame mutex locks are uncontended (~20 ns), not worth changing. Repeat frames already use SkipFrame dummy (vpl). Converter reuses input views, pool is preallocated.
+- Remaining real wins need PresentMon data: NV12 extra copy (vpl CopySubresourceRegion, mf CopyResource), AAC track count, voice helper CPU.
+- PresentMon A/B done (tools/presentmon/run-ab.ps1 <tag> [ENV=V], then ab.py ab-<tag>.csv ab-<tag>-w.txt), Roblox 1080p, archy-record vpl HEVC: new (90%, nap) FPS -27%, old (75%, std sleep) -24%: no real difference, within noise. Cost ~25% is the encode load on the shared iGPU at ~48 captured fps, not loop overhead. archy-record default 61 Mbps, not tray preset.
+- Controlled A/B (tools/presentmon/run-all.ps1, 4 arms x 2 rounds): capture-only -8/-20%, full60 +2/-27%, 30fps -29/-31%, 720p -29/-25%. Baseline itself swung 64-135 FPS between runs, so arms are not separable. Cost does NOT drop with fps/res or when encode is removed, so it is a fixed capture-presence cost (WGC), not encode. CPU ms/frame +30% in every arm. low_power VDEnc confirmed on. No code lever found; 90%/nap stay unproven (kept, env revert).
+- Next: decide if 0.5.3 ships (new = no regression, fixes stall/ring), or lower cost via lower fps/res/bitrate preset test.
+- Logic audit (ideal path: WGC -> VideoProcessor NV12 -> HW encode -> ring, no CPU copies, event-driven waits): recorder hot loop matches. Only deviation found+fixed: `stale` first-frame texture was kept (pool slot held) after a fresh frame won; now dropped. check + archy-core tests pass. Not audited line by line: audio crate, tray main.rs.

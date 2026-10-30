@@ -670,11 +670,12 @@ fn capture_loop(
         index += 1;
         let attempt = (|| -> Result<_> {
             let gpu = Gpu::new(adapter, RECORDER_GPU_PRIORITY)?;
-            // At most one frame per 3/4 interval: enough for every frame a game at
-            // up to 1.33x the clip's rate shows (so none is lost on a 144 Hz screen),
-            // and on 165-240 Hz screens the compositor copies far fewer frames
-            // nobody uses (half the interval let through up to 120 a second for 60).
-            let capture = Capture::start(&gpu.device, cfg.target, interval * 3 / 4)?;
+            // At most one frame per 9/10 interval: a game up to 1.1x the clip's rate
+            // loses none, and the compositor copies fewer frames nobody uses (3/4
+            // let through up to 1.33x, extra GPU work on a shared iGPU).
+            // ARCHY_CAPTURE_PCT=75 restores the old value.
+            let pct: u32 = std::env::var("ARCHY_CAPTURE_PCT").ok().and_then(|v| v.parse().ok()).filter(|p| (25..=100).contains(p)).unwrap_or(90);
+            let capture = Capture::start(&gpu.device, cfg.target, interval * pct / 100)?;
             let (width, height) = fit_size(capture.width, capture.height, cfg.max_height);
             // Hardware encoders reject tiny frames (a minimized or collapsed window).
             let (width, height) = (width.max(160), height.max(120));
@@ -795,7 +796,7 @@ fn capture_loop(
     // Time of the last frame sent (smooth timing keeps times strictly increasing).
     let mut last_time = i64::MIN;
     // Since when every frame has found the encoder's queue full.
-    let mut backed_up: Option<Instant> = None;
+    let backed_up: std::cell::Cell<Option<Instant>> = std::cell::Cell::new(None);
     // Sends one frame stamped `time`; Err ends the recording.
     // A full queue gets up to one frame to make room (this thread waits, never
     // the game): dropping at once left a gap in the clip every time the encoder
@@ -807,14 +808,14 @@ fn capture_loop(
         let in_flight = in_flight.clone();
         move || in_flight.load(Ordering::Acquire) >= QUEUE_DEPTH
     };
-    let mut send = |texture: &ID3D11Texture2D, time: i64, repeat: bool| -> Result<()> {
+    let send = |texture: &ID3D11Texture2D, time: i64, repeat: bool| -> Result<()> {
         let mut input = SendPtr(Input { texture: texture.clone(), time, ticket: Some(InFlight::new(&in_flight)), repeat });
         let waited_from = Instant::now();
         let outcome = loop {
             match tx.try_send(input) {
                 Err(TrySendError::Full(back)) if waited_from.elapsed() < patience => {
                     input = back;
-                    thread::sleep(Duration::from_micros(500));
+                    archy_encode::nap(Duration::from_micros(500));
                 }
                 other => break other,
             }
@@ -826,13 +827,13 @@ fn capture_loop(
                 let _ = shared.last_output.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
                 shared.last_input.store(now, Ordering::Release);
                 shared.frames.fetch_add(1, Ordering::Relaxed);
-                backed_up = None;
+                backed_up.set(None);
                 Ok(())
             }
             Err(TrySendError::Full(_)) => {
                 shared.dropped.fetch_add(1, Ordering::Relaxed);
                 // The queue has stayed full the whole time: the encoder has hung.
-                if backed_up.get_or_insert_with(Instant::now).elapsed() > ENCODER_STALL {
+                if backed_up.get().unwrap_or_else(|| { let n = Instant::now(); backed_up.set(Some(n)); n }).elapsed() > ENCODER_STALL {
                     return Err(Error::new(E_FAIL, "the GPU encoder stopped responding"));
                 }
                 Ok(())
@@ -974,6 +975,11 @@ fn capture_loop(
             if pacer.wants(frame.time) {
                 shared.dropped.fetch_add(1, Ordering::Relaxed);
             }
+            // Frames skipped here never reach `send`, so this is where a hung
+            // encoder (queue full for good) is noticed.
+            if backed_up.get().unwrap_or_else(|| { let n = Instant::now(); backed_up.set(Some(n)); n }).elapsed() > ENCODER_STALL {
+                break Err(Error::new(E_FAIL, "the GPU encoder stopped responding"));
+            }
             continue;
         }
         // Times are on the capture clock (QPC), the same one audio uses, so
@@ -981,6 +987,7 @@ fn capture_loop(
         let Some(slots) = pacer.frame(frame.time, clock_now()) else {
             continue; // this slot already has a frame
         };
+        stale = None; // a fresh frame won: don't keep the held-back one (and its pool slot) alive
         if let (Some(tex), true) = (&last, constant) {
             if let Err(e) = slots.repeat.iter().try_for_each(|&t| send(tex, t, true)) {
                 break Err(e);
