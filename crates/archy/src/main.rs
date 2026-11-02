@@ -38,6 +38,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotK
 use windows::Win32::UI::Shell::{
     ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO,
     NIIF_NOSOUND, NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -127,6 +128,8 @@ struct App {
     /// A window that couldn't be recorded even as a screen capture; skipped
     /// until it closes, so one bad window doesn't stop recording other games.
     failed_window: Option<isize>,
+    /// The exclusive-fullscreen game we already warned about (once per game window).
+    warned_exclusive: Option<isize>,
     volumes: TrackVolumes,
     /// When the voice helper was last (re)started, to space out restarts.
     voice_started: Option<std::time::Instant>,
@@ -796,6 +799,21 @@ impl App {
     /// seconds (and a broken driver can hang), and the tray must keep answering
     /// hotkeys, voice and its menu meanwhile.
     fn start(&mut self, fg: watch::Foreground) {
+        // On Windows 11 24H2+, screen capture makes the mouse cursor vanish in games
+        // running in exclusive fullscreen (an OS bug that also hits OBS). Say so once.
+        if fg.fullscreen
+            && self.warned_exclusive != Some(fg.hwnd.0 as isize)
+            && unsafe { SHQueryUserNotificationState() } == Ok(QUNS_RUNNING_D3D_FULL_SCREEN)
+        {
+            self.warned_exclusive = Some(fg.hwnd.0 as isize);
+            notify(
+                self.window.0 as isize,
+                "Mouse cursor may disappear",
+                "This game is in exclusive fullscreen. Windows can hide the cursor while \
+                 recording. Switch the game to Borderless / Windowed Fullscreen to fix it.",
+                true,
+            );
+        }
         // A ban is a guess about a driver; give the encoder another chance later.
         if self.avoid_since.is_some_and(|t| t.elapsed().as_secs() > 15 * 60) {
             log("encoder bans expired; trying every encoder again");
@@ -1772,6 +1790,7 @@ fn main() {
         voice_config: None,
         dot_shown: false,
         failed_window: None,
+        warned_exclusive: None,
         volumes: TrackVolumes::default(),
         voice_started: None,
         queued: Arc::new(std::sync::atomic::AtomicU32::new(0)),
