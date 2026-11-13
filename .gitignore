@@ -3,3 +3,7 @@
 /dist
 /project-doc
 /CLAUDE.local.md
+
+# Notes for me only: all markdown except the README
+*.md
+!README.md
