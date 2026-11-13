@@ -525,6 +525,22 @@ async fn discord_copy(path: String) -> Result<String, String> {
     Ok(info.path.to_string_lossy().into_owned())
 }
 
+/// The one compressor: shrinks a clip to about `target_mb` MB keeping every
+/// audio track. Progress comes as `export-progress`; `cancel_export` stops it.
+/// Returns the new file's path (also copied to the clipboard when asked).
+#[tauri::command]
+async fn compress_clip(app: AppHandle, path: String, target_mb: f64, copy: bool) -> Result<String, String> {
+    let src = clip_path(&path)?;
+    let target = (target_mb * 1e6) as u64;
+    let out = tauri::async_runtime::spawn_blocking(move || editor::compress(&src, target, &|p| { let _ = app.emit("export-progress", p); }))
+        .await
+        .map_err(|_| "the compressor crashed".to_string())??;
+    if copy {
+        archy_core::clipboard::copy_file(&out);
+    }
+    Ok(out.to_string_lossy().into_owned())
+}
+
 /// Length, size and audio track names of a clip, for the editor.
 #[tauri::command]
 async fn clip_info(path: String) -> Result<editor::ClipInfo, String> {
@@ -980,6 +996,7 @@ fn main() {
             editor_tracks,
             editor_ready,
             export_clip,
+            compress_clip,
             choose_export_path,
             cancel_export,
             app_version,

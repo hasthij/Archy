@@ -907,6 +907,140 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
     Err(format!("export failed: {last_error}"))
 }
 
+/// Smallest target the compressor accepts (below this the picture falls apart).
+pub const MIN_TARGET: u64 = 10_000_000;
+pub const MAX_TARGET: u64 = 10_000_000_000;
+
+/// Rate-controlled args: aims at `bps`, never far above it.
+fn rate_args(enc: &str, bps: u64) -> Vec<String> {
+    let mut a: Vec<String> = match enc {
+        "h264_nvenc" => vec!["-preset", "p5", "-rc", "vbr"],
+        "h264_amf" => vec!["-quality", "balanced", "-rc", "vbr_peak"],
+        "h264_qsv" => vec!["-preset", "medium"],
+        _ => vec!["-preset", "veryfast"],
+    }
+    .into_iter()
+    .map(String::from)
+    .collect();
+    a.extend(["-b:v".into(), bps.to_string(), "-maxrate".into(), (bps * 11 / 10).to_string(), "-bufsize".into(), (bps * 2).to_string()]);
+    a
+}
+
+/// Re-encodes a whole clip to about `target` bytes (never more). Every audio
+/// track is kept: track 1 (what you heard) plays everywhere, the stems stay
+/// as extra tracks so the editor's per-app mix still works on the result.
+/// Retries with a smaller budget if the file comes out too big.
+pub fn compress(src: &Path, target: u64, progress: &dyn Fn(f64)) -> Result<PathBuf, String> {
+    let size = std::fs::metadata(src).map_err(|e| e.to_string())?.len();
+    if size < MIN_TARGET {
+        return Err("this clip is already under 10 MB".into());
+    }
+    let target = target.clamp(MIN_TARGET, MAX_TARGET.min(size));
+    let i = info(src)?;
+    let dur = i.duration.max(0.5);
+    let tracks = i.tracks.len();
+    let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let out = free_name(src.parent().unwrap_or(Path::new(".")), &stem, "compressed", "mp4");
+    let partial = out.with_extension("partial.mp4");
+
+    // Audio: track 1 at 96k, each extra stem at 48k.
+    let audio_bps: u64 = if tracks == 0 { 0 } else { 96_000 + 48_000 * (tracks as u64 - 1) };
+    let fps = i.fps.clamp(1.0, 60.0);
+    let (iw, ih) = (i.width.max(2) as f64, i.height.max(2) as f64);
+
+    BUSY.store(true, Ordering::Release);
+    CANCEL.store(false, Ordering::Release);
+    let _busy = BusyGuard;
+    let mut budget = 0.93f64;
+    let mut last_error = String::new();
+    for _attempt in 0..3 {
+        let total_bps = (target as f64 * budget * 8.0 / dur) as u64;
+        let video_bps = total_bps.saturating_sub(audio_bps).max(100_000);
+        // Enough bits per pixel or the picture turns to mush: shrink it instead.
+        let mut height = ih;
+        while height > 240.0 && video_bps as f64 / (iw * (height / ih) * height * fps) < 0.05 {
+            height = (height * 0.75).floor();
+        }
+        let scale = if height < ih { format!("scale=-2:{}:flags=bicubic,", (height as u32) & !1) } else { String::new() };
+        let mut graph = vec![format!("[0:v]{scale}fps={fps:.3},format=yuv420p[vout]")];
+        if tracks > 0 {
+            // Track 1 from the file; if only stems exist the first is all there is.
+            graph.push("[0:a:0]aresample=48000[a0]".into());
+            for t in 1..tracks {
+                graph.push(format!("[0:a:{t}]aresample=48000[a{t}]"));
+            }
+        }
+        let mut ok_file = false;
+        for enc in ENCODERS.iter().copied().filter(|e| Some(*e) == *ENCODER.lock().unwrap_or_else(|e| e.into_inner())).chain(ENCODERS.iter().copied().filter(|e| Some(*e) != *ENCODER.lock().unwrap_or_else(|e| e.into_inner()))) {
+            let mut cmd = tool("ffmpeg.exe")?;
+            cmd.args(["-y", "-hide_banner", "-v", "error", "-nostats", "-progress", "pipe:1", "-i"]).arg(src);
+            cmd.args(["-filter_complex", &graph.join(";"), "-map", "[vout]"]);
+            for t in 0..tracks {
+                cmd.args(["-map", &format!("[a{t}]")]);
+            }
+            cmd.args(["-c:v", enc]).args(rate_args(enc, video_bps));
+            for t in 0..tracks {
+                cmd.args([format!("-c:a:{t}"), "aac".into(), format!("-b:a:{t}"), if t == 0 { "96k".into() } else { "48k".into() }]);
+            }
+            cmd.args(["-movflags", "+faststart"]).arg(&partial).stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut child = cmd.spawn().map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
+            tie_to_archy(&child);
+            let stderr = child.stderr.take();
+            let errors = std::thread::spawn(move || {
+                let mut s = String::new();
+                if let Some(mut e) = stderr {
+                    let _ = e.read_to_string(&mut s);
+                }
+                s
+            });
+            let mut cancelled = false;
+            if let Some(stdout) = child.stdout.take() {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if CANCEL.swap(false, Ordering::AcqRel) {
+                        cancelled = true;
+                        let _ = child.kill();
+                    }
+                    if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.parse::<f64>().ok()) {
+                        progress((us / 1e6 / dur).clamp(0.0, 1.0));
+                    }
+                }
+            }
+            let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+            let err = errors.join().unwrap_or_default();
+            if cancelled {
+                let _ = std::fs::remove_file(&partial);
+                return Err("cancelled".into());
+            }
+            if ok {
+                *ENCODER.lock().unwrap_or_else(|e| e.into_inner()) = Some(enc);
+                ok_file = true;
+                break;
+            }
+            let _ = std::fs::remove_file(&partial);
+            last_error = err.lines().last().unwrap_or("unknown error").to_string();
+        }
+        if !ok_file {
+            return Err(format!("compression failed: {last_error}"));
+        }
+        let got = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(u64::MAX);
+        if got <= target || _attempt == 2 {
+            if got > target && _attempt == 2 {
+                let _ = std::fs::remove_file(&partial);
+                return Err("couldn't get it that small; try a bigger size".into());
+            }
+            std::fs::rename(&partial, &out).map_err(|e| e.to_string())?;
+            if tracks > 0 {
+                let names: Vec<String> = i.tracks.clone();
+                let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+                archy_core::recorder::append_track_names(&out, &refs);
+            }
+            return Ok(out);
+        }
+        budget *= target as f64 / got as f64 * 0.95;
+    }
+    unreachable!()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
