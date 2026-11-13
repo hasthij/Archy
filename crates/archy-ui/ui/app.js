@@ -258,7 +258,7 @@ const playIcon = () => {
 };
 
 /// A screenshot in the library: the picture is its own thumbnail.
-const ICON_D = {'copy': 'M9 9h10v10H9zM5 15V5h10', 'edit': 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4', 'gif': 'M4 5h16v14H4zM8 15l3-4 3 3 2-2 2 3', 'folder': 'M3 7h6l2 2h10v10H3z', 'trash': 'M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13', 'compress': 'M12 4v11M7 10l5 5 5-5M5 20h14'};
+const ICON_D = {'copy': 'M9 9h10v10H9zM5 15V5h10', 'edit': 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4', 'gif': 'M4 5h16v14H4zM8 15l3-4 3 3 2-2 2 3', 'folder': 'M3 7h6l2 2h10v10H3z', 'trash': 'M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13', 'discord': 'M12 4v11M7 10l5 5 5-5M5 20h14', 'compress': 'M12 4v11M7 10l5 5 5-5M5 20h14', 'rename': 'M9 4h6M9 20h6M12 4v16M16 9h4v6h-4'};
 // Turns a text button into icon + label; CSS shows one of them (Appearance > Clip buttons).
 function iconize(btn, key) {
   const t = btn.textContent;
@@ -267,6 +267,72 @@ function iconize(btn, key) {
   if (!btn.title) btn.title = t;
   if (!btn.getAttribute("aria-label")) btn.setAttribute("aria-label", t);
   return btn;
+}
+/// Inline rename: swaps `nameEl` for a text box. Enter saves, Escape cancels, blur saves.
+/// `done(newClip)` runs after a successful rename (default: reload the library).
+function startRename(nameEl, c, done) {
+  if (nameEl.querySelector("input")) return;
+  const input = el("input", { class: "rename-input", value: c.name, "aria-label": "Clip name", maxlength: "150", spellcheck: "false" });
+  const old = nameEl.textContent;
+  nameEl.replaceChildren(input);
+  input.focus(); input.select();
+  let busy = false;
+  const cancel = () => { nameEl.textContent = old; };
+  const save = async () => {
+    if (busy) return;
+    const name = input.value.trim();
+    if (name === c.name) return cancel();
+    busy = true;
+    try {
+      const path = await invoke("rename_clip", { path: c.path, name });
+      const n = { ...c, path, name: path.split(/[\\/]/).pop().replace(/\.[^.]+$/, "") };
+      toast("Renamed");
+      nameEl.textContent = n.name;
+      (done || loadClips)(n);
+    } catch (e) { toast(String(e)); busy = false; input.focus(); }
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") save();
+    else if (e.key === "Escape") { busy = true; cancel(); }
+  });
+  input.addEventListener("blur", () => { if (!busy) save(); });
+}
+window.startRename = startRename;
+// F2 renames the clip card under the keyboard focus or mouse.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "F2" || e.target.closest?.("input,textarea")) return;
+  const card = document.querySelector(".clip:focus-within, .clip:hover");
+  card?.querySelector(".clip-name")?.dispatchEvent(new Event("rename"));
+});
+function renameable(nameEl, c) {
+  nameEl.classList.add("renameable");
+  nameEl.title = `${c.name} · double-click or F2 to rename`;
+  nameEl.addEventListener("dblclick", () => startRename(nameEl, c));
+  nameEl.addEventListener("rename", () => startRename(nameEl, c));
+  return nameEl;
+}
+
+// Right-click a clip: Rename / Edit / Show in folder. One menu, closed by any click or Esc.
+let ctxMenu = null;
+function closeCtx() { ctxMenu?.remove(); ctxMenu = null; }
+document.addEventListener("click", closeCtx);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCtx(); });
+window.addEventListener("blur", closeCtx);
+function clipMenu(e, card, c) {
+  e.preventDefault();
+  closeCtx();
+  const item = (icon, text, fn) => { const b = el("button", { class: "ctx-item", role: "menuitem", onclick: () => { closeCtx(); fn(); } }, svgEl(ICON_D[icon]), el("span", { text })); return b; };
+  const nameEl = card.querySelector(".clip-name");
+  ctxMenu = el("div", { class: "ctx-menu", role: "menu" },
+    item("rename", "Rename", () => nameEl?.dispatchEvent(new Event("rename"))),
+    c.kind === "shot" ? null : item("edit", "Edit", () => openEditor(c)),
+    item("folder", "Show in folder", () => invoke("reveal_clip", { path: c.path }).catch((x) => toast(String(x)))));
+  document.body.append(ctxMenu);
+  const r = ctxMenu.getBoundingClientRect();
+  ctxMenu.style.left = Math.max(4, Math.min(e.clientX, innerWidth - r.width - 4)) + "px";
+  ctxMenu.style.top = Math.max(4, Math.min(e.clientY, innerHeight - r.height - 4)) + "px";
+  ctxMenu.querySelector("button").focus();
 }
 function setLbl(btn, t) { btn.querySelector(".lbl").textContent = t; btn.classList.toggle("sure", t === "Sure?"); }
 function shotCard(c) {
@@ -284,11 +350,11 @@ function shotCard(c) {
     try { await invoke("recycle_clip", { path: c.path }); toast("Moved to Recycle Bin"); loadClips(); }
     catch (e) { toast(String(e)); }
   });
-  return el("article", { class: "clip shot" },
+  return el("article", { class: "clip shot", oncontextmenu: (e) => clipMenu(e, e.currentTarget, c) },
     el("button", { class: "thumb", "aria-label": `View ${c.name}`, onclick: () => viewShot(c) },
       img, el("span", { class: "size-tag", text: "Screenshot" })),
     el("div", { class: "clip-body" },
-      el("div", { class: "clip-name", title: c.name, text: c.name }),
+      renameable(el("div", { class: "clip-name", text: c.name }), c),
       el("div", { class: "clip-meta", text: when(c.modified) }),
       el("div", { class: "clip-actions" },
         iconize(el("button", { class: "btn primary", text: "Copy", onclick: async () => {
@@ -307,30 +373,6 @@ function viewShot(c) {
     el("img", { src: fileSrc(c.path), alt: c.name }));
   document.addEventListener("keydown", onKey);
   document.body.append(box);
-}
-
-function renameClip(c) {
-  $("#rn-back")?.remove();
-  const stem = c.name.replace(/\.[^.]+$/, "");
-  const input = el("input", { type: "text", class: "cmp-num", value: stem, maxlength: 120, "aria-label": "New name", style: "width:100%" });
-  const msg = el("p", { class: "sub cmp-msg" });
-  const close = () => back.remove();
-  const save = async () => {
-    const name = input.value.trim();
-    if (!name || name === stem) return close();
-    try { await invoke("rename_clip", { path: c.path, name }); toast("Renamed"); loadClips(); close(); }
-    catch (e) { msg.textContent = String(e); }
-  };
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
-  const box = el("div", { class: "upd-box cmp-box", role: "dialog", "aria-modal": "true", "aria-label": "Rename clip" },
-    el("div", { class: "upd-top" }, el("h3", { text: "Rename clip" }), el("span", { class: "sub", text: "The file type stays the same." })),
-    el("div", { class: "upd-body" }, input, msg),
-    el("div", { class: "upd-actions" }, el("button", { class: "btn", text: "Cancel", onclick: close }), el("button", { class: "btn primary", text: "Rename", onclick: save })));
-  const back = el("div", { class: "upd-back", id: "rn-back" }, box);
-  back.addEventListener("click", (e) => { if (e.target === back) close(); });
-  back.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
-  document.body.append(back);
-  input.focus(); input.select();
 }
 
 function clipCard(c, hero = false) {
@@ -353,12 +395,12 @@ function clipCard(c, hero = false) {
     catch (e) { toast(String(e)); }
   });
   const fresh = Date.now() - c.modified < 10 * 60 * 1000;
-  return el("article", { class: "clip" + (hero ? " hero" : "") },
+  return el("article", { class: "clip" + (hero ? " hero" : ""), oncontextmenu: (e) => clipMenu(e, e.currentTarget, c) },
     el("button", { class: "thumb", "aria-label": `Play ${c.name}`, onclick: () => play(c) },
       video, el("span", { class: "play" }, playIcon()), el("span", { class: "size-tag", text: MB(c.bytes) }),
       hero && fresh ? el("span", { class: "new-tag", text: "Just saved" }) : null),
     el("div", { class: "clip-body" },
-      el("div", { class: "clip-name", title: c.name, text: c.name }),
+      renameable(el("div", { class: "clip-name", text: c.name }), c),
       el("div", { class: "clip-meta", text: when(c.modified) }),
       el("div", { class: "clip-actions" },
         compressButton(c),
@@ -366,8 +408,8 @@ function clipCard(c, hero = false) {
           try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); }
           catch (e) { toast(String(e)); }
         } }), "copy"),
-        iconize(el("button", { class: "btn", text: "Rename", title: "Rename this clip", onclick: () => renameClip(c) }), "edit"),
-        iconize(el("button", { class: "btn", text: "Edit", title: "Trim, add audio, export as MP4 or GIF", onclick: () => openEditor(c) }), "gif"),
+        iconize(el("button", { class: "btn", text: "Edit", onclick: () => openEditor(c) }), "edit"),
+        iconize(el("button", { class: "btn", text: "GIF", title: "Make a GIF from this clip", onclick: () => openEditor(c, { format: "gif" }) }), "gif"),
         iconize(el("button", { class: "btn", text: "Folder", onclick: () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e))) }), "folder"),
         del)));
 }
@@ -513,12 +555,18 @@ function settingCard(def) {
   const sel = def.options.find((o) => o.value === current) || def.options.find((o) => o.value === def.rec) || def.options[0];
   const recOpt = def.options.find((o) => o.value === def.rec);
   const hasMeters = def.options.some((o) => o.f != null || o.q != null || o.z != null);
-  return el("div", { class: "card setting" },
+  // On/off settings also get a switch; CSS shows it instead of the On/Off chips (Appearance can switch back).
+  const isOnOff = def.options.length === 2 && def.options[0].value === true && def.options[1].value === false;
+  const on = current === true;
+  const sw = isOnOff ? el("button", { class: "tgl", role: "switch", "aria-checked": String(on), "aria-label": def.name,
+    onclick: () => save({ [def.key]: !on }) }, el("span", { class: "tk" }), el("span", { class: "tt", text: on ? "On" : "Off" })) : null;
+  return el("div", { class: "card setting" + (isOnOff ? " onoff" : "") },
     el("div", { class: "about" },
       el("h3", { text: def.name }),
       el("p", { text: def.what }),
       recOpt ? el("div", { class: "rec" }, "Recommended: ", el("span", { text: recOpt.label })) : null),
     el("div", { class: "pick" },
+      sw,
       el("div", { class: "chips", role: "group", "aria-label": def.name },
         def.options.map((o) => el("button", {
           class: "chip", "aria-pressed": String(o === sel),
@@ -575,11 +623,11 @@ const RECORDING_TIMING = {
 };
 
 const RECORDING_SESSION = () => ({
-  key: "session_mode", name: "Record whole sessions", rec: "off",
+  key: "session_mode", name: "Record whole sessions", rec: "hotkey",
   what: `Also writes everything you play to one long video in your clips folder, besides the replay buffer. No extra encoding (it's the same video), so no FPS cost; it uses disk space: about ${(bufferMB(3600) / 1000).toFixed(1)} GB per hour at your quality. While it records, your clip key also adds a bookmark you can jump to in the editor.`,
   options: [
     { value: "off", label: "Off", best: "Most people: save the moments with your clip key." },
-    { value: "hotkey", label: "With a hotkey", best: "Recording a match or a stream on purpose: press your session key (Hotkeys page) to start and stop." },
+    { value: "hotkey", label: "With a hotkey", best: "Recording a match or a stream on purpose: press your session key above to start, then to pause and resume. The default." },
     { value: "always", label: "Always", best: "Never missing anything: every game is recorded start to finish. Watch your disk space (the clips folder limit applies)." },
   ],
 });
@@ -663,7 +711,7 @@ function compressCard() {
 }
 
 function renderRecording() {
-  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_SESSION()), settingCard(RECORDING_LIMIT), compressCard());
+  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_LIMIT), compressCard());
   loadGpus();
 }
 
@@ -905,7 +953,9 @@ function renderHotkeys() {
     hotkeyRow("hotkey_save_long", "Save long clip", `Saves the last ${lengthLabel(settings.long_clip_seconds)}`),
     hotkeyRow("hotkey_pause", "Pause / resume", "Stops recording completely: zero load. F9 by default, separate from the save key; clear it to turn it off. The tray menu can pause too."),
     hotkeyRow("hotkey_screenshot", "Screenshot", "Saves a full-size picture (PNG) of the game into your clips. Off until you set a key; costs nothing until you press it."),
-    hotkeyRow("hotkey_session", "Start / stop session recording", "Records the whole session to one video. Only when Record whole sessions (Recording page) is set to With a hotkey.")),
+    hotkeyRow("hotkey_session", "Whole-session recording: start / stop", "Press once to start recording the whole session to one video, again to end it. Your replay buffer and clip keys keep working the whole time."),
+    hotkeyRow("hotkey_session_pause", "Whole-session recording: pause / resume", "Pauses and resumes the session video without ending it. Does nothing if no session is recording.")),
+    settingCard(RECORDING_SESSION()),
     extraHotkeysCard());
 }
 
@@ -1102,6 +1152,15 @@ function micCleanCard() {
     el("div", { class: "mix-row" },
       el("div", {}, el("b", { text: "Gate threshold" }), el("span", { class: "sub", text: "Sounds quieter than this are muted. Off records everything." })),
       el("div", {}, meter, range), out),
+    el("div", { class: "mix-row" },
+      el("div", {}, el("b", { text: "Voice channels" }), el("span", { class: "sub", text: settings.mic_mono
+        ? "Mono: your voice sits in the middle, same in both ears. Best for single mics, headsets and noisy USB mics; also helps a mic that only plays in one ear."
+        : "Stereo: exactly what your mic delivers. Best for a true stereo mic. A normal mic sounds the same either way." })),
+      el("div", { class: "seg", role: "group", "aria-label": "Voice channels" },
+        [[false, "Stereo"], [true, "Mono"]].map(([v, label]) => el("button", {
+          "aria-pressed": String(!!settings.mic_mono === v),
+          onclick: () => save({ mic_mono: v }, v ? "Voice: mono" : "Voice: stereo"),
+        }, label)))),
     el("div", { class: "field", style: "margin-top:12px" }, listen),
     status);
 }
@@ -1155,7 +1214,7 @@ function soundMixCard() {
 // A 0-200% volume slider; saves when released.
 function volumeRow(key, label, desc) {
   const value = el("b", { text: `${settings[key]}%` });
-  const range = el("input", { type: "range", min: 0, max: 200, step: 5, value: settings[key], "aria-label": label, style: "width:220px" });
+  const range = el("input", { type: "range", min: 0, max: 200, step: 5, value: settings[key], "aria-label": label, class: "sl-md" });
   range.addEventListener("input", () => { value.textContent = `${range.value}%`; });
   range.addEventListener("change", () => save({ [key]: Number(range.value) }, `${label}: ${range.value}%`));
   range.addEventListener("dblclick", () => { range.value = 100; value.textContent = "100%"; save({ [key]: 100 }, `${label}: 100%`); });
@@ -1183,10 +1242,10 @@ function renderGeneral() {
       "Never forgetting to open Archy before playing.", "Starting Archy yourself only when you want it.", false),
     onOff("tray_recording_dot", "Recording dot on the tray icon", "A small red dot on Archy's icon while a game is being recorded.",
       "Seeing at a glance that Archy is recording.", "A plain icon at all times."),
-    onOff("discord_status", "Discord status", "Shows Archy and the game you are playing on your Discord profile (Rich Presence). Runs locally through the Discord app; nothing is uploaded.",
-      "Letting friends see what you are recording.", "Nothing about Archy is shown on Discord."),
     onOff("check_updates", "Check for updates", "When Archy starts, it asks GitHub whether a newer version exists. This is the only time Archy goes online. Updating always asks you first.",
       "Getting fixes as soon as they're out.", "Archy never goes online; you update by downloading the installer yourself."),
+    onOff("discord_status", "Show Archy on your Discord status", "Your Discord profile shows Archy and the game you're clipping (just Archy when there's no game). It talks only to the Discord app on this PC. Needs the Discord desktop app open.",
+      "Friends seeing what you're playing and that Archy has your back.", "Your Discord status is never touched.", false),
     logCard());
   loadLog();
 }
@@ -1621,8 +1680,22 @@ $("#theme-btn").addEventListener("click", () => {
   save({ theme: next }, next === "dark" ? "Dark mode" : "Light mode");
 });
 
-function renderAppearance() {
-  const pick = (patch, msg) => { Object.assign(settings, patch); applySettingsLook(); save(patch, msg); };
+let mockEl = null;
+/// Static, aria-hidden miniature of the app. Reads the real CSS variables, so it follows every look change with no re-render and loads no clips.
+function buildMock() {
+  const nav = (view, text, on) => el("div", { class: "m-nav" + (on ? " on" : "") }, document.querySelector(`.nav[data-view="${view}"] svg`)?.cloneNode(true) || "", el("span", { text }));
+  const clip = (t, m) => el("div", { class: "m-clip" }, el("div", { class: "m-thumb" }), el("div", {}, el("b", { text: t }), el("small", { text: m })));
+  return el("div", { class: "mock", "aria-hidden": "true" },
+    el("div", { class: "m-rail" }, el("div", { class: "m-logo" }), nav("clips", "Clips", true), nav("games", "Games"), nav("audio", "Audio"), nav("recording", "Settings")),
+    el("div", { class: "m-main" },
+      el("div", { class: "m-head" }, el("b", { text: "Clips" }), el("span", { class: "m-btn", text: "Save clip" })),
+      el("div", { class: "m-chips" }, el("span", { class: "on", text: "All" }), el("span", { text: "Roblox" }), el("span", { text: "Valorant" })),
+      el("div", { class: "m-grid" }, clip("Clutch round", "2 min ago"), clip("Funny moment", "Yesterday"), clip("Last second win", "Mon"), clip("Great play", "Sun"), clip("Boss down", "Sat"), clip("Highlights", "Fri")),
+      el("div", { class: "m-card" }, el("span", { text: "Buffer length" }), el("div", { class: "m-sl" })),
+      el("div", { class: "m-card" }, el("span", { text: "Sounds" }), el("div", { class: "m-sw" }))));
+}
+
+function renderAppearance() {  const pick = (patch, msg) => { Object.assign(settings, patch); applySettingsLook(); save(patch, msg); };
   // Window-only choices (never reach the recorder): kept in the window's own storage by theme.js.
   const ui = (patch, msg, redo) => { setUi(patch); if (redo) { $("#clips").dataset.key = ""; renderClips(); } renderAppearance(); toast(msg); };
   const themeCard = (value, title, about, on, onclick) => el("button", {
@@ -1648,7 +1721,7 @@ function renderAppearance() {
   const libCard = ([v, title, about]) => el("button", { class: "theme-card", role: "radio", "aria-checked": String(u.library === v), onclick: () => ui({ library: v }, `${title} layout`, true) },
     el("div", { class: `mini lib-${v}` }, Array.from({ length: v === "grid" ? 6 : v === "latest" ? 5 : 4 }, () => el("i"))),
     el("b", { text: title }), el("span", { text: about }));
-  $("#appearance-settings").replaceChildren(
+  const panel = [
     el("div", { class: "card" },
       el("h3", { text: "Theme" }),
       el("p", { class: "sub", style: "margin:0 0 16px", text: "OLED is pure black, best on OLED screens. System follows Windows. The sun/moon button on the left switches at any time." }),
@@ -1690,7 +1763,18 @@ function renderAppearance() {
     row("Clip buttons", "Icons keep each clip tidy (hover for the name). Text shows the full words.",
       seg("Clip buttons", u.actions, [["icons", "Icons"], ["text", "Text"]], (v, t) => ui({ actions: v }, `${t} on clip buttons`))),
     row("Font", "Only fonts already on Windows, so nothing is downloaded.",
-      seg("Font", u.font, [["system", "Segoe UI"], ["bahnschrift", "Bahnschrift"], ["calibri", "Calibri"], ["cascadia", "Cascadia Mono"]], (v) => ui({ font: v }, "Font changed"))));
+      seg("Font", u.font, [["system", "Segoe UI"], ["bahnschrift", "Bahnschrift"], ["calibri", "Calibri"], ["cascadia", "Cascadia Mono"]], (v) => ui({ font: v }, "Font changed"))),
+    row("UI size", "Scales the whole window. Bigger is easier to read from a distance.",
+      seg("UI size", u.scale, [[90, "90%"], [100, "100%"], [115, "115%"], [130, "130%"]], (v) => ui({ scale: Number(v) }, `UI size ${v}%`))),
+    row("Thumbnail size", "How wide clip thumbnails are in Grid layouts.",
+      seg("Thumbnail size", u.thumb, [[180, "Small"], [240, "Medium"], [320, "Large"]], (v, t) => ui({ thumb: Number(v) }, `${t} thumbnails`))),
+    row("Clip details", "Shows the date under each clip. Off gives a cleaner library.",
+      seg("Clip details", u.meta, [["on", "Show"], ["off", "Hide"]], (v, t) => ui({ meta: v }, `${t} clip details`))),
+  ];
+  if (!mockEl) mockEl = buildMock();
+  $("#appearance-settings").replaceChildren(el("div", { class: "ap-wrap" },
+    el("aside", { class: "ap-side" }, mockEl, el("p", { text: "Live preview. Placeholder data only." })),
+    el("div", { class: "ap-panel" }, ...panel)));
 }
 
 function renderAll() {
@@ -1902,7 +1986,7 @@ function renderSounds() {
       el("span", { text: cap(e.sound) }), svgEl("M6 9l6 6 6-6", true));
     const sel = el("div", { class: "snd-pick" }, btn, menu);
     const vKey = live("vol");
-    const vol = el("input", { type: "range", min: 0, max: vKey ? 200 : 100, step: 5, value: vKey ? settings[vKey] : e.vol, "aria-label": `${name} volume`, style: "width:110px" });
+    const vol = el("input", { type: "range", min: 0, max: vKey ? 200 : 100, step: 5, value: vKey ? settings[vKey] : e.vol, "aria-label": `${name} volume`, class: "sl-sm" });
     vol.addEventListener("change", () => vKey ? save({ [vKey]: Number(vol.value) }, `${name}: ${vol.value}%`) : setEv(id, { vol: Number(vol.value) }));
     const onKey = live("on");
     const enabled = onKey ? settings[onKey] : e.on;
@@ -1916,6 +2000,8 @@ function renderSounds() {
   $("#sounds-settings").replaceChildren(
     onOff("custom_sounds", "Use my chosen sounds", "Play the sounds picked below in the recorder, not just in this window. Off keeps Archy's original two sounds.",
       "Telling a clip, a ping and a session apart by ear.", "The original chime and blip, exactly as before.", false),
+    onOff("sound_pan", "Pan sounds slightly", "Each Archy sound comes from a little to the left or right ear, alternating, never extreme.",
+      "Making clip, ping and session sounds easy to tell apart, and not blend with the game.", "Every sound is centred, exactly as before.", false),
     onOff("notify_on_save", "Notification when a clip saves", "A small Windows notification with the clip's length and size.",
       "Knowing the clip saved without leaving the game.", "No pop-ups at all; check the library instead."),
     onOff("notify_on_start", "\"Archy is running\" notification", "A reminder when Archy starts that it's ready and what your hotkey is.",

@@ -9,6 +9,7 @@
 mod clip;
 mod ptt;
 mod hotkey;
+mod presence;
 mod startup;
 mod voice;
 mod watch;
@@ -51,6 +52,8 @@ const WM_STARTED: u32 = WM_APP + 3;
 const WM_SHOW_TRAY: u32 = WM_APP + 4;
 /// Whether the tray icon is in the taskbar. At sign-in Archy can start before
 /// the taskbar exists, so adding it fails; it is retried until it works.
+/// "Pan sounds slightly" (Settings > Sounds); read by `play_bytes`.
+static SOUND_PAN: AtomicBool = AtomicBool::new(false);
 static TRAY_SHOWN: AtomicBool = AtomicBool::new(false);
 /// Explorer's "TaskbarCreated" message: sent when the taskbar (re)starts, which
 /// drops every tray icon.
@@ -60,6 +63,7 @@ const HK_SAVE: i32 = 1;
 const HK_SAVE_LONG: i32 = 2;
 const HK_SCREENSHOT: i32 = 4;
 const HK_SESSION: i32 = 5;
+const HK_SESSION_PAUSE: i32 = 6;
 /// Extra clip hotkeys use ids HK_EXTRA.. (one per entry in `extra_hotkeys`).
 const HK_EXTRA: i32 = 100;
 const HK_PAUSE: i32 = 3;
@@ -111,6 +115,7 @@ struct App {
     window: HWND,
     settings: Settings,
     session: Option<Session>,
+    presence: presence::Presence,
     /// A game whose GPU couldn't keep up with the chosen frame rate, and the
     /// rate it's recorded at instead (until the settings change).
     fps_cap: Option<(String, u32)>,
@@ -159,6 +164,8 @@ struct App {
     hdr_warned: bool,
     /// "hotkey" session mode: the user has turned session recording on.
     session_wanted: bool,
+    /// The session file is paused (not writing); the buffer keeps recording.
+    session_paused: bool,
     /// Push-to-talk, while it's on.
     ptt: Option<ptt::PushToTalk>,
 }
@@ -346,6 +353,7 @@ impl TrackVolumes {
         self.discord.store(discord, Relaxed);
         self.mic.store(mic, Relaxed);
         self.mic_filter.set(s.noise_suppression, s.mic_gate_db);
+        self.mic_filter.set_mono(s.mic_mono);
     }
 
     fn of(&self, main: &archy_audio::Volume) -> archy_audio::Volumes {
@@ -448,6 +456,7 @@ impl App {
             (HK_PAUSE, &self.settings.hotkey_pause),
             (HK_SCREENSHOT, &self.settings.hotkey_screenshot),
             (HK_SESSION, &self.settings.hotkey_session),
+            (HK_SESSION_PAUSE, &self.settings.hotkey_session_pause),
         ];
         // Every possible extra id is released first, so a removed one stops working.
         for i in 0..archy_core::settings::MAX_EXTRA_HOTKEYS as i32 {
@@ -458,6 +467,7 @@ impl App {
         for (i, h) in self.settings.extra_hotkeys.iter().enumerate() {
             keys.push((HK_EXTRA + i as i32, &h.key));
         }
+        let mut taken: Vec<String> = Vec::new();
         for (id, text) in keys {
             unsafe {
                 let _ = UnregisterHotKey(Some(self.window), id);
@@ -465,6 +475,17 @@ impl App {
             if text.trim().is_empty() {
                 continue; // hotkey turned off
             }
+            let norm = text.trim().to_lowercase().replace(' ', "");
+            if taken.contains(&norm) {
+                notify(
+                    self.window.0 as isize,
+                    "Archy: hotkey used twice",
+                    &format!("{text} is set for two Archy actions; only the first works. Pick another key for one of them."),
+                    true,
+                );
+                continue;
+            }
+            taken.push(norm);
             let Some(hk) = hotkey::parse(text) else {
                 notify(
                     self.window.0 as isize,
@@ -553,6 +574,7 @@ impl App {
             startup::set(s.start_with_windows);
         }
         self.settings = s;
+        SOUND_PAN.store(self.settings.sound_pan, Ordering::Relaxed);
         self.volumes.update(&self.settings);
         self.register_hotkeys();
         self.sync_session();
@@ -663,6 +685,9 @@ impl App {
 
     fn watch(&mut self) {
         self.pick_up_settings();
+        self.presence.set(if !self.settings.discord_status { presence::Want::Off }
+            else if let Some(s) = &self.session { presence::Want::Game(s.game.clone()) }
+            else { presence::Want::Idle });
         self.revive_voice();
         self.expire_previous();
         // A recording being started on the worker thread: take its result, or wait.
@@ -1047,6 +1072,7 @@ impl App {
             let path = clip.with_file_name(format!("{stem} (session).mp4"));
             let _ = std::fs::create_dir_all(&self.settings.save_folder);
             if s.recorder.start_session(&path) {
+                self.session_paused = false;
                 log(&format!("session: recording to {}", path.display()));
             }
         } else if !want && active {
@@ -1079,29 +1105,44 @@ impl App {
         }
     }
 
-    /// The session hotkey ("hotkey" mode): starts or stops the session file.
+    /// The session hotkey: starts the session file (hotkey mode), or ends it if running.
+    /// The clip engine and replay buffer are never touched. Silent: sounds only.
     fn toggle_session(&mut self) {
-        let window = self.window.0 as isize;
-        if self.settings.session_mode != "hotkey" {
-            notify(window, "Session recording is off", "Turn on Settings > Recording > Record whole sessions > With a hotkey.", true);
+        let mode = self.settings.session_mode.as_str();
+        if mode == "off" {
             return;
         }
-        self.session_wanted = !self.session_wanted;
-        // Two different sounds, so you can tell without looking: the voice ping
-        // when the session starts, the clip-saved chime when it stops.
-        if self.session_wanted {
-            play_for(&self.settings, &self.settings.tone_start, VOICE_WAV, self.settings.voice_sound_volume.max(30));
-        } else {
-            play_for(&self.settings, &self.settings.tone_stop, CLIP_WAV, self.settings.clip_sound_volume.max(30));
-        }
-        if self.session_wanted {
-            if self.session.is_some() {
-                notify(window, "Recording the whole session", "Press the key again to stop. Your clip key adds bookmarks.", false);
-            } else {
-                notify(window, "Session recording on", "It starts with your next game.", false);
+        let active = self.session.as_ref().is_some_and(|s| s.recorder.session_active());
+        if !active {
+            if mode == "hotkey" {
+                self.session_wanted = true;
+                self.session_paused = false;
+                play_for(&self.settings, &self.settings.tone_start, VOICE_WAV, self.settings.voice_sound_volume.max(30));
+                self.sync_session();
             }
+        } else if mode == "hotkey" {
+            self.session_wanted = false;
+            play_for(&self.settings, &self.settings.tone_stop, CLIP_WAV, self.settings.clip_sound_volume.max(30));
+            self.sync_session();
         }
-        self.sync_session();
+    }
+
+    /// The session pause hotkey: pauses / resumes writing the session file.
+    fn pause_session(&mut self) {
+        if !self.session.as_ref().is_some_and(|s| s.recorder.session_active()) {
+            return;
+        }
+        self.session_paused = !self.session_paused;
+        if let Some(s) = &self.session {
+            s.recorder.pause_session(self.session_paused);
+        }
+        log(if self.session_paused { "session: paused" } else { "session: resumed" });
+        // Two different sounds so you can tell without looking: voice ping = recording, chime = paused.
+        if self.session_paused {
+            play_for(&self.settings, &self.settings.tone_stop, CLIP_WAV, self.settings.clip_sound_volume.max(30));
+        } else {
+            play_for(&self.settings, &self.settings.tone_start, VOICE_WAV, self.settings.voice_sound_volume.max(30));
+        }
     }
 
     /// The screenshot hotkey: a PNG of the game into the clips folder.
@@ -1390,6 +1431,7 @@ fn play_bytes(data: &'static [u8], volume: u32) {
     if volume == 0 {
         return;
     }
+    let data = if SOUND_PAN.load(Ordering::Relaxed) { panned(data) } else { data };
     unsafe {
         let _ = PlaySoundW(
             PCWSTR(data.as_ptr() as *const u16),
@@ -1397,6 +1439,49 @@ fn play_bytes(data: &'static [u8], volume: u32) {
             SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
         );
     }
+}
+
+/// A stereo copy of a mono 16-bit PCM WAV, shifted ~20% to the left or right;
+/// each call alternates sides. Anything that isn't plain mono PCM16 is returned as is.
+fn panned(sound: &'static [u8]) -> &'static [u8] {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static NEXT: AtomicBool = AtomicBool::new(false);
+    static CACHE: Mutex<Option<HashMap<(usize, bool), &'static [u8]>>> = Mutex::new(None);
+    let right = !NEXT.fetch_xor(true, Ordering::Relaxed);
+    let key = (sound.as_ptr() as usize, right);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let map = cache.get_or_insert_with(HashMap::new);
+    if let Some(&d) = map.get(&key) {
+        return d;
+    }
+    // Plain 44-byte-header mono PCM16 only (what tones::wav and our assets are).
+    let Some(at) = sound.windows(4).position(|w| w == b"data") else { return sound };
+    let mono = sound.len() > 44 && sound[22] == 1 && sound[34] == 16 && at == 36;
+    if !mono {
+        return sound;
+    }
+    let (near, far) = (1.0f32, 0.85f32); // the far ear is ~1.4 dB quieter: a gentle shift
+    let (l, r) = if right { (far, near) } else { (near, far) };
+    let pcm = &sound[44..];
+    let mut out = Vec::with_capacity(44 + pcm.len() * 2);
+    out.extend_from_slice(&sound[..44]);
+    out[22] = 2; // channels
+    let rate = u32::from_le_bytes([sound[24], sound[25], sound[26], sound[27]]);
+    out[28..32].copy_from_slice(&(rate * 4).to_le_bytes()); // byte rate
+    out[32] = 4; // block align
+    out[34] = 16;
+    out[40..44].copy_from_slice(&((pcm.len() * 2) as u32).to_le_bytes());
+    let riff = (out.len() - 8 + pcm.len() * 2) as u32;
+    out[4..8].copy_from_slice(&riff.to_le_bytes());
+    for s in pcm.chunks_exact(2) {
+        let x = i16::from_le_bytes([s[0], s[1]]) as f32;
+        out.extend_from_slice(&((x * l) as i16).to_le_bytes());
+        out.extend_from_slice(&((x * r) as i16).to_le_bytes());
+    }
+    let leaked: &'static [u8] = Box::leak(out.into_boxed_slice());
+    map.insert(key, leaked);
+    leaked
 }
 
 /// A copy of a 16-bit PCM WAV at `volume` percent. Kept for the life of the
@@ -1531,6 +1616,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             HK_PAUSE => a.toggle_pause(),
             HK_SCREENSHOT => a.screenshot(),
             HK_SESSION => a.toggle_session(),
+            HK_SESSION_PAUSE => a.pause_session(),
             id if id >= HK_EXTRA => {
                 if let Some(h) = a.settings.extra_hotkeys.get((id - HK_EXTRA) as usize) {
                     let seconds = h.seconds;
@@ -1728,6 +1814,7 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
     let (settings, settings_error) = Settings::load();
+    SOUND_PAN.store(settings.sound_pan, Ordering::Relaxed);
     if settings.efficiency_mode {
         archy_core::eco::apply();
     }
@@ -1774,6 +1861,7 @@ fn main() {
         window,
         settings,
         session: None,
+        presence: presence::Presence::new(),
         fps_cap: None,
         keep_up: (0, 0, 0),
         paused: false,
@@ -1800,6 +1888,7 @@ fn main() {
         ticks: 0,
         hdr_warned: false,
         session_wanted: false,
+        session_paused: false,
         ptt: None,
     };
     app.volumes.update(&app.settings);

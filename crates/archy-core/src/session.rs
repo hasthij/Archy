@@ -20,6 +20,9 @@ pub enum Msg {
     Video(StoredPacket),
     Audio(usize, StoredPacket),
     Bookmark,
+    /// true = stop writing (the file stays open); false = continue the same file
+    /// from the next keyframe, with the paused time cut out.
+    Pause(bool),
     Stop(SyncSender<Summary>),
 }
 
@@ -84,7 +87,12 @@ pub fn start(path: PathBuf, format: Format) -> Sender<Msg> {
 fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
     let mut writer: Option<Mp4Writer> = None;
     let mut base = 0i64;
-    let mut last_video = 0i64;
+    let mut last_video = 0i64; // file time (source time minus `shift`)
+    let mut last_end = 0i64;
+    let mut paused = false;
+    let mut resume_key = false; // resumed: waiting for a keyframe to continue on
+    let mut resume_at = i64::MIN; // source time of that keyframe; earlier audio is dropped
+    let mut shift = 0i64; // total paused time cut out of the file
     let mut bookmarks: Vec<f64> = Vec::new();
     let mut problem: Option<String> = None;
     let mut checked = Instant::now();
@@ -98,6 +106,17 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
     for msg in rx {
         match msg {
             Msg::Video(p) if problem.is_none() => {
+                if paused {
+                    continue;
+                }
+                if writer.is_some() && resume_key {
+                    if !p.keyframe {
+                        continue;
+                    }
+                    shift = p.time - last_end;
+                    resume_at = p.time;
+                    resume_key = false;
+                }
                 if writer.is_none() {
                     if !p.keyframe {
                         continue; // a file can only start on a keyframe
@@ -113,9 +132,10 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
                         }
                     }
                 }
-                last_video = p.time;
+                last_video = p.time - shift;
+                last_end = last_video + p.duration;
                 if let Some(w) = writer.as_mut() {
-                    if let Err(e) = w.write(&p.data, p.time, p.duration, p.keyframe) {
+                    if let Err(e) = w.write(&p.data, last_video, p.duration, p.keyframe) {
                         problem = Some(format!("writing failed ({})", e.message()));
                     }
                 }
@@ -128,8 +148,17 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
                 }
             }
             Msg::Audio(track, p) if problem.is_none() => {
+                if paused || resume_key || p.time < resume_at {
+                    continue;
+                }
                 if let Some(w) = writer.as_mut() {
-                    let _ = w.write_audio(track, &p.data, p.time, p.duration);
+                    let _ = w.write_audio(track, &p.data, p.time - shift, p.duration);
+                }
+            }
+            Msg::Pause(on) => {
+                paused = on;
+                if !on {
+                    resume_key = true;
                 }
             }
             Msg::Bookmark => {
