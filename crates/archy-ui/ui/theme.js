@@ -14,7 +14,7 @@ function resolveTheme(theme) {
 // the window's own storage, never in settings.json, so the recorder is untouched.
 const ARCHY_UI_KEY = "archy-ui-prefs";
 const UI_DEFAULTS = {
-  oled: true, surface: "outlined", selected: "tint", accent_hex: "", radius: 8, density: "cozy",
+  oled: true, surface: "raised", selected: "tint", accent_hex: "", radius: 14, density: "roomy",
   icons: 1.6, motion: "subtle", font: "system", library: "grid", nav: "sidebar", tone: "neutral", actions: "icons",
 };
 let uiPrefs = (() => {
@@ -24,6 +24,7 @@ let uiPrefs = (() => {
 function applyUi() {
   const root = document.documentElement, p = uiPrefs, d = root.dataset;
   d.oled = p.oled ? "1" : "0";
+  d.sl = "glow"; d.tg = "switch"; d.dd = "filled"; d.bt = "outline"; // 0.6.3 look kit
   d.surface = p.surface; d.selected = p.selected; d.font = p.font; d.nav = p.nav; d.tone = p.tone; d.actions = p.actions; d.density = p.density;
   if (d.motion !== "reduce") d.motion = p.motion === "none" ? "reduce" : p.motion;
   root.style.setProperty("--radius", `${Number(p.radius) || 0}px`);
@@ -53,6 +54,15 @@ function applyLook(look) {
   try { localStorage.setItem(ARCHY_LOOK_KEY, JSON.stringify(look)); } catch {}
   applyUi();
 }
+
+// Slider fill: the filled part of the track follows --p (percent), set on every input.
+function syncRange(r) {
+  const min = Number(r.min || 0), max = Number(r.max || 100);
+  r.style.setProperty("--p", `${max > min ? ((Number(r.value) - min) / (max - min)) * 100 : 0}%`);
+}
+document.addEventListener("input", (e) => { if (e.target.type === "range") syncRange(e.target); }, true);
+new MutationObserver(() => document.querySelectorAll("input[type=range]").forEach(syncRange))
+  .observe(document, { childList: true, subtree: true });
 
 (function earlyLook() {
   let look = { theme: "dark" };

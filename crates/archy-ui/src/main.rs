@@ -351,6 +351,47 @@ async fn recycle_clip(path: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Renames a clip (and its bookmarks sidecar) inside the clips folder. Returns the new path.
+#[tauri::command]
+fn rename_clip(path: String, name: String) -> Result<String, String> {
+    let p = clip_path(&path)?;
+    let name = name.trim().trim_end_matches('.').trim();
+    if name.is_empty() {
+        return Err("The name can't be empty".into());
+    }
+    if name.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || c.is_control()) {
+        return Err("A name can't contain < > : \" / \\ | ? *".into());
+    }
+    let upper = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4 && (upper.starts_with("COM") || upper.starts_with("LPT")) && upper.ends_with(|c: char| c.is_ascii_digit()))
+    {
+        return Err("Windows doesn't allow that name".into());
+    }
+    if name.len() > 150 {
+        return Err("That name is too long".into());
+    }
+    let ext = p.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let target = p.with_file_name(format!("{name}.{ext}"));
+    if target == p {
+        return Ok(path);
+    }
+    // Same name in other letter case is the same file on Windows: allow it.
+    if target.exists() && !target.to_string_lossy().eq_ignore_ascii_case(&p.to_string_lossy()) {
+        return Err("A clip with that name already exists".into());
+    }
+    std::fs::rename(&p, &target).map_err(|e| format!("Could not rename: {e}"))?;
+    let side = |f: &Path| {
+        let mut s = f.as_os_str().to_owned();
+        s.push(".bookmarks.json");
+        PathBuf::from(s)
+    };
+    if side(&p).exists() {
+        let _ = std::fs::rename(side(&p), side(&target));
+    }
+    Ok(target.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn open_clips_folder() -> Result<(), String> {
     let folder = Settings::load().0.save_folder;
@@ -973,6 +1014,7 @@ fn main() {
             copy_clip,
             reveal_clip,
             recycle_clip,
+            rename_clip,
             open_clips_folder,
             pick_folder,
             discord_copy,

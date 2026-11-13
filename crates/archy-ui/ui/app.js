@@ -268,6 +268,50 @@ function iconize(btn, key) {
   if (!btn.getAttribute("aria-label")) btn.setAttribute("aria-label", t);
   return btn;
 }
+/// Inline rename: swaps `nameEl` for a text box. Enter saves, Escape cancels, blur saves.
+/// `done(newClip)` runs after a successful rename (default: reload the library).
+function startRename(nameEl, c, done) {
+  if (nameEl.querySelector("input")) return;
+  const input = el("input", { class: "rename-input", value: c.name, "aria-label": "Clip name", maxlength: "150", spellcheck: "false" });
+  const old = nameEl.textContent;
+  nameEl.replaceChildren(input);
+  input.focus(); input.select();
+  let busy = false;
+  const cancel = () => { nameEl.textContent = old; };
+  const save = async () => {
+    if (busy) return;
+    const name = input.value.trim();
+    if (name === c.name) return cancel();
+    busy = true;
+    try {
+      const path = await invoke("rename_clip", { path: c.path, name });
+      const n = { ...c, path, name: path.split(/[\\/]/).pop().replace(/\.[^.]+$/, "") };
+      toast("Renamed");
+      nameEl.textContent = n.name;
+      (done || loadClips)(n);
+    } catch (e) { toast(String(e)); busy = false; input.focus(); }
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") save();
+    else if (e.key === "Escape") { busy = true; cancel(); }
+  });
+  input.addEventListener("blur", () => { if (!busy) save(); });
+}
+window.startRename = startRename;
+// F2 renames the clip card under the keyboard focus or mouse.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "F2" || e.target.closest?.("input,textarea")) return;
+  const card = document.querySelector(".clip:focus-within, .clip:hover");
+  card?.querySelector(".clip-name")?.dispatchEvent(new Event("rename"));
+});
+function renameable(nameEl, c) {
+  nameEl.classList.add("renameable");
+  nameEl.title = `${c.name} · double-click or F2 to rename`;
+  nameEl.addEventListener("dblclick", () => startRename(nameEl, c));
+  nameEl.addEventListener("rename", () => startRename(nameEl, c));
+  return nameEl;
+}
 function setLbl(btn, t) { btn.querySelector(".lbl").textContent = t; btn.classList.toggle("sure", t === "Sure?"); }
 function shotCard(c) {
   const img = el("img", { alt: "", class: "thumb-img", decoding: "async", loading: "lazy", src: fileSrc(c.path) });
@@ -288,7 +332,7 @@ function shotCard(c) {
     el("button", { class: "thumb", "aria-label": `View ${c.name}`, onclick: () => viewShot(c) },
       img, el("span", { class: "size-tag", text: "Screenshot" })),
     el("div", { class: "clip-body" },
-      el("div", { class: "clip-name", title: c.name, text: c.name }),
+      renameable(el("div", { class: "clip-name", text: c.name }), c),
       el("div", { class: "clip-meta", text: when(c.modified) }),
       el("div", { class: "clip-actions" },
         iconize(el("button", { class: "btn primary", text: "Copy", onclick: async () => {
@@ -334,7 +378,7 @@ function clipCard(c, hero = false) {
       video, el("span", { class: "play" }, playIcon()), el("span", { class: "size-tag", text: MB(c.bytes) }),
       hero && fresh ? el("span", { class: "new-tag", text: "Just saved" }) : null),
     el("div", { class: "clip-body" },
-      el("div", { class: "clip-name", title: c.name, text: c.name }),
+      renameable(el("div", { class: "clip-name", text: c.name }), c),
       el("div", { class: "clip-meta", text: when(c.modified) }),
       el("div", { class: "clip-actions" },
         c.bytes > 10e6 && !c.name.endsWith("(Discord)") ? discordButton(c) : null,
@@ -431,12 +475,18 @@ function settingCard(def) {
   const sel = def.options.find((o) => o.value === current) || def.options.find((o) => o.value === def.rec) || def.options[0];
   const recOpt = def.options.find((o) => o.value === def.rec);
   const hasMeters = def.options.some((o) => o.f != null || o.q != null || o.z != null);
-  return el("div", { class: "card setting" },
+  // On/off settings also get a switch; CSS shows it instead of the On/Off chips (Appearance can switch back).
+  const isOnOff = def.options.length === 2 && def.options[0].value === true && def.options[1].value === false;
+  const on = current === true;
+  const sw = isOnOff ? el("button", { class: "tgl", role: "switch", "aria-checked": String(on), "aria-label": def.name,
+    onclick: () => save({ [def.key]: !on }) }, el("span", { class: "tk" }), el("span", { class: "tt", text: on ? "On" : "Off" })) : null;
+  return el("div", { class: "card setting" + (isOnOff ? " onoff" : "") },
     el("div", { class: "about" },
       el("h3", { text: def.name }),
       el("p", { text: def.what }),
       recOpt ? el("div", { class: "rec" }, "Recommended: ", el("span", { text: recOpt.label })) : null),
     el("div", { class: "pick" },
+      sw,
       el("div", { class: "chips", role: "group", "aria-label": def.name },
         def.options.map((o) => el("button", {
           class: "chip", "aria-pressed": String(o === sel),

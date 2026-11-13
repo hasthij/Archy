@@ -243,7 +243,7 @@ function buildEditor() {
 
   const box = el("div", { class: "ed-box", role: "dialog", "aria-modal": "true", "aria-label": "Clip editor" },
     el("div", { class: "player-bar" },
-      el("span", { text: `Edit · ${ed.clip.name}` }),
+      (d.title = el("span", { class: "ed-title", text: `Edit · ${ed.clip.name}`, title: "Click to rename (F2)" })),
       (d.close = el("button", { class: "btn", text: "Close", onclick: closeEditor }))),
     el("div", { class: "ed-body" },
       d.bay,
@@ -256,6 +256,17 @@ function buildEditor() {
   $("#editor").replaceChildren(box);
   $("#editor").hidden = false;
   dropAllSetup(box);
+  // Rename from the header: click the title or press F2. The file moves on disk, so keep ed.clip in step.
+  const renameHere = () => {
+    if (d.title.querySelector("input")) return;
+    d.title.textContent = "";
+    const holder = el("span");
+    d.title.append("Edit · ", holder);
+    window.startRename(holder, ed.clip, (n) => { ed.clip.path = n.path; ed.clip.name = n.name; d.title.textContent = `Edit · ${n.name}`; });
+  };
+  d.title.classList.add("renameable");
+  d.title.addEventListener("click", renameHere);
+  box.addEventListener("keydown", (e) => { if (e.key === "F2" && !e.target.closest("input,textarea")) { e.preventDefault(); renameHere(); } });
 
   const v = d.video;
   v.addEventListener("loadedmetadata", () => { v.currentTime = ed.start; });
