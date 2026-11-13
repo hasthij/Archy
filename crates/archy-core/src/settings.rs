@@ -80,6 +80,8 @@ pub struct Settings {
     /// Detect apps playing sound (Spotify, a browser...) and record each as its own
     /// track, so the editor can set their volume per clip.
     pub audio_per_app: bool,
+    /// Apps (names without .exe) the user unticked: never recorded as a track.
+    pub audio_app_blocked: Vec<String>,
     /// Separate track with your microphone.
     pub audio_mic: bool,
     /// Track volumes, 0-200 (%). Everything = what the PC plays in track 1.
@@ -262,6 +264,7 @@ impl Default for Settings {
             audio_game: true,
             audio_discord: true,
             audio_per_app: true,
+            audio_app_blocked: Vec::new(),
             audio_mic: true,
             audio_kbps: 160,
             audio_mode: "main".into(),
@@ -340,6 +343,11 @@ pub fn path() -> PathBuf {
 }
 
 impl Settings {
+    /// Whether the user unticked this app (case-insensitive, name without .exe).
+    pub fn app_blocked(&self, name: &str) -> bool {
+        self.audio_app_blocked.iter().any(|b| b.eq_ignore_ascii_case(name))
+    }
+
     /// Loads settings, creating the file with defaults on first run. A file that
     /// fails to parse is left untouched (the user may be mid-edit) and defaults are used.
     pub fn load() -> (Self, Option<String>) {
@@ -506,6 +514,15 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unticked_apps_are_blocked_case_insensitively() {
+        let mut s = super::Settings::default();
+        assert!(!s.app_blocked("WhatsApp"));
+        s.audio_app_blocked.push("whatsapp".into());
+        assert!(s.app_blocked("WhatsApp"));
+        assert!(!s.app_blocked("Spotify"));
+    }
+
     use super::*;
 
     #[test]

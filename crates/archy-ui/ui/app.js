@@ -258,7 +258,8 @@ const playIcon = () => {
 };
 
 /// A screenshot in the library: the picture is its own thumbnail.
-const ICON_D = {'copy': 'M9 9h10v10H9zM5 15V5h10', 'edit': 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4', 'gif': 'M4 5h16v14H4zM8 15l3-4 3 3 2-2 2 3', 'folder': 'M3 7h6l2 2h10v10H3z', 'trash': 'M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13', 'discord': 'M12 4v11M7 10l5 5 5-5M5 20h14', 'compress': 'M12 4v11M7 10l5 5 5-5M5 20h14', 'rename': 'M9 4h6M9 20h6M12 4v16M16 9h4v6h-4'};
+const ICON_D = {'copy': 'M9 9h10v10H9zM5 15V5h10', 'edit': 'M6 6a2.5 2.5 0 1 0 0 .01M6 18a2.5 2.5 0 1 0 0 .01M8 7.5L20 18M8 16.5L20 6',
+  'pencil': 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4', 'gif': 'M4 5h16v14H4zM8 15l3-4 3 3 2-2 2 3', 'folder': 'M3 7h6l2 2h10v10H3z', 'trash': 'M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13', 'discord': 'M12 4v11M7 10l5 5 5-5M5 20h14', 'compress': 'M12 4v11M7 10l5 5 5-5M5 20h14', 'rename': 'M9 4h6M9 20h6M12 4v16M16 9h4v6h-4'};
 // Turns a text button into icon + label; CSS shows one of them (Appearance > Clip buttons).
 function iconize(btn, key) {
   const t = btn.textContent;
@@ -408,6 +409,7 @@ function clipCard(c, hero = false) {
           try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); }
           catch (e) { toast(String(e)); }
         } }), "copy"),
+        iconize(el("button", { class: "btn", text: "Rename", onclick: (e) => startRename(e.currentTarget.closest(".clip")?.querySelector(".clip-name"), c) }), "pencil"),
         iconize(el("button", { class: "btn", text: "Edit", onclick: () => openEditor(c) }), "edit"),
         iconize(el("button", { class: "btn", text: "GIF", title: "Make a GIF from this clip", onclick: () => openEditor(c, { format: "gif" }) }), "gif"),
         iconize(el("button", { class: "btn", text: "Folder", onclick: () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e))) }), "folder"),
@@ -1030,10 +1032,20 @@ function perAppCard() {
     "Mixing each app later in the editor.", "Fewer audio tracks to encode (slightly lighter).");
   if (!settings.audio_per_app) return sw;
   return el("div", {}, sw, el("div", { class: "card setting" },
-    el("div", { class: "about" }, el("h3", { text: "Playing sound now" }), el("p", { text: "Updates every 30 seconds. These get their own slider in the editor." })),
-    el("div", { class: "pick" }, playingApps.length
-      ? el("div", { class: "chips" }, playingApps.map((a) => el("span", { class: "chip", text: a })))
-      : el("p", { class: "sub", text: "Nothing is playing." }))));
+    el("div", { class: "about" }, el("h3", { text: "Apps to record" }), el("p", { text: "Ticked apps get their own track and editor slider. Untick an app (Discord chat, WhatsApp, a browser...) and Archy never records it. A newly playing ticked app is added within about 30 seconds, mid-session." })),
+    el("div", { class: "pick" }, (() => {
+      const blocked = settings.audio_app_blocked || [];
+      const names = [...new Set([...playingApps, ...blocked].map((a) => a.toLowerCase()))]
+        .map((l) => [...playingApps, ...blocked].find((a) => a.toLowerCase() === l));
+      if (!names.length) return el("p", { class: "sub", text: "Nothing is playing sound right now." });
+      return el("div", { class: "chips" }, names.map((a) => {
+        const off = blocked.some((b) => b.toLowerCase() === a.toLowerCase());
+        const live = playingApps.some((p) => p.toLowerCase() === a.toLowerCase());
+        return el("button", { class: "chip", "aria-pressed": String(!off), title: off ? "Not recorded. Click to record it again." : "Recorded. Click to stop recording it.",
+          text: (off ? "☐ " : "☑ ") + a + (live ? "" : " (not playing)"),
+          onclick: () => save({ audio_app_blocked: off ? blocked.filter((b) => b.toLowerCase() !== a.toLowerCase()) : [...blocked, a] }) });
+      }));
+    })())));
 }
 
 function renderAudio() {

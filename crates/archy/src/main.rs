@@ -160,6 +160,8 @@ struct App {
     blocked: Option<(String, std::time::Instant)>,
     /// Watch ticks the recorded window has been minimized.
     minimized_ticks: u32,
+    /// Apps already tried as a live-added track this recording (so each restarts it once).
+    apps_tried: Vec<String>,
     ticks: u32,
     hdr_warned: bool,
     /// "hotkey" session mode: the user has turned session recording on.
@@ -365,13 +367,40 @@ impl TrackVolumes {
     }
 }
 
+/// Other apps playing sound right now (Spotify, a browser...) that get their own
+/// track: not the game, Discord or Archy, and not ones the user unticked.
+fn extra_apps(s: &Settings, game_pid: u32) -> Vec<(u32, String)> {
+    let (with_game, with_discord, _) = s.audio_sources();
+    if !s.audio_per_app || s.audio_mode == "separate" || !(with_game || with_discord) {
+        return Vec::new();
+    }
+    let me = std::process::id();
+    archy_audio::playing_apps()
+        .into_iter()
+        .map(|(pid, exe)| (pid, exe.trim_end_matches(".exe").trim_end_matches(".EXE").to_string()))
+        .filter(|(pid, stem)| {
+            *pid != game_pid
+                && *pid != me
+                && !stem.eq_ignore_ascii_case("discord")
+                && !stem.eq_ignore_ascii_case("archy")
+                && !s.app_blocked(stem)
+        })
+        .take(6)
+        .collect()
+}
+
 fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolumes, avoid: &[String]) -> RecorderConfig {
     let mut audio = Vec::new();
     let (with_game, with_discord, with_mic) = s.audio_sources();
     {
         // Track 1 (always): everything you heard, and your mic, because it's what
         // single-track players (Discord, phones) play.
-        let source = if s.mic_wanted() {
+        // Game only (separate mode, game on, Discord and mic off): track 1 is just the
+        // game's process, so WhatsApp, Spotify and notifications never get in.
+        let game_only = s.audio_mode == "separate" && with_game && !with_discord && !s.mic_wanted() && game_pid != 0;
+        let source = if game_only {
+            Source::Process { pid: game_pid }
+        } else if s.mic_wanted() {
             Source::Mix {
                 output: Some(s.output_device.clone()),
                 mic: Some(s.mic_device.clone()),
@@ -403,20 +432,12 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
             });
         }
     }
-    if s.audio_per_app && (with_game || with_discord) {
-        // Other apps playing sound right now (Spotify, a browser...), one track each.
-        let me = std::process::id();
-        for (pid, exe) in archy_audio::playing_apps().into_iter().take(6) {
-            let stem = exe.trim_end_matches(".exe").trim_end_matches(".EXE").to_string();
-            if pid == game_pid || pid == me || stem.eq_ignore_ascii_case("discord") || stem.eq_ignore_ascii_case("archy") {
-                continue;
-            }
-            audio.push(AudioSource {
-                name: stem,
-                source: Source::Process { pid },
-                volumes: vols.of(&std::sync::Arc::new(std::sync::atomic::AtomicU32::new(100))),
-            });
-        }
+    for (pid, stem) in extra_apps(s, game_pid) {
+        audio.push(AudioSource {
+            name: stem,
+            source: Source::Process { pid },
+            volumes: vols.of(&std::sync::Arc::new(std::sync::atomic::AtomicU32::new(100))),
+        });
     }
     if with_mic {
         audio.push(AudioSource {
@@ -723,6 +744,7 @@ impl App {
         let behind = self.falling_behind();
         self.ticks = self.ticks.wrapping_add(1);
         let check_discord = self.ticks % 5 == 0 && self.settings.audio_sources().1;
+        let check_apps = self.ticks % 15 == 0; // every ~30 s
         if let Some(s) = &self.session {
             let window_gone = !watch::alive(s.hwnd);
             let ended = window_gone || s.recorder.status() != RecorderStatus::Recording;
@@ -743,8 +765,19 @@ impl App {
                 && check_discord
                 && !s.recorder.audio_tracks().iter().any(|t| t == "Discord")
                 && archy_audio::find_root_process("Discord.exe").is_some();
+            // An allowed app started playing after recording began: restart once to
+            // add its track (once per app per recording, so it never loops).
+            let mut new_app = None;
+            if !ended && check_apps && !discord {
+                let have = s.recorder.audio_tracks();
+                new_app = extra_apps(&self.settings, watch::pid_of(s.hwnd))
+                    .into_iter()
+                    .map(|(_, n)| n)
+                    .find(|n| !have.iter().any(|t| t.eq_ignore_ascii_case(n)) && !self.apps_tried.iter().any(|t| t.eq_ignore_ascii_case(n)));
+            }
+            let app_added = new_app.is_some();
             let slow = !ended && !switch && behind;
-            if !ended && !switch && !slow && !minimized && !discord {
+            if !ended && !switch && !slow && !minimized && !discord && !app_added {
                 return; // keep recording even while alt-tabbed
             }
             if slow {
@@ -768,6 +801,9 @@ impl App {
                 "the game was minimized (recording resumes when it's back)".to_string()
             } else if discord {
                 "Discord started; adding its track".to_string()
+            } else if let Some(n) = &new_app {
+                self.apps_tried.push(n.clone());
+                format!("{n} started playing sound; adding its track")
             } else {
                 s.recorder.stop_reason()
             };
@@ -984,6 +1020,10 @@ impl App {
                 }
                 self.keep_up = (0, 0, 0);
                 self.minimized_ticks = 0;
+                // Keep apps tried for the same game (a restart), forget them for a new one.
+                if self.previous.as_ref().map_or(true, |p| p.game != s.game) {
+                    self.apps_tried.clear();
+                }
                 self.session = Some(Session {
                     recorder: Arc::new(rec),
                     hwnd,
@@ -1931,6 +1971,7 @@ fn main() {
         failures: Vec::new(),
         blocked: None,
         minimized_ticks: 0,
+        apps_tried: Vec::new(),
         ticks: 0,
         hdr_warned: false,
         session_wanted: false,

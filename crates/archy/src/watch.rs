@@ -196,6 +196,13 @@ pub fn find(exe: &str) -> Option<Foreground> {
     Some(Foreground { hwnd, exe: exe.to_string(), pid, fullscreen: covers_monitor(hwnd), minimized })
 }
 
+/// The process that owns a window.
+pub fn pid_of(hwnd: HWND) -> u32 {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    pid
+}
+
 pub fn alive(hwnd: HWND) -> bool {
     unsafe { IsWindow(Some(hwnd)) }.as_bool()
 }
