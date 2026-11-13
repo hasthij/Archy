@@ -151,11 +151,12 @@ function mixEdited() {
   return ed.ev < 0 || ed.info.tracks.some((_, i) => i !== ed.ev && (ed.sep[i] !== 100 || ed.mute[i]));
 }
 function volumes() {
-  const edited = mixEdited();
+  // Everything stays on; a source moved off 100 is added or taken back out of it (negative = subtract).
   return ed.info.tracks.map((_, i) => {
     if (ed.mmute) return 0;
-    if (i === ed.ev) return edited ? 0 : ed.main;
-    return edited && !ed.mute[i] ? Math.round(ed.sep[i] * ed.main / 100) : 0;
+    if (i === ed.ev) return ed.main;
+    const want = ed.mute[i] ? 0 : ed.sep[i];
+    return ed.ev >= 0 ? Math.round((want - 100) * ed.main / 100) : Math.round(want * ed.main / 100);
   });
 }
 
@@ -192,20 +193,22 @@ function startAudio(at) {
   stopAudio();
   const a = ed.audio;
   if (!a.buffers) return;
-  // Other speeds: the preview stays silent (the export has the sound); never run it at 1x against a sped-up video.
-  if (ed.secs[secAt(at)]?.speed !== 1) { ed.quietSpeed = true; return; }
+  // Other speeds: the sound runs at that speed too (its pitch shifts in the preview; the export keeps pitch).
+  const rate = ed.secs[secAt(at)]?.speed || 1;
   a.ctx.resume();
   const when = a.ctx.currentTime + 0.02;
   a.sources = a.buffers.map((buf, i) => {
     if (at >= buf.duration) return null;
     const s = a.ctx.createBufferSource();
     s.buffer = buf;
+    s.playbackRate.value = rate;
     s.connect(a.taps[i]);
     s.start(when, at);
     return s;
   }).filter(Boolean);
   a.t0 = when;
   a.at = at;
+  a.rate = rate;
 }
 
 function stopAudio() {
@@ -266,6 +269,7 @@ function buildEditor() {
         d.stage,
         el("div", { class: "ed-transport" }, d.play, d.time),
         el("div", { class: "ed-tl" }, el("span", { class: "ed-lane-name", text: "Clip" }), d.timeline),
+        (d.arrRow = el("div", { class: "ed-tl", hidden: true }, el("span", { class: "ed-lane-name", text: "Order", title: "The order the parts play in the saved video" }), (d.arr = el("div", { class: "ed-arr" })))),
         d.lanes, d.laneButtons),
       side));
   $("#editor").replaceChildren(box);
@@ -359,7 +363,7 @@ function tick(now) {
   const a = ed.audio;
   if (!v.paused && a.sources.length && now - ed.driftAt > 500) {
     ed.driftAt = now;
-    if (Math.abs(a.at + (a.ctx.currentTime - a.t0) - t) > 0.12) startAudio(t);
+    if (Math.abs(a.at + (a.ctx.currentTime - a.t0) * (a.rate || 1) - t) > 0.12) startAudio(t);
   }
   ed.raf = requestAnimationFrame(tick);
 }
@@ -544,22 +548,59 @@ function followSections(t) {
   const v = ed.dom.video;
   let i = secAt(t);
   let s = ed.secs[i];
+  // Next kept part in the arranged order (inside the trim), or null.
+  const inTrim = (x) => x.keep && x.to > ed.start && x.from < ed.end;
+  const nextAfter = (k) => ed.secs.slice(k + 1).find(inTrim);
   if (!s.keep && !v.seeking) {
-    // Jump to the next kept section (or back to the start of the trim).
-    const next = ed.secs.slice(i + 1).find((x) => x.keep && x.to > ed.start && x.from < ed.end);
+    const next = nextAfter(i);
     v.currentTime = next ? Math.max(next.from, ed.start) : ed.start;
     return;
+  }
+  // Playing past the end of a part whose follower isn't the next bit of footage: jump to the follower (or loop to the first part).
+  if (!v.paused && !v.seeking && ed.secs.length > 1 && i === ed.secIndex && t >= s.to - 0.03) {
+    const nxt = nextAfter(i) || ed.secs.find(inTrim);
+    if (nxt && nxt !== s && Math.abs(nxt.from - s.to) > 0.02) { v.currentTime = Math.max(nxt.from, ed.start); return; }
   }
   if (v.playbackRate !== s.speed) v.playbackRate = s.speed;
   const z = s.zoom === 1 ? "" : `scale(${s.zoom})`;
   if (ed.dom.video.style.transform !== z) { ed.dom.video.style.transform = z; ed.dom.canvas.style.transform = z; }
-  // The sound preview can't follow other speeds: quiet there (the export has it).
-  const quiet = s.speed !== 1;
-  if (quiet !== ed.quietSpeed) {
-    ed.quietSpeed = quiet;
-    if (quiet) stopAudio(); else if (!v.paused) startAudio(t);
-  }
+  // The sound follows the section's speed: restart it when the speed changes.
+  if (ed.audio.buffers && s.speed !== ed.audio.rate && !v.paused) startAudio(t);
   if (i !== ed.secIndex) { ed.secIndex = i; if (!v.paused) ed.secPick = null; renderSections(); }
+}
+
+/// Drag a part on the Order track. Snap on: parts jump slot by slot and the others slide aside. Snap off: the part follows the pointer freely and drops into the nearest slot.
+function partDrag(e, k, move, click) {
+  if (e.button !== 0) return;
+  const blocks = [...ed.dom.arr.children];
+  const rects = blocks.map((b) => b.getBoundingClientRect());
+  const w = rects[k].width + 3;
+  const x0 = e.clientX;
+  let moved = false, target = k;
+  const snapOn = !ed.snapOff;
+  const bar = blocks[k];
+  bar.setPointerCapture(e.pointerId);
+  const onMove = (ev) => {
+    const dx = ev.clientX - x0;
+    if (!moved && Math.abs(dx) < 4) return;
+    if (!moved) { moved = true; bar.classList.add("drag"); blocks.forEach((b) => b.classList.add("slide")); }
+    const c = rects[k].left + rects[k].width / 2 + dx;
+    target = rects.findIndex((r) => c < r.right + 1.5);
+    if (target < 0) target = rects.length - 1;
+    bar.style.transform = `translateX(${snapOn ? (target > k ? rects[target].right - rects[k].right : rects[target].left - rects[k].left) : dx}px)`;
+    blocks.forEach((b, j) => { if (j !== k) b.style.transform = target > k && j > k && j <= target ? `translateX(${-w}px)` : target < k && j >= target && j < k ? `translateX(${w}px)` : ""; });
+  };
+  const onUp = () => {
+    bar.removeEventListener("pointermove", onMove);
+    bar.removeEventListener("pointerup", onUp);
+    bar.removeEventListener("pointercancel", onUp);
+    if (!moved) click();
+    else if (target !== k) move(k, target - k);
+    else renderSections();
+  };
+  bar.addEventListener("pointermove", onMove);
+  bar.addEventListener("pointerup", onUp);
+  bar.addEventListener("pointercancel", onUp);
 }
 
 function renderSections() {
@@ -578,12 +619,38 @@ function renderSections() {
     if (ed.secs[k].keep && ed.secs.filter((x) => x.keep).length === 1) { toast("Keep at least one section"); return; }
     snap(); ed.secs[k].keep = !ed.secs[k].keep; ed.lastT = -1; renderSections();
   };
+  // Move a part earlier/later in the final video (the footage stays put).
+  const move = (k, by) => {
+    const j = k + by;
+    if (j < 0 || j >= ed.secs.length) return;
+    snap();
+    const [x] = ed.secs.splice(k, 1);
+    ed.secs.splice(j, 0, x);
+    if (ed.secPick === k) ed.secPick = j;
+    else if (ed.secPick >= Math.min(k, j) && ed.secPick <= Math.max(k, j)) ed.secPick += by > 0 ? -1 : 1;
+    ed.secIndex = -1; ed.lastT = -1;
+    renderSections();
+  };
+  // Order lane: one block per part, drag to rearrange. Width = how long it lasts in the video.
+  const total = ed.secs.reduce((a, x) => a + (x.keep ? (x.to - x.from) / x.speed : 0), 0) || 1;
+  d.arrRow.hidden = ed.secs.length < 2;
+  d.arr.replaceChildren(...ed.secs.map((x, k) => el("div", {
+    class: "ed-arr-block" + (k === i ? " on" : "") + (x.keep ? "" : " cut"),
+    style: `flex:${Math.max(0.02, x.keep ? (x.to - x.from) / x.speed / total : 0.04)} 1 0`,
+    title: `Part ${k + 1}: drag to move it`,
+    text: `${k + 1} · ${fmt((x.to - x.from) / x.speed)}`,
+    onpointerdown: (e) => partDrag(e, k, move, () => { ed.secPick = k; d.video.currentTime = x.from; renderSections(); }),
+  })));
   const list = ed.secs.length > 1 ? el("div", { class: "ed-seclist" }, ed.secs.map((x, k) => el("div", { class: "ed-secrow" + (k === i ? " on" : "") + (x.keep ? "" : " cut"), onclick: () => { ed.secPick = k; d.video.currentTime = x.from; renderSections(); } },
     el("b", { text: `Part ${k + 1}` }), el("span", { text: `${fmt(x.from)} – ${fmt(x.to)}${x.keep ? "" : " · removed"}${x.speed !== 1 ? ` · ${x.speed}×` : ""}${x.zoom !== 1 ? ` · zoom ${x.zoom}×` : ""}` }),
+    el("button", { class: "btn", text: "◀", title: "Play this part earlier in the video", "aria-label": `Move part ${k + 1} earlier`, disabled: k === 0, onclick: (e) => { e.stopPropagation(); move(k, -1); } }),
+    el("button", { class: "btn", text: "▶", title: "Play this part later in the video", "aria-label": `Move part ${k + 1} later`, disabled: k === ed.secs.length - 1, onclick: (e) => { e.stopPropagation(); move(k, 1); } }),
     el("button", { class: "btn" + (x.keep ? " danger" : ""), text: x.keep ? "Remove" : "Bring back", onclick: (e) => { e.stopPropagation(); toggle(k); } })))) : null;
   d.secPanel.replaceChildren(...[
     el("div", { class: "ed-row" },
       el("button", { class: "btn primary", text: "Split here", onclick: () => { ed.secPick = null; splitHere(); } }),
+      el("label", { class: "ed-snap", title: "Magnet: parts click into place and items stick to edges and the playhead. Turn off to move freely." },
+        el("input", { type: "checkbox", checked: !ed.snapOff, onchange: (e) => { ed.snapOff = !e.target.checked; } }), " Snap"),
       trivialSections() ? null : el("button", { class: "btn", text: "Undo splits", onclick: () => {
         snap();
         ed.secs = [{ from: 0, to: ed.info.duration, speed: 1, zoom: 1, keep: true }];
@@ -591,7 +658,7 @@ function renderSections() {
         renderSections();
       } })),
     el("p", { class: "ed-note", text: ed.secs.length > 1
-      ? "Click a part to pick it, then set its speed or zoom, or remove it."
+      ? "Click a part to pick it, then set its speed or zoom, or remove it. Drag the blocks on the Order track (or use ◀ ▶) to play parts in a different order."
       : "Play to a moment and press Split here to cut the clip into parts. Then remove a part, or change its speed or zoom." }),
     list,
     chipGroup(`Speed (part ${i + 1})`, SPEEDS, s.speed, (v) => set({ speed: v })),
@@ -676,8 +743,8 @@ function renderAudio() {
 
 function hintText() {
   return mixEdited()
-    ? "Mixing each source on its own (other apps' sounds are left out)."
-    : "Move or mute a source to mix them separately. Master is the whole clip.";
+    ? "Each source is turned up or down inside the full mix."
+    : "Move or mute a source to change just that sound. Master is the whole clip.";
 }
 
 function updateMeters() {
@@ -946,7 +1013,7 @@ function barDrag(bar, it, track) {
     const r = track.getBoundingClientRect();
     const secPerPx = ed.info.duration / r.width;
     const br = bar.getBoundingClientRect();
-    const mode = e.clientX - br.left < 8 ? "start" : br.right - e.clientX < 8 ? "end" : "move";
+    const mode = e.clientX - br.left < 10 ? "start" : br.right - e.clientX < 10 ? "end" : "move";
     const x0 = e.clientX, s0 = it.start, e0 = it.end, o0 = it.offset || 0;
     const len = it.media?.info.duration;
     if (ed.selected !== it.id) { ed.selected = it.id; ed.dirty = true; renderProps(); bar.classList.add("on"); }
@@ -963,7 +1030,7 @@ function barDrag(bar, it, track) {
       const dt = (ev.clientX - x0) * secPerPx;
       if (mode === "move") {
         let d = clamp(dt, -gs, ed.info.duration - ge);
-        const near = 8 * secPerPx;
+        const near = ed.snapOff ? 0 : 8 * secPerPx;
         let best = near;
         for (const p of pins) for (const edge of [gs + d, ge + d]) if (Math.abs(p - edge) < best) { best = Math.abs(p - edge); d = p - (edge - d); }
         d = clamp(d, -gs, ed.info.duration - ge);
@@ -1152,7 +1219,7 @@ function openTrimmer(staged, name) {
   function draw() {
     hs.style.left = P(start); he.style.left = P(end);
     range.style.left = P(start); range.style.width = P(end - start);
-    info.textContent = `${(end - start).toFixed(1)} s of ${fmt(dur)} (up to ${limit} s)`;
+    info.textContent = `${(end - start).toFixed(1)} s of ${fmt(dur)} (up to ${limit.toFixed(1)} s)`;
     fromIn.sync(); toIn.sync();
   }
   let grab = null;
@@ -1190,7 +1257,7 @@ function openTrimmer(staged, name) {
   const box = el("div", { class: "trim-box", role: "dialog", "aria-modal": "true", "aria-label": `Trim ${name}` },
     el("h3", { text: `Pick the part of ${name} to use` }),
     el("p", { class: "ed-note", text: dur > limit
-      ? `It's ${fmt(dur)} long; ${isAudio ? "sounds" : "videos and GIFs"} can be up to ${limit} s. Drag the blue handles (or type the times), then press Add.`
+      ? `It's ${fmt(dur)} long; ${isAudio ? "sounds" : "videos and GIFs"} can be up to ${limit.toFixed(1)} s (the length of the clip you're editing). Drag the blue handles (or type the times), then press Add.`
       : "Drag the blue handles (or type the times) to keep just the part you want." }),
     isAudio ? el("div", { class: "trim-sound" }, el("span", { text: "♪" }), player) : el("div", { class: "trim-video" }, player),
     line,

@@ -291,6 +291,7 @@ impl Recorder {
                     user_data: a.info.user_data.clone(),
                 })
                 .collect(),
+            names: self.audio.iter().map(|a| a.name.clone()).collect(),
         };
         *slot = Some(crate::session::start(path.to_path_buf(), format));
         true

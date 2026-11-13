@@ -54,6 +54,8 @@ pub struct Format {
     pub height: u32,
     pub fps: u32,
     pub audio: Vec<TrackFormat>,
+    /// One name per audio track, noted at the end of the file for the editor.
+    pub names: Vec<String>,
 }
 
 /// Below this much free space a session stops (clips still save).
@@ -169,6 +171,10 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
             }
             Msg::Stop(reply) => {
                 let ended = writer.take().map(|w| w.finish());
+                if matches!(ended, Some(Ok(_))) {
+                    let n: Vec<&str> = format.names.iter().map(String::as_str).collect();
+                    crate::recorder::append_track_names(&path, &n);
+                }
                 if let Some(Err(e)) = ended {
                     problem.get_or_insert(format!("couldn't finish the file ({})", e.message()));
                 }
@@ -186,7 +192,10 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
     }
     // The sender went away without Stop (recorder dropped): still finish the file.
     if let Some(w) = writer {
-        let _ = w.finish();
+        if w.finish().is_ok() {
+            let n: Vec<&str> = format.names.iter().map(String::as_str).collect();
+            crate::recorder::append_track_names(&path, &n);
+        }
     }
 }
 

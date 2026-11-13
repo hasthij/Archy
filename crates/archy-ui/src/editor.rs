@@ -262,8 +262,8 @@ pub fn thumbnail(clip: &Path) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-/// Longest video or GIF that can be put on a clip.
-pub const MAX_MEDIA_SECONDS: f64 = 20.0;
+/// Safety bound for a video or GIF; the window limits it to the length of the clip being edited.
+pub const MAX_MEDIA_SECONDS: f64 = 600.0;
 /// Longest sound (music, an effect) that can be put on a clip (clips are at most 60 s).
 pub const MAX_AUDIO_SECONDS: f64 = 60.0;
 
@@ -504,7 +504,7 @@ pub struct ExportRequest {
     pub start: f64,
     pub end: f64,
     /// Percent (0-200) per audio track, in file order. The export has one mixed track.
-    pub volumes: Vec<u32>,
+    pub volumes: Vec<i32>,
     /// Text and images, bottom layer first (drawn over `media`).
     pub overlays: Vec<Overlay>,
     /// Videos and GIFs, bottom layer first (under the text and images).
@@ -774,12 +774,12 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
     }
     // One mixed audio track (what every player plays). Track 1 already holds
     // everything you heard, so the others are added on top only when turned up.
-    let active: Vec<(usize, u32)> = req
+    let active: Vec<(usize, i32)> = req
         .volumes
         .iter()
         .enumerate()
-        .filter(|(_, v)| **v > 0)
-        .map(|(i, v)| (i, (*v).min(200)))
+        .filter(|(_, v)| **v != 0)
+        .map(|(i, v)| (i, (*v).clamp(-200, 200)))
         .collect();
     let has_audio = !gif && (!active.is_empty() || !media_audio.is_empty());
     if has_audio {
@@ -790,7 +790,7 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
         }
         let inputs_n = active.len() + media_audio.len();
         labels.push_str(&media_audio.concat());
-        let loud = inputs_n > 1 || active.iter().any(|(_, v)| *v > 100);
+        let loud = inputs_n > 1 || active.iter().any(|(_, v)| v.abs() > 100);
         let mix = if inputs_n > 1 {
             format!("{labels}amix=inputs={inputs_n}:normalize=0:duration=longest")
         } else {
@@ -1087,6 +1087,22 @@ mod tests {
     }
 
     #[test]
+    fn sections_keep_the_given_order_and_allow_repeats() {
+        // Rearranged parts: later footage first, and one part used twice.
+        let secs = [
+            Section { start: 4.0, end: 6.0, speed: 1.0, zoom: 1.0 },
+            Section { start: 0.0, end: 2.0, speed: 2.0, zoom: 1.0 },
+            Section { start: 4.0, end: 6.0, speed: 1.0, zoom: 1.0 },
+        ];
+        let (f, _, _) = super::section_filters(&secs, "v0", Some("a0"), 1280, 720);
+        assert!(f.iter().any(|l| l.contains("trim=start=4.000:end=6.000")));
+        assert_eq!(f.last().unwrap(), "[pv0][pa0][pv1][pa1][pv2][pa2]concat=n=3:v=1:a=1[vsec][asec]");
+        let first = f.iter().position(|l| l.contains("trim=start=4.000")).unwrap();
+        let second = f.iter().position(|l| l.contains("trim=start=0.000")).unwrap();
+        assert!(first < second, "parts are processed in arrangement order");
+    }
+
+    #[test]
     fn crop_sizes_are_even_and_inside_the_picture() {
         // 9:16 from 1920x1080: full height, 607.5 px wide -> 606 (even), centred.
         let c = Crop { x: (1.0 - 0.3164) / 2.0, y: 0.0, w: 0.3164, h: 1.0 };
@@ -1284,10 +1300,9 @@ mod export_tests {
             let staged = stage_media(name, &std::fs::read(file).unwrap()).unwrap();
             finish_media(&staged.path, 0.0, staged.duration).unwrap()
         };
-        // Too long: staged fine, refused whole, accepted once trimmed (exact cut).
+        // A 25 s video is fine (the window caps it at the clip's length); cuts are exact.
         let long = stage_media("long.mp4", &std::fs::read(&too_long).unwrap()).unwrap();
         assert!(long.kind == "video" && long.duration > 24.0 && long.limit == MAX_MEDIA_SECONDS);
-        assert!(finish_media(&long.path, 0.0, long.duration).unwrap_err().contains("at most 20"));
         let cut = finish_media(&long.path, 3.0, 13.0).unwrap();
         assert!((info(Path::new(&cut.path)).unwrap().duration - 10.0).abs() < 0.3);
         // A song: an MP3 with cover art is still a sound, trimmed to 60 s at most.

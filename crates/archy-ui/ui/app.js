@@ -953,7 +953,7 @@ function renderHotkeys() {
   $("#hotkey-settings").replaceChildren(el("div", { class: "card" },
     hotkeyRow("hotkey_save", "Save clip", `Saves the last ${lengthLabel(settings.clip_seconds)}`),
     hotkeyRow("hotkey_save_long", "Save long clip", `Saves the last ${lengthLabel(settings.long_clip_seconds)}`),
-    hotkeyRow("hotkey_pause", "Pause / resume", "Stops recording completely: zero load. F9 by default, separate from the save key; clear it to turn it off. The tray menu can pause too."),
+    hotkeyRow("hotkey_pause", "Pause / resume", "Stops recording completely: zero load. End by default, separate from the save key; clear it to turn it off. The tray menu can pause too."),
     hotkeyRow("hotkey_screenshot", "Screenshot", "Saves a full-size picture (PNG) of the game into your clips. Off until you set a key; costs nothing until you press it."),
     hotkeyRow("hotkey_session", "Whole-session recording: start / stop", "Press once to start recording the whole session to one video, again to end it. Your replay buffer and clip keys keep working the whole time."),
     hotkeyRow("hotkey_session_pause", "Whole-session recording: pause / resume", "Pauses and resumes the session video without ending it. Does nothing if no session is recording.")),
@@ -1717,22 +1717,8 @@ $("#theme-btn").addEventListener("click", () => {
   save({ theme: next }, next === "dark" ? "Dark mode" : "Light mode");
 });
 
-let mockEl = null;
-/// Static, aria-hidden miniature of the app. Reads the real CSS variables, so it follows every look change with no re-render and loads no clips.
-function buildMock() {
-  const nav = (view, text, on) => el("div", { class: "m-nav" + (on ? " on" : "") }, document.querySelector(`.nav[data-view="${view}"] svg`)?.cloneNode(true) || "", el("span", { text }));
-  const clip = (t, m) => el("div", { class: "m-clip" }, el("div", { class: "m-thumb" }), el("div", {}, el("b", { text: t }), el("small", { text: m })));
-  return el("div", { class: "mock", "aria-hidden": "true" },
-    el("div", { class: "m-rail" }, el("div", { class: "m-logo" }), nav("clips", "Clips", true), nav("games", "Games"), nav("audio", "Audio"), nav("recording", "Settings")),
-    el("div", { class: "m-main" },
-      el("div", { class: "m-head" }, el("b", { text: "Clips" }), el("span", { class: "m-btn", text: "Save clip" })),
-      el("div", { class: "m-chips" }, el("span", { class: "on", text: "All" }), el("span", { text: "Roblox" }), el("span", { text: "Valorant" })),
-      el("div", { class: "m-grid" }, clip("Clutch round", "2 min ago"), clip("Funny moment", "Yesterday"), clip("Last second win", "Mon"), clip("Great play", "Sun"), clip("Boss down", "Sat"), clip("Highlights", "Fri")),
-      el("div", { class: "m-card" }, el("span", { text: "Buffer length" }), el("div", { class: "m-sl" })),
-      el("div", { class: "m-card" }, el("span", { text: "Sounds" }), el("div", { class: "m-sw" }))));
-}
-
-function renderAppearance() {  const pick = (patch, msg) => { Object.assign(settings, patch); applySettingsLook(); save(patch, msg); };
+function renderAppearance() {
+  const pick = (patch, msg) => { Object.assign(settings, patch); applySettingsLook(); save(patch, msg); };
   // Window-only choices (never reach the recorder): kept in the window's own storage by theme.js.
   const ui = (patch, msg, redo) => { setUi(patch); if (redo) { $("#clips").dataset.key = ""; renderClips(); } renderAppearance(); toast(msg); };
   const themeCard = (value, title, about, on, onclick) => el("button", {
@@ -1808,10 +1794,7 @@ function renderAppearance() {  const pick = (patch, msg) => { Object.assign(sett
     row("Clip details", "Shows the date under each clip. Off gives a cleaner library.",
       seg("Clip details", u.meta, [["on", "Show"], ["off", "Hide"]], (v, t) => ui({ meta: v }, `${t} clip details`))),
   ];
-  if (!mockEl) mockEl = buildMock();
-  $("#appearance-settings").replaceChildren(el("div", { class: "ap-wrap" },
-    el("aside", { class: "ap-side" }, mockEl, el("p", { text: "Live preview. Placeholder data only." })),
-    el("div", { class: "ap-panel" }, ...panel)));
+  $("#appearance-settings").replaceChildren(...panel);
 }
 
 function renderAll() {
