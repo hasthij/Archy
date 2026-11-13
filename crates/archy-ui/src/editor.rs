@@ -1133,6 +1133,33 @@ mod export_tests {
         clips.pop().expect("no clip to test with")
     }
 
+    /// Real clip, shrunk to its minimum: every audio stream must survive and not be silent.
+    /// ARCHY_TEST_CLIP=<4-audio-track clip over 10 MB> cargo test -p archy-ui compresses -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn compresses() {
+        let work = std::env::temp_dir().join("archy-compress-test");
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        let src = work.join("clip.mp4");
+        std::fs::copy(clip(), &src).unwrap();
+        let before = info(&src).unwrap().tracks.len();
+        let out = compress(&src, MIN_TARGET, &|_| {}).unwrap();
+        let size = std::fs::metadata(&out).unwrap().len();
+        println!("compressed to {} KB", size / 1024);
+        assert!(size <= MIN_TARGET);
+        let after = info(&out).unwrap().tracks.len();
+        assert_eq!(before, after, "audio stream count must match");
+        for i in 0..after {
+            let o = tool("ffmpeg.exe").unwrap()
+                .args(["-v", "info", "-i"]).arg(&out)
+                .args(["-map", &format!("0:a:{i}"), "-af", "volumedetect", "-f", "null", "-"])
+                .output().unwrap();
+            let log = String::from_utf8_lossy(&o.stderr);
+            println!("track {i}: {}", log.lines().find(|l| l.contains("mean_volume")).unwrap_or("?"));
+        }
+    }
+
     #[test]
     #[ignore]
     fn exports() {
