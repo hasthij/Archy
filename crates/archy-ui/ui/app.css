@@ -217,8 +217,8 @@ kbd { padding: 3px 8px; border-radius: 6px; background: var(--surface-2); border
 .clip-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .clip-actions .btn { flex: 1 1 auto; min-width: max-content; height: 34px; font-size: 13px; padding: 0 10px; white-space: nowrap; }
 .clip-actions .btn.primary { flex: 1.6; }
-.btn.discord { margin-top: 8px; width: 100%; height: 34px; font-size: 13px; padding: 0 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
-.btn.discord:disabled { opacity: 0.7; cursor: progress; }
+.btn.compress { margin-top: 8px; width: 100%; height: 34px; font-size: 13px; padding: 0 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.btn.compress:disabled { opacity: 0.7; cursor: progress; }
 .empty { color: var(--muted); padding: 48px 0; text-align: center; }
 
 /* ---------- Settings cards ---------- */
@@ -629,7 +629,7 @@ input[type="color"] { width: 32px; height: 32px; padding: 0; border: 1px solid v
 /* List / table rows: compact fixed-width buttons instead of stretched ones */
 .grid[data-view="list"] .clip-actions .btn, .grid[data-view="table"] .clip-actions .btn { flex: none; min-width: 0; }
 .grid[data-view="list"] .clip-actions .btn.primary, .grid[data-view="table"] .clip-actions .btn.primary { flex: none; }
-.grid[data-view="list"] .btn.discord, .grid[data-view="table"] .btn.discord { margin: 0; width: auto; flex: none; }
+.grid[data-view="list"] .btn.compress, .grid[data-view="table"] .btn.compress { margin: 0; width: auto; flex: none; }
 .grid[data-view="list"] .clip-meta, .grid[data-view="table"] .clip-meta { flex: none; width: 110px; white-space: nowrap; }
 .grid[data-view="list"] .thumb, .grid[data-view="table"] .thumb { align-self: stretch; height: auto; aspect-ratio: auto; min-height: 0; }
 .grid[data-view="list"] .thumb { width: 150px; min-height: 84px; }
@@ -671,20 +671,20 @@ input[type="color"] { width: 32px; height: 32px; padding: 0; border: 1px solid v
 
 /* Clip buttons: icons (default) or text, from Appearance */
 .btn svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: var(--icon-stroke); stroke-linecap: round; stroke-linejoin: round; }
-.clip-actions .btn, .btn.discord { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
-[data-actions="text"] .clip-actions .btn svg, [data-actions="text"] .btn.discord svg { display: none; }
-[data-actions="icons"] .clip-actions .btn .lbl, [data-actions="icons"] .btn.discord .lbl { display: none; }
+.clip-actions .btn, .btn.compress { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+[data-actions="text"] .clip-actions .btn svg, [data-actions="text"] .btn.compress svg { display: none; }
+[data-actions="icons"] .clip-actions .btn .lbl, [data-actions="icons"] .btn.compress .lbl { display: none; }
 [data-actions="icons"] .clip-actions { flex-wrap: nowrap; gap: 4px; }
 [data-actions="icons"] .clip-actions .btn { flex: 1 1 0; min-width: 0; width: auto; padding: 0; }
 [data-actions="icons"] .clip-actions .btn.primary { flex: 1 1 0; }
 [data-actions="icons"] .clip-actions .btn.sure { flex: 2 1 0; }
 [data-actions="icons"] .clip-actions .btn.sure .lbl { display: inline; }
 [data-actions="icons"] .clip-actions .btn.sure svg { display: none; }
-[data-actions="icons"] .clip-actions .btn.discord { margin: 0; width: auto; }
-[data-actions="text"] .clip-actions .btn.discord { flex: 1 1 100%; order: -1; margin: 0; width: auto; }
-[data-actions="icons"] .btn.discord:disabled .lbl { display: none; }
+[data-actions="icons"] .clip-actions .btn.compress { margin: 0; width: auto; }
+[data-actions="text"] .clip-actions .btn.compress { flex: 1 1 100%; order: -1; margin: 0; width: auto; }
+[data-actions="icons"] .btn.compress:disabled .lbl { display: none; }
 [data-actions="icons"] .grid[data-view="list"] .clip-actions .btn, [data-actions="icons"] .grid[data-view="table"] .clip-actions .btn { flex: none; width: 34px; }
-[data-actions="icons"] .grid[data-view="list"] .clip-actions .btn.discord, [data-actions="icons"] .grid[data-view="table"] .clip-actions .btn.discord { width: 34px; }
+[data-actions="icons"] .grid[data-view="list"] .clip-actions .btn.compress, [data-actions="icons"] .grid[data-view="table"] .clip-actions .btn.compress { width: 34px; }
 [data-actions="icons"] .grid[data-view="table"] .clip-actions .btn { width: 30px; }
 
 /* Sounds rows never overflow the page */
@@ -700,3 +700,12 @@ input[type="color"] { width: 32px; height: 32px; padding: 0; border: 1px solid v
 .app-opt b { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .app-opt span { font: 12px var(--mono); color: var(--muted); }
 .game-find { width: 100%; margin: 0 0 6px; box-sizing: border-box; }
+
+.cmp-box { width: min(460px, 100%); }
+.cmp-box input[type="range"] { width: 100%; margin: 12px 0 8px; }
+.cmp-row { display: flex; align-items: center; gap: 8px; }
+.cmp-num { width: 90px; height: 32px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+.cmp-unit { height: 32px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+.cmp-msg { min-height: 20px; margin: 8px 0 0; }
+.cmp-bar { height: 6px; border-radius: 3px; background: var(--line-soft); overflow: hidden; margin-top: 8px; }
+.cmp-fill { height: 100%; background: var(--accent); transition: width 0.2s; }

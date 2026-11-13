@@ -12,9 +12,11 @@ pub struct Settings {
     pub clip_seconds: u32,
     /// Seconds saved by the "long clip" hotkey (15-60). Also the replay buffer length.
     pub long_clip_seconds: u32,
-    /// "360p" | "480p" | "720p" | "1080p" | "1440p", or "discord": sized so a normal
-    /// clip always fits Discord's 10 MB upload limit.
+    /// "360p" | "480p" | "720p" | "1080p" | "1440p". (The old "discord" value is
+    /// migrated on load to 720p plus `compress_mb` = 10.)
     pub quality: String,
+    /// Default size the "Custom size" compressor aims for, in MB (10 - 10000).
+    pub compress_mb: u32,
     /// 24-144.
     pub fps: u32,
     /// "h264" (plays everywhere, incl. Discord previews) | "hevc" | "av1" | "auto" (best available).
@@ -211,6 +213,7 @@ impl Default for Settings {
             clip_seconds: 30,
             long_clip_seconds: 60,
             quality: "720p".into(),
+            compress_mb: 100,
             fps: 60,
             codec: "h264".into(),
             save_folder: default_save_folder(),
@@ -385,6 +388,11 @@ impl Settings {
         for h in &mut self.extra_hotkeys {
             h.seconds = h.seconds.clamp(5, MAX_CLIP_SECONDS);
         }
+        if self.quality.eq_ignore_ascii_case("discord") {
+            self.quality = "720p".into();
+            self.compress_mb = 10;
+        }
+        self.compress_mb = self.compress_mb.clamp(10, 10_000);
         self.fps = self.fps.clamp(24, 144);
         self.clip_sound_volume = self.clip_sound_volume.min(200);
         for v in [

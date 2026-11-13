@@ -326,7 +326,6 @@ fn open_path(path: &std::path::Path) {
 }
 
 /// Discord's free upload limit, with a margin for the MP4 container.
-const DISCORD_LIMIT_BYTES: f64 = 10_000_000.0 * 0.92;
 
 /// Live track volumes; the recorder reads them for every audio block.
 #[derive(Default)]
@@ -406,14 +405,8 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
         });
     }
 
-    let discord = s.quality.eq_ignore_ascii_case("discord");
-    // Discord mode: lighter audio, and the video gets whatever is left of 10 MB.
-    let audio_kbps = if discord { 96 } else { s.audio_kbps };
-    let (height, target_bps) = if discord {
-        let total = DISCORD_LIMIT_BYTES * 8.0 / s.clip_seconds.max(1) as f64;
-        let video = (total - (audio.len() as u32 * audio_kbps * 1000) as f64).max(600_000.0);
-        (if video >= 2_000_000.0 { 720 } else { 480 }, video as u32)
-    } else {
+    let audio_kbps = s.audio_kbps;
+    let (height, target_bps) = {
         let p = presets::find(&s.quality).unwrap_or(&presets::PRESETS[2]);
         // Presets are sized for 60 fps. Above that the same bitrate is split over
         // more frames and fast motion goes soft (at 144, each frame got 2.4x less),

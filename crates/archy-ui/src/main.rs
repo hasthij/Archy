@@ -513,17 +513,6 @@ async fn pick_folder(window: tauri::WebviewWindow) -> Option<String> {
 
 /// Re-encodes a clip to fit Discord's free 10 MB upload limit and copies the
 /// result to the clipboard. Returns the new file's path.
-#[tauri::command]
-async fn discord_copy(path: String) -> Result<String, String> {
-    let src = clip_path(&path)?;
-    let dst = archy_core::discord::copy_path(&src);
-    let info = tauri::async_runtime::spawn_blocking(move || archy_core::discord::make_copy(&src, &dst, 10_000_000))
-        .await
-        .map_err(|_| "Discord copy crashed".to_string())?
-        .map_err(|e| e.message())?;
-    archy_core::clipboard::copy_file(&info.path);
-    Ok(info.path.to_string_lossy().into_owned())
-}
 
 /// The one compressor: shrinks a clip to about `target_mb` MB keeping every
 /// audio track. Progress comes as `export-progress`; `cancel_export` stops it.
@@ -991,7 +980,6 @@ fn main() {
             recycle_clip,
             open_clips_folder,
             pick_folder,
-            discord_copy,
             clip_info,
             editor_tracks,
             editor_ready,

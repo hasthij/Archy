@@ -258,7 +258,7 @@ const playIcon = () => {
 };
 
 /// A screenshot in the library: the picture is its own thumbnail.
-const ICON_D = {'copy': 'M9 9h10v10H9zM5 15V5h10', 'edit': 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4', 'gif': 'M4 5h16v14H4zM8 15l3-4 3 3 2-2 2 3', 'folder': 'M3 7h6l2 2h10v10H3z', 'trash': 'M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13', 'discord': 'M12 4v11M7 10l5 5 5-5M5 20h14'};
+const ICON_D = {'copy': 'M9 9h10v10H9zM5 15V5h10', 'edit': 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4', 'gif': 'M4 5h16v14H4zM8 15l3-4 3 3 2-2 2 3', 'folder': 'M3 7h6l2 2h10v10H3z', 'trash': 'M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13', 'compress': 'M12 4v11M7 10l5 5 5-5M5 20h14'};
 // Turns a text button into icon + label; CSS shows one of them (Appearance > Clip buttons).
 function iconize(btn, key) {
   const t = btn.textContent;
@@ -337,7 +337,7 @@ function clipCard(c, hero = false) {
       el("div", { class: "clip-name", title: c.name, text: c.name }),
       el("div", { class: "clip-meta", text: when(c.modified) }),
       el("div", { class: "clip-actions" },
-        c.bytes > 10e6 && !c.name.endsWith("(Discord)") ? discordButton(c) : null,
+        compressButton(c),
         iconize(el("button", { class: "btn primary", text: "Copy", onclick: async () => {
           try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); }
           catch (e) { toast(String(e)); }
@@ -348,22 +348,80 @@ function clipCard(c, hero = false) {
         del)));
 }
 
-function discordButton(c) {
-  const b = iconize(el("button", { class: "btn discord", text: "Discord copy", title: "Makes a copy under 10 MB that Discord accepts, and copies it" }), "discord");
-  b.addEventListener("click", async () => {
-    b.disabled = true;
-    setLbl(b, "Making Discord copy…");
-    try {
-      await invoke("discord_copy", { path: c.path });
-      toast("Discord copy ready and copied. Paste it into Discord");
-      loadClips();
-    } catch (e) {
-      toast("Discord copy failed: " + e);
-      b.disabled = false;
-      setLbl(b, "Discord copy");
-    }
-  });
+const MIN_MB = 10, MAX_MB = 10000;
+/** Fmt a size in MB as "850 MB" or "1.5 GB". */
+const sizeLbl = (mb) => (mb >= 1000 ? `${+(mb / 1000).toFixed(2)} GB` : `${Math.round(mb)} MB`);
+
+function compressButton(c) {
+  const small = c.bytes < MIN_MB * 1e6;
+  const b = iconize(el("button", { class: "btn compress", text: "Custom size", title: small ? "This clip is already under 10 MB, so there is nothing to shrink" : "Shrink this clip to a size you pick (10 MB up to the clip's own size) and copy it" }), "compress");
+  if (small) b.disabled = true;
+  else b.addEventListener("click", () => compressDialog(c));
   return b;
+}
+
+/** The shared compressor dialog: size slider (log scale, 10 MB to min(10 GB, clip)), exact entry, progress, cancel. */
+function compressDialog(c, onDone) {
+  $("#cmp-back")?.remove();
+  const maxMB = Math.max(MIN_MB, Math.min(MAX_MB, Math.floor(c.bytes / 1e6)));
+  const toPos = (mb) => Math.round(1000 * Math.log(mb / MIN_MB) / Math.log(maxMB / MIN_MB || 1));
+  const fromPos = (p) => MIN_MB * Math.pow(maxMB / MIN_MB, p / 1000);
+  let mb = Math.min(maxMB, Math.max(MIN_MB, settings.compress_mb || 100));
+  const range = el("input", { type: "range", min: 0, max: 1000, step: 1, value: toPos(mb), "aria-label": "Target size" });
+  const num = el("input", { type: "number", class: "cmp-num", min: 0, step: "any", "aria-label": "Exact size" });
+  const unit = el("select", { class: "cmp-unit", "aria-label": "Unit" }, el("option", { value: "MB", text: "MB" }), el("option", { value: "GB", text: "GB" }));
+  const msg = el("p", { class: "sub cmp-msg" });
+  const fill = el("div", { class: "cmp-fill" });
+  const bar = el("div", { class: "cmp-bar", hidden: "" }, fill);
+  const show = () => {
+    const gb = unit.value === "GB";
+    num.value = String(+(gb ? mb / 1000 : mb).toFixed(gb ? 2 : 0));
+    range.value = toPos(mb);
+    range.style.setProperty("--fill", range.value / 10 + "%");
+  };
+  const setMB = (v, typed) => {
+    msg.textContent = "";
+    if (!Number.isFinite(v)) v = mb;
+    if (v < MIN_MB) { v = MIN_MB; if (typed) msg.textContent = "The smallest target is 10 MB."; }
+    if (v > maxMB) { v = maxMB; if (typed) msg.textContent = `Can't be bigger than this clip (${sizeLbl(maxMB)}), so it was lowered.`; }
+    mb = v; show();
+  };
+  range.addEventListener("input", () => { mb = Math.round(fromPos(+range.value)); msg.textContent = ""; show(); });
+  num.addEventListener("change", () => setMB(parseFloat(num.value) * (unit.value === "GB" ? 1000 : 1), true));
+  unit.addEventListener("change", show);
+  if (maxMB >= 1000) unit.value = mb >= 1000 ? "GB" : "MB";
+  const close = () => back.remove();
+  const go = el("button", { class: "btn primary", text: "Compress and copy" });
+  const cancel = el("button", { class: "btn", text: "Close", onclick: close });
+  let running = false, off = null;
+  go.addEventListener("click", async () => {
+    running = true; go.disabled = true; range.disabled = num.disabled = unit.disabled = true;
+    cancel.textContent = "Cancel"; bar.hidden = false; fill.style.width = "0%"; msg.textContent = "Compressing… this can take a while for long clips.";
+    off = await tauri.event.listen("export-progress", (e) => { fill.style.width = Math.round(e.payload * 100) + "%"; });
+    try {
+      await invoke("compress_clip", { path: c.path, targetMb: mb, copy: true });
+      toast("Compressed copy saved and copied"); loadClips(); onDone?.(); close();
+    } catch (e) {
+      running = false; go.disabled = false; range.disabled = num.disabled = unit.disabled = false;
+      cancel.textContent = "Close"; bar.hidden = true;
+      msg.textContent = String(e) === "cancelled" ? "Cancelled." : "Failed: " + e;
+    } finally { off?.(); }
+  });
+  cancel.addEventListener("click", () => { if (running) invoke("cancel_export").catch(() => {}); });
+  const box = el("div", { class: "upd-box cmp-box", role: "dialog", "aria-modal": "true", "aria-label": "Custom size" },
+    el("div", { class: "upd-top" }, el("h3", { text: "Custom size" }), el("span", { class: "sub", text: `${c.name} is ${sizeLbl(c.bytes / 1e6)}` })),
+    el("div", { class: "upd-body" },
+      el("p", { text: "How big should the copy be? Smaller means lower quality. All audio tracks are kept." }),
+      range,
+      el("div", { class: "cmp-row" }, num, unit, el("span", { class: "sub", text: `${sizeLbl(MIN_MB)} to ${sizeLbl(maxMB)}` })),
+      msg, bar),
+    el("div", { class: "upd-actions" }, cancel, go));
+  const back = el("div", { class: "upd-back", id: "cmp-back" }, box);
+  back.addEventListener("click", (e) => { if (e.target === back && !running) close(); });
+  back.addEventListener("keydown", (e) => { if (e.key === "Escape" && !running) close(); });
+  document.body.append(back);
+  show();
+  range.focus();
 }
 
 let playing = null;
@@ -453,7 +511,7 @@ function bufferMB(seconds) {
   const p = presets.find((x) => x.name === settings.quality);
   const videoMbps = p
     ? p.mbps * Math.pow(Math.max(60, settings.fps) / 60, 0.6)
-    : 80 / Math.max(1, settings.clip_seconds); // Discord preset: ~10 MB per clip
+    : 6; // unknown preset
   const tracks = settings.audio_mode === "separate"
     ? 1 + [settings.volume_game, settings.volume_discord, settings.volume_mic].filter((v) => v > 0).length
     : (settings.record_stems ? 4 : 1);
@@ -465,7 +523,7 @@ const lengthLabel = (s) => (s < 60 ? `${s} s` : s % 60 ? `${Math.floor(s / 60)} 
 function qualityDef() {
   const info = {
     "360p": ["Smallest files. Fine on phones and for quick memes; text and far-away details get soft.", 0, 0, 0],
-    "480p": ["A 30 s clip fits Discord's free 10 MB upload limit. Good on phones.", 0, 1, 0],
+    "480p": ["Small files that are quick to send. Good on phones.", 0, 1, 0],
     "720p": ["The best balance: sharp on any phone and in Discord, small files, light on weak PCs.", 1, 2, 1],
     "1080p": ["Full HD for YouTube or big screens. Bigger files, a bit more work for the GPU.", 1, 3, 2],
     "1440p": ["Very sharp on 1440p+ monitors. Large files; best with a strong graphics card.", 2, 3, 3],
@@ -474,12 +532,10 @@ function qualityDef() {
     key: "quality", name: "Quality", rec: "720p",
     what: "Resolution and file size of your clips. Lower means smaller files that are quicker to send, and less work for your PC.",
     options: [
-      { value: "discord", label: "Discord (10 MB)", best: `Every ${settings.clip_seconds} s clip stays under Discord's free 10 MB upload limit. Archy sizes the video to fit (720p when there's room, else 480p). Long clips can still go over.`, f: 0, q: 1, z: 0 },
       ...presets.map((p) => {
         const [best, f, q, z] = info[p.name] || ["", 1, 2, 1];
         const mb = Math.round((p.mbps * Math.pow(Math.max(60, settings.fps) / 60, 0.6) * settings.clip_seconds) / 8); // same scaling as the tray
-        const warn = mb > 10 ? " Too big for Discord's free 10 MB limit." : "";
-        return { value: p.name, label: p.name, best: `${best} About ${mb} MB per ${settings.clip_seconds} s clip.${warn}`, f, q, z };
+        return { value: p.name, label: p.name, best: `${best} About ${mb} MB per ${settings.clip_seconds} s clip.`, f, q, z };
       }),
     ],
   };
@@ -554,8 +610,36 @@ const RECORDING = () => [
       best: `${s <= 60 ? "Catch what just happened." : "Catch a whole round or match."} ${ramNote(s)}` })) },
 ];
 
+/// Setting: the size the "Custom size" compressor starts at (10 MB - 10 GB, log slider + exact entry).
+function compressCard() {
+  let mb = Math.min(MAX_MB, Math.max(MIN_MB, settings.compress_mb || 100));
+  const pos = (v) => Math.round(1000 * Math.log(v / MIN_MB) / Math.log(MAX_MB / MIN_MB));
+  const range = el("input", { type: "range", min: 0, max: 1000, step: 1, value: pos(mb), "aria-label": "Compressed amount" });
+  const num = el("input", { type: "number", class: "cmp-num", min: 0, step: "any", "aria-label": "Exact size" });
+  const unit = el("select", { class: "cmp-unit", "aria-label": "Unit" }, el("option", { value: "MB", text: "MB" }), el("option", { value: "GB", text: "GB" }));
+  const msg = el("p", { class: "sub cmp-msg" });
+  const show = () => { const gb = unit.value === "GB"; num.value = String(+(gb ? mb / 1000 : mb).toFixed(gb ? 2 : 0)); range.value = pos(mb); range.style.setProperty("--fill", range.value / 10 + "%"); };
+  if (mb >= 1000) unit.value = "GB";
+  const commit = (v, typed) => {
+    msg.textContent = "";
+    if (!Number.isFinite(v)) v = mb;
+    if (v < MIN_MB) { v = MIN_MB; if (typed) msg.textContent = "The smallest amount is 10 MB."; }
+    if (v > MAX_MB) { v = MAX_MB; if (typed) msg.textContent = "The biggest amount is 10 GB."; }
+    mb = Math.round(v); show(); save({ compress_mb: mb }, `Compressed amount: ${sizeLbl(mb)}`);
+  };
+  range.addEventListener("input", () => { mb = Math.round(MIN_MB * Math.pow(MAX_MB / MIN_MB, range.value / 1000)); show(); });
+  range.addEventListener("change", () => commit(mb));
+  num.addEventListener("change", () => commit(parseFloat(num.value) * (unit.value === "GB" ? 1000 : 1), true));
+  unit.addEventListener("change", show);
+  show();
+  return el("div", { class: "card setting" },
+    el("div", { class: "about" }, el("h3", { text: "Compressed amount" }),
+      el("p", { text: "How big the \"Custom size\" button on a clip makes its copy, to start with (10 MB to 10 GB). You can change it each time. It never goes above the clip's own size. For Discord's free limit, pick 10 MB." })),
+    el("div", { class: "pick" }, range, el("div", { class: "cmp-row" }, num, unit), msg));
+}
+
 function renderRecording() {
-  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_SESSION()), settingCard(RECORDING_LIMIT));
+  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_SESSION()), settingCard(RECORDING_LIMIT), compressCard());
   loadGpus();
 }
 
