@@ -351,6 +351,7 @@ impl TrackVolumes {
         self.discord.store(discord, Relaxed);
         self.mic.store(mic, Relaxed);
         self.mic_filter.set(s.noise_suppression, s.mic_gate_db);
+        self.mic_filter.set_mono(s.mic_mono);
     }
 
     fn of(&self, main: &archy_audio::Volume) -> archy_audio::Volumes {

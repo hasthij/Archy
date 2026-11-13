@@ -38,6 +38,8 @@ pub struct Settings {
     pub noise_suppression: bool,
     /// Mic gate threshold in dBFS: quieter than this is muted (-100 = off).
     pub mic_gate_db: i32,
+    /// Record the mic as mono (one voice, both ears). Off = stereo as the mic delivers it.
+    pub mic_mono: bool,
     /// More clip hotkeys, each with its own length (empty = just the two above).
     pub extra_hotkeys: Vec<HotkeyClip>,
     pub hotkey_pause: String,
@@ -231,6 +233,7 @@ impl Default for Settings {
             push_to_talk_key: String::new(),
             noise_suppression: false,
             mic_gate_db: -100,
+            mic_mono: false,
             // Off by default: a key that silently stops recording is easy to hit by accident.
             hotkey_pause: String::new(),
             games: vec!["RobloxPlayerBeta.exe".into()],

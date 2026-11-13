@@ -27,6 +27,8 @@ pub struct MicFilter {
     pub denoise: Arc<AtomicBool>,
     /// Gate threshold in dBFS (-100 = off, -60 quiet room .. -10 shouting).
     pub gate_db: Arc<AtomicI32>,
+    /// Mix the mic to mono (same voice in both ears). Off = as the mic delivers it.
+    pub mono: Arc<AtomicBool>,
 }
 
 impl Default for MicFilter {
@@ -34,11 +36,16 @@ impl Default for MicFilter {
         Self {
             denoise: Arc::new(AtomicBool::new(false)),
             gate_db: Arc::new(AtomicI32::new(GATE_OFF)),
+            mono: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl MicFilter {
+    pub fn set_mono(&self, mono: bool) {
+        self.mono.store(mono, Ordering::Relaxed);
+    }
+
     pub fn set(&self, denoise: bool, gate_db: i32) {
         self.denoise.store(denoise, Ordering::Relaxed);
         self.gate_db.store(gate_db.clamp(GATE_OFF, 0), Ordering::Relaxed);
@@ -87,6 +94,7 @@ impl Filter {
         self.running
             || self.cfg.denoise.load(Ordering::Relaxed)
             || self.cfg.gate_db.load(Ordering::Relaxed) > GATE_OFF
+            || self.cfg.mono.load(Ordering::Relaxed)
     }
 
     /// Filters interleaved 48 kHz audio with `channels` channels in place.
@@ -97,6 +105,12 @@ impl Filter {
         if !denoise && gate <= GATE_OFF {
             if self.running {
                 *self = Self::new(self.cfg.clone());
+            }
+            if self.cfg.mono.load(Ordering::Relaxed) {
+                for frame in pcm.chunks_exact_mut(channels.max(1)) {
+                    let m = (frame.iter().map(|&s| s as i32).sum::<i32>() / frame.len() as i32) as i16;
+                    frame.iter_mut().for_each(|o| *o = m);
+                }
             }
             return;
         }

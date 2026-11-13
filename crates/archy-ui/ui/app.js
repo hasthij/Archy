@@ -995,6 +995,15 @@ function micCleanCard() {
     el("div", { class: "mix-row" },
       el("div", {}, el("b", { text: "Gate threshold" }), el("span", { class: "sub", text: "Sounds quieter than this are muted. Off records everything." })),
       el("div", {}, meter, range), out),
+    el("div", { class: "mix-row" },
+      el("div", {}, el("b", { text: "Voice channels" }), el("span", { class: "sub", text: settings.mic_mono
+        ? "Mono: your voice sits in the middle, same in both ears. Best for single mics, headsets and noisy USB mics; also helps a mic that only plays in one ear."
+        : "Stereo: exactly what your mic delivers. Best for a true stereo mic. A normal mic sounds the same either way." })),
+      el("div", { class: "seg", role: "group", "aria-label": "Voice channels" },
+        [[false, "Stereo"], [true, "Mono"]].map(([v, label]) => el("button", {
+          "aria-pressed": String(!!settings.mic_mono === v),
+          onclick: () => save({ mic_mono: v }, v ? "Voice: mono" : "Voice: stereo"),
+        }, label)))),
     el("div", { class: "field", style: "margin-top:12px" }, listen),
     status);
 }
