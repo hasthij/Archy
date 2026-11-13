@@ -9,6 +9,7 @@
 mod clip;
 mod ptt;
 mod hotkey;
+mod presence;
 mod startup;
 mod voice;
 mod watch;
@@ -113,6 +114,7 @@ struct App {
     window: HWND,
     settings: Settings,
     session: Option<Session>,
+    presence: presence::Presence,
     /// A game whose GPU couldn't keep up with the chosen frame rate, and the
     /// rate it's recorded at instead (until the settings change).
     fps_cap: Option<(String, u32)>,
@@ -688,6 +690,9 @@ impl App {
 
     fn watch(&mut self) {
         self.pick_up_settings();
+        self.presence.set(if !self.settings.discord_status { presence::Want::Off }
+            else if let Some(s) = &self.session { presence::Want::Game(s.game.clone()) }
+            else { presence::Want::Idle });
         self.revive_voice();
         self.expire_previous();
         // A recording being started on the worker thread: take its result, or wait.
@@ -1851,6 +1856,7 @@ fn main() {
         window,
         settings,
         session: None,
+        presence: presence::Presence::new(),
         fps_cap: None,
         keep_up: (0, 0, 0),
         paused: false,

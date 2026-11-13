@@ -127,6 +127,8 @@ pub struct Settings {
     pub sounds_migrated: bool,
     /// Shift each app sound a little to the left or right ear (alternating). Off = centred, as before.
     pub sound_pan: bool,
+    /// Show "Archy" and the current game on your Discord profile (local, via Discord's own app). Off by default.
+    pub discord_status: bool,
     /// Tone names (see `tones`) used when `custom_sounds` is on.
     pub tone_clip: String,
     pub tone_voice: String,
@@ -284,6 +286,7 @@ impl Default for Settings {
             custom_sounds: true,
             sounds_migrated: true,
             sound_pan: false,
+            discord_status: false,
             tone_clip: "chime".into(),
             tone_voice: "double".into(),
             tone_hotkey: "tick".into(),

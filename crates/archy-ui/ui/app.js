@@ -1137,6 +1137,8 @@ function renderGeneral() {
       "Seeing at a glance that Archy is recording.", "A plain icon at all times."),
     onOff("check_updates", "Check for updates", "When Archy starts, it asks GitHub whether a newer version exists. This is the only time Archy goes online. Updating always asks you first.",
       "Getting fixes as soon as they're out.", "Archy never goes online; you update by downloading the installer yourself."),
+    onOff("discord_status", "Show Archy on your Discord status", "Your Discord profile shows Archy and the game you're clipping (just Archy when there's no game). It talks only to the Discord app on this PC. Needs the Discord desktop app open.",
+      "Friends seeing what you're playing and that Archy has your back.", "Your Discord status is never touched.", false),
     logCard());
   loadLog();
 }
