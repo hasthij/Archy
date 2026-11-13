@@ -110,6 +110,8 @@ pub struct Settings {
     pub start_with_windows: bool,
     /// Put a dot on the tray icon while a game is being recorded.
     pub tray_recording_dot: bool,
+    /// Show Archy and the game you're playing in your Discord profile (Rich Presence). On by default.
+    pub discord_status: bool,
     /// Save clips by saying a phrase (listens on this PC only).
     pub voice_enabled: bool,
     /// Phrases and how many seconds each saves.
@@ -260,6 +262,7 @@ impl Default for Settings {
             notify_on_start: true,
             start_with_windows: false,
             tray_recording_dot: true,
+            discord_status: true,
             voice_enabled: false,
             voice_phrases: vec![
                 VoicePhrase {

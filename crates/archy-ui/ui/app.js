@@ -1183,6 +1183,8 @@ function renderGeneral() {
       "Never forgetting to open Archy before playing.", "Starting Archy yourself only when you want it.", false),
     onOff("tray_recording_dot", "Recording dot on the tray icon", "A small red dot on Archy's icon while a game is being recorded.",
       "Seeing at a glance that Archy is recording.", "A plain icon at all times."),
+    onOff("discord_status", "Discord status", "Shows Archy and the game you are playing on your Discord profile (Rich Presence). Runs locally through the Discord app; nothing is uploaded.",
+      "Letting friends see what you are recording.", "Nothing about Archy is shown on Discord."),
     onOff("check_updates", "Check for updates", "When Archy starts, it asks GitHub whether a newer version exists. This is the only time Archy goes online. Updating always asks you first.",
       "Getting fixes as soon as they're out.", "Archy never goes online; you update by downloading the installer yourself."),
     logCard());

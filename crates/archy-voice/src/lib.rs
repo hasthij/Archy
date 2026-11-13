@@ -127,11 +127,11 @@ impl Api {
 }
 
 /// Where the voice engine lives: `<exe dir>\voice` once installed, or the dev
-/// copy under `tools\voice` when running from the project.
+/// copy under `tools\voice` when running from the project (7 levels up so a .claude/worktrees checkout finds it too).
 pub fn find_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let mut candidates = vec![exe.parent()?.join("voice")];
-    for up in exe.ancestors().skip(1).take(5) {
+    for up in exe.ancestors().skip(1).take(7) {
         candidates.push(up.join("tools").join("voice"));
     }
     candidates.into_iter().find(|d| d.join("sherpa-onnx-c-api.dll").exists() && d.join(MODEL_DIR).exists())
