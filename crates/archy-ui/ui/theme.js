@@ -15,7 +15,7 @@ function resolveTheme(theme) {
 const ARCHY_UI_KEY = "archy-ui-prefs";
 const UI_DEFAULTS = {
   oled: true, surface: "raised", selected: "tint", accent_hex: "", radius: 14, density: "roomy",
-  icons: 1.6, motion: "subtle", font: "system", library: "grid", nav: "sidebar", tone: "neutral", actions: "icons",
+  icons: 1.6, motion: "subtle", font: "system", library: "grid", nav: "sidebar", tone: "neutral", actions: "icons", scale: 100, thumb: 240, meta: "on",
 };
 let uiPrefs = (() => {
   try { return { ...UI_DEFAULTS, ...JSON.parse(localStorage.getItem(ARCHY_UI_KEY)) }; } catch { return { ...UI_DEFAULTS }; }
@@ -27,6 +27,9 @@ function applyUi() {
   d.sl = "glow"; d.tg = "switch"; d.dd = "filled"; d.bt = "outline"; // 0.6.3 look kit
   d.surface = p.surface; d.selected = p.selected; d.font = p.font; d.nav = p.nav; d.tone = p.tone; d.actions = p.actions; d.density = p.density;
   if (d.motion !== "reduce") d.motion = p.motion === "none" ? "reduce" : p.motion;
+  d.meta = p.meta;
+  root.style.setProperty("--thumb-min", `${Number(p.thumb) || 240}px`);
+  root.style.zoom = String((Number(p.scale) || 100) / 100);
   root.style.setProperty("--radius", `${Number(p.radius) || 0}px`);
   root.style.setProperty("--icon-stroke", String(p.icons));
   if (/^#[0-9a-f]{6}$/i.test(p.accent_hex)) {
@@ -61,8 +64,9 @@ function syncRange(r) {
   r.style.setProperty("--p", `${max > min ? ((Number(r.value) - min) / (max - min)) * 100 : 0}%`);
 }
 document.addEventListener("input", (e) => { if (e.target.type === "range") syncRange(e.target); }, true);
-new MutationObserver(() => document.querySelectorAll("input[type=range]").forEach(syncRange))
-  .observe(document, { childList: true, subtree: true });
+new MutationObserver((muts) => {
+  for (const m of muts) for (const n of m.addedNodes) if (n.nodeType === 1) { if (n.matches?.("input[type=range]")) syncRange(n); n.querySelectorAll?.("input[type=range]").forEach(syncRange); }
+}).observe(document, { childList: true, subtree: true });
 
 (function earlyLook() {
   let look = { theme: "dark" };
