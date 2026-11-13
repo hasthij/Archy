@@ -24,10 +24,10 @@ pub struct Settings {
     pub hotkey_save_long: String,
     /// Saves a full-size PNG of the game ("" = off, the default).
     pub hotkey_screenshot: String,
-    /// Whole-session recording: "off" (default), "hotkey" (started and stopped
-    /// with `hotkey_session`) or "always" (whenever a game is recorded).
+    /// Whole-session recording: "off", "hotkey" (default for new installs: the
+    /// first `hotkey_session` press starts the file, later presses pause/resume it) or "always" (whenever a game is recorded).
     pub session_mode: String,
-    /// Starts/stops session recording in "hotkey" mode ("" = none).
+    /// Starts, then pauses/resumes, the session file ("" = none; F9 on new installs).
     pub hotkey_session: String,
     /// Push-to-talk: the mic is silent in clips except while `push_to_talk_key`
     /// is held (off by default). Voice clipping still hears you.
@@ -118,6 +118,13 @@ pub struct Settings {
     pub sound_on_hotkey: bool,
     /// Volume of the clip-saved chime, 0-200 (%).
     pub custom_sounds: bool,
+    /// Set once the one-time "new sounds on" upgrade ran (see `load`). A file
+    /// without it is from before 0.6.3. The field-level default (false) is
+    /// deliberate: it differs from `Settings::default()`.
+    #[serde(default)]
+    pub sounds_migrated: bool,
+    /// Shift each app sound a little to the left or right ear (alternating). Off = centred, as before.
+    pub sound_pan: bool,
     /// Tone names (see `tones`) used when `custom_sounds` is on.
     pub tone_clip: String,
     pub tone_voice: String,
@@ -218,8 +225,8 @@ impl Default for Settings {
             hotkey_save_long: "Shift+F8".into(),
             extra_hotkeys: Vec::new(),
             hotkey_screenshot: String::new(),
-            session_mode: "off".into(),
-            hotkey_session: String::new(),
+            session_mode: "hotkey".into(),
+            hotkey_session: "F9".into(),
             push_to_talk: false,
             push_to_talk_key: String::new(),
             noise_suppression: false,
@@ -271,7 +278,9 @@ impl Default for Settings {
             sound_on_voice: true,
             sound_on_hotkey: true,
             voice_sensitivity: 50,
-            custom_sounds: false,
+            custom_sounds: true,
+            sounds_migrated: true,
+            sound_pan: false,
             tone_clip: "chime".into(),
             tone_voice: "double".into(),
             tone_hotkey: "tick".into(),
@@ -322,7 +331,15 @@ impl Settings {
         match std::fs::read_to_string(&path) {
             // Some editors save UTF-8 with a byte-order mark, which JSON parsers reject.
             Ok(text) => match serde_json::from_str::<Settings>(text.trim_start_matches('\u{feff}')) {
-                Ok(s) => (s.clamped(), None),
+                Ok(mut s) => {
+                    // One-time: the new sounds default to on, also for upgrades.
+                    if !s.sounds_migrated {
+                        s.custom_sounds = true;
+                        s.sounds_migrated = true;
+                        let _ = s.save();
+                    }
+                    (s.clamped(), None)
+                }
                 Err(e) => (
                     Self::default(),
                     Some(format!("settings.json has an error ({e}); using defaults")),
@@ -471,13 +488,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn custom_sounds_off_by_default_and_bad_tone_names_reset() {
-        assert!(!Settings::default().custom_sounds);
+    fn custom_sounds_on_by_default_and_bad_tone_names_reset() {
+        assert!(Settings::default().custom_sounds);
+        assert_eq!(Settings::default().session_mode, "hotkey");
+        assert_eq!(Settings::default().hotkey_session, "F9");
         let s = Settings { tone_clip: "bogus".into(), tone_stop: "sparkle".into(), ..Default::default() }.clamped();
         assert_eq!(s.tone_clip, "chime");
         assert_eq!(s.tone_stop, "sparkle");
         let old: Settings = serde_json::from_str("{\"fps\":60}").unwrap();
-        assert!(!old.custom_sounds, "an old settings.json keeps today's sounds");
+        assert!(!old.sounds_migrated, "an old file is migrated once by load()");
     }
 
     #[test]

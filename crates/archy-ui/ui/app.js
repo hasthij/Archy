@@ -495,11 +495,11 @@ const RECORDING_TIMING = {
 };
 
 const RECORDING_SESSION = () => ({
-  key: "session_mode", name: "Record whole sessions", rec: "off",
+  key: "session_mode", name: "Record whole sessions", rec: "hotkey",
   what: `Also writes everything you play to one long video in your clips folder, besides the replay buffer. No extra encoding (it's the same video), so no FPS cost; it uses disk space: about ${(bufferMB(3600) / 1000).toFixed(1)} GB per hour at your quality. While it records, your clip key also adds a bookmark you can jump to in the editor.`,
   options: [
     { value: "off", label: "Off", best: "Most people: save the moments with your clip key." },
-    { value: "hotkey", label: "With a hotkey", best: "Recording a match or a stream on purpose: press your session key (Hotkeys page) to start and stop." },
+    { value: "hotkey", label: "With a hotkey", best: "Recording a match or a stream on purpose: press your session key above to start, then to pause and resume. The default." },
     { value: "always", label: "Always", best: "Never missing anything: every game is recorded start to finish. Watch your disk space (the clips folder limit applies)." },
   ],
 });
@@ -555,7 +555,7 @@ const RECORDING = () => [
 ];
 
 function renderRecording() {
-  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_SESSION()), settingCard(RECORDING_LIMIT));
+  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_LIMIT));
   loadGpus();
 }
 
@@ -797,7 +797,8 @@ function renderHotkeys() {
     hotkeyRow("hotkey_save_long", "Save long clip", `Saves the last ${lengthLabel(settings.long_clip_seconds)}`),
     hotkeyRow("hotkey_pause", "Pause / resume", "Stops recording completely: zero load. Off by default so it can't be hit by accident; the tray menu can pause too."),
     hotkeyRow("hotkey_screenshot", "Screenshot", "Saves a full-size picture (PNG) of the game into your clips. Off until you set a key; costs nothing until you press it."),
-    hotkeyRow("hotkey_session", "Start / stop session recording", "Records the whole session to one video. Only when Record whole sessions (Recording page) is set to With a hotkey.")),
+    hotkeyRow("hotkey_session", "Whole-session recording: start, then pause / resume", "First press starts recording the whole session to one video; after that it only pauses and resumes that video. Your replay buffer and clip keys keep working the whole time.")),
+    settingCard(RECORDING_SESSION()),
     extraHotkeysCard());
 }
 
@@ -1804,6 +1805,8 @@ function renderSounds() {
   $("#sounds-settings").replaceChildren(
     onOff("custom_sounds", "Use my chosen sounds", "Play the sounds picked below in the recorder, not just in this window. Off keeps Archy's original two sounds.",
       "Telling a clip, a ping and a session apart by ear.", "The original chime and blip, exactly as before.", false),
+    onOff("sound_pan", "Pan sounds slightly", "Each Archy sound comes from a little to the left or right ear, alternating, never extreme.",
+      "Making clip, ping and session sounds easy to tell apart, and not blend with the game.", "Every sound is centred, exactly as before.", false),
     onOff("notify_on_save", "Notification when a clip saves", "A small Windows notification with the clip's length and size.",
       "Knowing the clip saved without leaving the game.", "No pop-ups at all; check the library instead."),
     onOff("notify_on_start", "\"Archy is running\" notification", "A reminder when Archy starts that it's ready and what your hotkey is.",

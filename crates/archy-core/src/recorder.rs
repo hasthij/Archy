@@ -309,6 +309,13 @@ impl Recorder {
         }
     }
 
+    /// Pauses or resumes writing the session file. The replay buffer keeps going.
+    pub fn pause_session(&self, on: bool) {
+        if let Some(tx) = self.shared.session.lock().ok().and_then(|s| s.clone()) {
+            let _ = tx.send(crate::session::Msg::Pause(on));
+        }
+    }
+
     /// Ends the session and finishes its file (waits up to 10 s).
     pub fn end_session(&self) -> Option<crate::session::Summary> {
         let tx = self.shared.session.lock().ok()?.take()?;
