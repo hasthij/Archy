@@ -469,6 +469,7 @@ impl App {
         for (i, h) in self.settings.extra_hotkeys.iter().enumerate() {
             keys.push((HK_EXTRA + i as i32, &h.key));
         }
+        let mut taken: Vec<String> = Vec::new();
         for (id, text) in keys {
             unsafe {
                 let _ = UnregisterHotKey(Some(self.window), id);
@@ -476,6 +477,17 @@ impl App {
             if text.trim().is_empty() {
                 continue; // hotkey turned off
             }
+            let norm = text.trim().to_lowercase().replace(' ', "");
+            if taken.contains(&norm) {
+                notify(
+                    self.window.0 as isize,
+                    "Archy: hotkey used twice",
+                    &format!("{text} is set for two Archy actions; only the first works. Pick another key for one of them."),
+                    true,
+                );
+                continue;
+            }
+            taken.push(norm);
             let Some(hk) = hotkey::parse(text) else {
                 notify(
                     self.window.0 as isize,
@@ -1439,7 +1451,7 @@ fn panned(sound: &'static [u8]) -> &'static [u8] {
     if !mono {
         return sound;
     }
-    let (near, far) = (1.0f32, 0.6f32); // the far ear is ~4 dB quieter
+    let (near, far) = (1.0f32, 0.85f32); // the far ear is ~1.4 dB quieter: a gentle shift
     let (l, r) = if right { (far, near) } else { (near, far) };
     let pcm = &sound[44..];
     let mut out = Vec::with_capacity(44 + pcm.len() * 2);
