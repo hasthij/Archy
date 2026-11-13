@@ -1240,6 +1240,16 @@ impl App {
         let saving = self.saving.clone();
         let queued = self.queued.clone();
         std::thread::spawn(move || {
+            // A panic mid-save must not leave "saving" set: quit would wait 15 s on it.
+            struct Done(Arc<AtomicBool>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    if std::thread::panicking() {
+                        self.0.store(false, Ordering::Release);
+                    }
+                }
+            }
+            let _done = Done(saving.clone());
             archy_core::eco::boost_current_thread();
             let mut seconds = seconds;
             loop {
@@ -1634,16 +1644,32 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         WM_DESTROY => {
             APP.with(|a| {
                 if let Some(app) = a.borrow_mut().take() {
-                    // A clip being saved finishes first (an update or quit used to cut it off).
                     let t = std::time::Instant::now();
-                    while app.saving.load(Ordering::Acquire) && t.elapsed().as_secs() < 15 {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
+                    // The tray icon goes at once, so quitting looks instant.
                     unsafe {
                         let _ = Shell_NotifyIconW(NIM_DELETE, &tray_data(app.window));
                     }
                     // Tells the Archy window the recorder is gone.
                     let _ = std::fs::remove_file(archy_core::status::path());
+                    // Every recorder is told to stop now, so their threads wind down
+                    // together instead of one after another when dropped.
+                    if let Some(s) = &app.session {
+                        s.recorder.stop();
+                    }
+                    if let Some(p) = &app.previous {
+                        p.recorder.stop();
+                    }
+                    // A clip being saved finishes first (an update or quit used to cut it off).
+                    while app.saving.load(Ordering::Acquire) && t.elapsed().as_secs() < 15 {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    let waited = t.elapsed();
+                    drop(app);
+                    log(&format!(
+                        "quit: waited {} ms for a clip save, {} ms in all",
+                        waited.as_millis(),
+                        t.elapsed().as_millis()
+                    ));
                 }
             });
             unsafe { PostQuitMessage(0) };
