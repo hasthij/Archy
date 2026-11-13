@@ -869,7 +869,8 @@ function renderHotkeys() {
     hotkeyRow("hotkey_save_long", "Save long clip", `Saves the last ${lengthLabel(settings.long_clip_seconds)}`),
     hotkeyRow("hotkey_pause", "Pause / resume", "Stops recording completely: zero load. Off by default so it can't be hit by accident; the tray menu can pause too."),
     hotkeyRow("hotkey_screenshot", "Screenshot", "Saves a full-size picture (PNG) of the game into your clips. Off until you set a key; costs nothing until you press it."),
-    hotkeyRow("hotkey_session", "Whole-session recording: start, then pause / resume", "First press starts recording the whole session to one video; after that it only pauses and resumes that video. Your replay buffer and clip keys keep working the whole time.")),
+    hotkeyRow("hotkey_session", "Whole-session recording: start / stop", "Press once to start recording the whole session to one video, again to end it. Your replay buffer and clip keys keep working the whole time."),
+    hotkeyRow("hotkey_session_pause", "Whole-session recording: pause / resume", "Pauses and resumes the session video without ending it. Does nothing if no session is recording.")),
     settingCard(RECORDING_SESSION()),
     extraHotkeysCard());
 }

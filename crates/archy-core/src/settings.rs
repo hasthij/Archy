@@ -25,10 +25,12 @@ pub struct Settings {
     /// Saves a full-size PNG of the game ("" = off, the default).
     pub hotkey_screenshot: String,
     /// Whole-session recording: "off", "hotkey" (default for new installs: the
-    /// first `hotkey_session` press starts the file, later presses pause/resume it) or "always" (whenever a game is recorded).
+    /// `hotkey_session` starts and stops the file; `hotkey_session_pause` pauses/resumes it) or "always" (whenever a game is recorded).
     pub session_mode: String,
     /// Starts, then pauses/resumes, the session file ("" = none; F9 on new installs).
     pub hotkey_session: String,
+    /// Pauses / resumes the whole-session file (the file keeps going; clips are untouched).
+    pub hotkey_session_pause: String,
     /// Push-to-talk: the mic is silent in clips except while `push_to_talk_key`
     /// is held (off by default). Voice clipping still hears you.
     pub push_to_talk: bool,
@@ -230,7 +232,8 @@ impl Default for Settings {
             extra_hotkeys: Vec::new(),
             hotkey_screenshot: String::new(),
             session_mode: "hotkey".into(),
-            hotkey_session: "F9".into(),
+            hotkey_session: "F6".into(),
+            hotkey_session_pause: "F9".into(),
             push_to_talk: false,
             push_to_talk_key: String::new(),
             noise_suppression: false,
@@ -497,7 +500,7 @@ mod tests {
     fn custom_sounds_on_by_default_and_bad_tone_names_reset() {
         assert!(Settings::default().custom_sounds);
         assert_eq!(Settings::default().session_mode, "hotkey");
-        assert_eq!(Settings::default().hotkey_session, "F9");
+        assert_eq!(Settings::default().hotkey_session, "F6");
         let s = Settings { tone_clip: "bogus".into(), tone_stop: "sparkle".into(), ..Default::default() }.clamped();
         assert_eq!(s.tone_clip, "chime");
         assert_eq!(s.tone_stop, "sparkle");

@@ -63,6 +63,7 @@ const HK_SAVE: i32 = 1;
 const HK_SAVE_LONG: i32 = 2;
 const HK_SCREENSHOT: i32 = 4;
 const HK_SESSION: i32 = 5;
+const HK_SESSION_PAUSE: i32 = 6;
 /// Extra clip hotkeys use ids HK_EXTRA.. (one per entry in `extra_hotkeys`).
 const HK_EXTRA: i32 = 100;
 const HK_PAUSE: i32 = 3;
@@ -462,6 +463,7 @@ impl App {
             (HK_PAUSE, &self.settings.hotkey_pause),
             (HK_SCREENSHOT, &self.settings.hotkey_screenshot),
             (HK_SESSION, &self.settings.hotkey_session),
+            (HK_SESSION_PAUSE, &self.settings.hotkey_session_pause),
         ];
         // Every possible extra id is released first, so a removed one stops working.
         for i in 0..archy_core::settings::MAX_EXTRA_HOTKEYS as i32 {
@@ -1110,9 +1112,8 @@ impl App {
         }
     }
 
-    /// The session hotkey. First press (hotkey mode) starts the session file;
-    /// after that it only pauses / resumes writing that file. The clip engine and
-    /// replay buffer are never touched, so clips keep working. Silent: sounds only.
+    /// The session hotkey: starts the session file (hotkey mode), or ends it if running.
+    /// The clip engine and replay buffer are never touched. Silent: sounds only.
     fn toggle_session(&mut self) {
         let mode = self.settings.session_mode.as_str();
         if mode == "off" {
@@ -1126,6 +1127,16 @@ impl App {
                 play_for(&self.settings, &self.settings.tone_start, VOICE_WAV, self.settings.voice_sound_volume.max(30));
                 self.sync_session();
             }
+        } else if mode == "hotkey" {
+            self.session_wanted = false;
+            play_for(&self.settings, &self.settings.tone_stop, CLIP_WAV, self.settings.clip_sound_volume.max(30));
+            self.sync_session();
+        }
+    }
+
+    /// The session pause hotkey: pauses / resumes writing the session file.
+    fn pause_session(&mut self) {
+        if !self.session.as_ref().is_some_and(|s| s.recorder.session_active()) {
             return;
         }
         self.session_paused = !self.session_paused;
@@ -1612,6 +1623,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             HK_PAUSE => a.toggle_pause(),
             HK_SCREENSHOT => a.screenshot(),
             HK_SESSION => a.toggle_session(),
+            HK_SESSION_PAUSE => a.pause_session(),
             id if id >= HK_EXTRA => {
                 if let Some(h) = a.settings.extra_hotkeys.get((id - HK_EXTRA) as usize) {
                     let seconds = h.seconds;
