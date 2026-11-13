@@ -1128,7 +1128,7 @@ function soundMixCard() {
     range.addEventListener("input", () => { out.textContent = offAt0 && Number(range.value) === 0 ? "Off" : `${range.value}%`; });
     range.addEventListener("change", () => save({ [key]: Number(range.value) }, `${name}: ${offAt0 && Number(range.value) === 0 ? "not recorded" : range.value + "%"}`));
     range.addEventListener("dblclick", () => { if (enabled) save({ [key]: 100 }, `${name}: 100%`); });
-    return el("div", { class: "sound-row" + (enabled ? "" : " off") },
+    return el("div", { class: "mix-row" + (enabled ? "" : " off") },
       el("div", {}, el("b", { text: name }), el("span", { class: "sub", text: about })), range, out);
   };
   return el("div", { class: "card" },
