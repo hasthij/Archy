@@ -613,13 +613,14 @@ async fn choose_export_path(window: tauri::WebviewWindow, path: String, format: 
     let src = clip_path(&path).ok()?;
     let owner = window.hwnd().ok().map(|h| h.0 as isize);
     let gif = format == "gif";
+    let mp3 = format == "mp3";
     let stem = src.file_stem()?.to_string_lossy().into_owned();
     let folder = src.parent()?.to_path_buf();
     let chosen = tauri::async_runtime::spawn_blocking(move || unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let dialog: IFileSaveDialog = CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         let wide = |t: &str| t.encode_utf16().chain([0]).collect::<Vec<u16>>();
-        let (label, pattern, ext) = if gif { ("GIF", "*.gif", "gif") } else { ("MP4 video", "*.mp4", "mp4") };
+        let (label, pattern, ext) = if gif { ("GIF", "*.gif", "gif") } else if mp3 { ("MP3 audio", "*.mp3", "mp3") } else { ("MP4 video", "*.mp4", "mp4") };
         let (label, pattern, ext) = (wide(label), wide(pattern), wide(ext));
         let types = [windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC {
             pszName: PCWSTR(label.as_ptr()),
@@ -627,7 +628,7 @@ async fn choose_export_path(window: tauri::WebviewWindow, path: String, format: 
         }];
         let _ = dialog.SetFileTypes(&types);
         let _ = dialog.SetDefaultExtension(PCWSTR(ext.as_ptr()));
-        let name = wide(&format!("{stem} ({}).{}", if gif { "GIF" } else { "edit" }, if gif { "gif" } else { "mp4" }));
+        let name = wide(&format!("{stem} ({}).{}", if gif { "GIF" } else { "edit" }, if gif { "gif" } else if mp3 { "mp3" } else { "mp4" }));
         let _ = dialog.SetFileName(PCWSTR(name.as_ptr()));
         let _ = dialog.SetTitle(w!("Save the export as"));
         let start = wide(&folder.to_string_lossy());

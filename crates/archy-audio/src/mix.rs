@@ -17,6 +17,7 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
 use crate::aac::{AacEncoder, AacInfo};
 use crate::capture::{device_client, pcm_format};
+use crate::resample::{device_rate, Resampler};
 use crate::{AudioPacket, CHANNELS, SAMPLE_RATE};
 
 const HNS: i64 = 10_000_000;
@@ -88,23 +89,18 @@ impl Timeline {
     }
 }
 
-fn open(client: &IAudioClient, loopback: bool) -> Result<IAudioCaptureClient> {
+/// Starts capturing at the device's own rate; the resampler (if any) brings it to the encoder's.
+fn open(client: &IAudioClient, loopback: bool) -> Result<(IAudioCaptureClient, Option<Resampler>)> {
     let mut flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
     if loopback {
         flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
     }
+    let rate = device_rate(client);
     unsafe {
-        client.Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            flags,
-            2_000_000,
-            0,
-            &pcm_format(),
-            None,
-        )?;
+        client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 2_000_000, 0, &pcm_format(rate), None)?;
         let capture = client.GetService()?;
         client.Start()?;
-        Ok(capture)
+        Ok((capture, Resampler::new(rate)))
     }
 }
 
@@ -112,8 +108,10 @@ fn drain(
     capture: &IAudioCaptureClient,
     into: &mut Timeline,
     mut filter: Option<&mut crate::denoise::Filter>,
+    mut resampler: Option<&mut Resampler>,
 ) -> Result<()> {
     let mut filtered: Vec<i16> = Vec::new();
+    let mut resampled: Vec<i16> = Vec::new();
     loop {
         let pending = unsafe { capture.GetNextPacketSize()? };
         if pending == 0 {
@@ -125,10 +123,17 @@ fn drain(
         let mut qpc = 0u64;
         unsafe { capture.GetBuffer(&mut data, &mut frames, &mut flags, None, Some(&mut qpc))? };
         let samples = frames as usize * CHANNELS as usize;
-        if flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data.is_null() {
-            into.push(qpc as i64, &vec![0i16; samples]);
+        let silent = flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data.is_null();
+        let zeros = vec![0i16; if silent { samples } else { 0 }];
+        let mut pcm: &[i16] = if silent { &zeros } else { unsafe { std::slice::from_raw_parts(data as *const i16, samples) } };
+        if let Some(r) = resampler.as_deref_mut() {
+            resampled.clear();
+            r.process(pcm, &mut resampled);
+            pcm = &resampled;
+        }
+        if silent {
+            into.push(qpc as i64, &vec![0i16; pcm.len()]);
         } else {
-            let pcm = unsafe { std::slice::from_raw_parts(data as *const i16, samples) };
             match filter.as_deref_mut().filter(|f| f.active()) {
                 Some(f) => {
                     filtered.clear();
@@ -156,8 +161,8 @@ pub fn run(
     crate::audio_thread();
     let sys_client = device_client(eRender, output.as_deref())?;
     let mic_client = device_client(eCapture, mic.as_deref())?;
-    let sys = open(&sys_client, true)?;
-    let mic_cap = open(&mic_client, false)?;
+    let (sys, mut sys_rs) = open(&sys_client, true)?;
+    let (mic_cap, mut mic_rs) = open(&mic_client, false)?;
     let mut encoder = AacEncoder::new(kbps)?;
     let _ = ready.send(Ok(encoder.info.clone()));
 
@@ -178,8 +183,8 @@ pub fn run(
     while !stop.load(Ordering::Acquire) {
         // Two devices without a shared event: a 10 ms poll is cheap and keeps latency low.
         std::thread::sleep(Duration::from_millis(10));
-        drain(&sys, &mut a, None)?;
-        drain(&mic_cap, &mut b, Some(&mut mic_filter))?;
+        drain(&sys, &mut a, None, sys_rs.as_mut())?;
+        drain(&mic_cap, &mut b, Some(&mut mic_filter), mic_rs.as_mut())?;
         let ends = [a.end(), b.end()];
         let Some(latest) = ends.iter().flatten().copied().max() else {
             continue;

@@ -18,6 +18,7 @@ const FONTS = [
 const COLORS = ["#FFFFFF", "#FFE14D", "#4D8DFF", "#FF5C5C", "#5CFF8F", "#000000"];
 const GIF_SIZES = [[320, "Small"], [480, "Medium"], [640, "Large"]];
 const MAX_LANES = 3;
+const MAX_ITEMS = 50;
 const TRACK_INFO = {
   Everything: "Everything you heard: the game, your friends, your mic and other apps.",
   Game: "Only the game's sound.",
@@ -108,10 +109,10 @@ async function openEditor(clip, opts = {}) {
   ed = {
     clip, info, ev,
     start: 0, end: info.duration,
-    // Simple: one volume for everything you heard. Separate: each source on its own.
-    mode: ev >= 0 ? "simple" : "separate",
-    main: 100,
+    // Mixer: main = master fader; sep/mute = one strip per source.
+    main: 100, mmute: false,
     sep: info.tracks.map(() => 100),
+    mute: info.tracks.map(() => false),
     solo: -1,
     items: [], lanes: { text: 1, image: 1, video: 1, audio: 1 }, audioLanes: [], media: [], selected: null,
     format: opts.format || "mp4", gifWidth: 480, gifFps: 15,
@@ -119,7 +120,7 @@ async function openEditor(clip, opts = {}) {
     aspect: "original", cropX: 0.5, cropY: 0.5,
     // Sections made by splitting: each kept or removed, with its own speed and zoom.
     secs: [{ from: 0, to: info.duration, speed: 1, zoom: 1, keep: true }],
-    secIndex: -1, quietSpeed: false,
+    secIndex: -1, quietSpeed: false, undo: [], redo: [],
     audio: { ctx: null, buffers: null, gains: [], sources: [], t0: 0, at: 0 },
     busy: false, dirty: true, sig: "", lastT: -1, lastLabel: "", driftAt: 0, dom: {},
   };
@@ -144,10 +145,17 @@ function closeEditor() {
 }
 
 // ---------- audio ----------
+/// Export/preview volumes per track. Untouched sources: play the Everything track.
+/// Any source changed or muted: mix the sources instead (master scales them all).
+function mixEdited() {
+  return ed.ev < 0 || ed.info.tracks.some((_, i) => i !== ed.ev && (ed.sep[i] !== 100 || ed.mute[i]));
+}
 function volumes() {
+  const edited = mixEdited();
   return ed.info.tracks.map((_, i) => {
-    if (ed.mode === "simple") return i === ed.ev ? ed.main : 0;
-    return i === ed.ev ? 0 : ed.sep[i];
+    if (ed.mmute) return 0;
+    if (i === ed.ev) return edited ? 0 : ed.main;
+    return edited && !ed.mute[i] ? Math.round(ed.sep[i] * ed.main / 100) : 0;
   });
 }
 
@@ -164,7 +172,12 @@ async function loadPreviewAudio() {
     if (ed !== mine) { ctx.close(); return; }
     mine.audio.ctx = ctx;
     mine.audio.buffers = buffers;
-    mine.audio.gains = buffers.map(() => { const g = ctx.createGain(); g.connect(ctx.destination); return g; });
+    mine.audio.master = ctx.createAnalyser();
+    mine.audio.master.connect(ctx.destination);
+    mine.audio.gains = buffers.map(() => { const g = ctx.createGain(); g.connect(mine.audio.master); return g; });
+    // Meters tap each track before its fader, so a muted source still shows it is playing.
+    mine.audio.taps = buffers.map(() => { const a = ctx.createAnalyser(); a.fftSize = 512; return a; });
+    mine.audio.taps.forEach((a, i) => a.connect(mine.audio.gains[i]));
     applyVolumes();
     if (!mine.dom.video.paused) startAudio(mine.dom.video.currentTime);
   } catch (e) { toast("Audio preview unavailable: " + e); }
@@ -185,7 +198,7 @@ function startAudio(at) {
     if (at >= buf.duration) return null;
     const s = a.ctx.createBufferSource();
     s.buffer = buf;
-    s.connect(a.gains[i]);
+    s.connect(a.taps[i]);
     s.start(when, at);
     return s;
   }).filter(Boolean);
@@ -308,6 +321,7 @@ function tick(now) {
   // Play only the trimmed part, looping back to its start.
   if (!v.paused && !v.seeking && t >= ed.end - 0.03) v.currentTime = ed.start;
   followSections(t);
+  updateMeters();
   if (t !== ed.lastT) {
     ed.lastT = t;
     const p = pct(t);
@@ -518,6 +532,7 @@ function splitHere() {
   const i = secAt(t);
   const s = ed.secs[i];
   if (t - s.from < 0.2 || s.to - t < 0.2) { toast("Too close to a split: move a little further in"); return; }
+  snap();
   ed.secs.splice(i, 1, { ...s, to: t }, { ...s, from: t });
   renderSections();
 }
@@ -557,11 +572,12 @@ function renderSections() {
   const here = () => ed.secs[secAt(d.video.currentTime)];
   const i = secAt(d.video.currentTime);
   const s = ed.secs[i];
-  const set = (patch) => { Object.assign(here(), patch); ed.lastT = -1; renderSections(); };
+  const set = (patch) => { snap(); Object.assign(here(), patch); ed.lastT = -1; renderSections(); };
   d.secPanel.replaceChildren(
     el("div", { class: "ed-row" },
       el("button", { class: "btn primary", text: "Split here", onclick: splitHere }),
       trivialSections() ? null : el("button", { class: "btn", text: "Undo splits", onclick: () => {
+        snap();
         ed.secs = [{ from: 0, to: ed.info.duration, speed: 1, zoom: 1, keep: true }];
         ed.secIndex = -1;
         renderSections();
@@ -600,48 +616,75 @@ function trackLabel(i) {
   return [name, "The game, Discord or your mic (from an older clip). Press Listen to hear which."];
 }
 
+const STRIP_ICONS = {
+  Game: "M6 11h4M8 9v4M15 12h.01M18 10h.01M7 6h10a4 4 0 0 1 4 4v4a3 3 0 0 1-5 2l-1-1H9l-1 1a3 3 0 0 1-5-2v-4a4 4 0 0 1 4-4z",
+  Discord: "M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4z",
+  Microphone: "M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5 11a7 7 0 0 0 14 0M12 18v3",
+  Master: "M4 6v12M12 4v16M20 8v8",
+};
+function stripIcon(name) {
+  const d = STRIP_ICONS[name];
+  const box = el("span", { class: "mx-icon", "aria-hidden": "true" });
+  if (d) {
+    box.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
+  } else box.textContent = (name.trim()[0] || "?").toUpperCase(); // unknown app: first letter
+  return box;
+}
+
 function renderAudio() {
   const { tracks } = ed.info;
-  if (!tracks.length) { ed.dom.audio.replaceChildren(el("p", { class: "ed-note", text: "This clip has no sound." })); return; }
-  const listen = (i) => el("button", {
-    class: "btn ed-listen", "aria-pressed": String(ed.solo === i), text: ed.solo === i ? "Stop" : "Listen",
-    title: "Hear only this track",
-    onclick: () => {
-      ed.solo = ed.solo === i ? -1 : i;
-      applyVolumes();
-      if (ed.solo >= 0 && ed.dom.video.paused) togglePlay();
-      renderAudio();
-    },
-  });
-  const row = (i, value, enabled, set) => {
-    const [name, about] = trackLabel(i);
-    const out = el("span", { class: "ed-vol", text: enabled ? `${value}%` : "Off" });
-    const range = el("input", { type: "range", min: "0", max: "200", step: "5", value: String(value), "aria-label": `${name} volume`, disabled: enabled ? null : "" });
-    range.addEventListener("input", () => { set(Number(range.value)); out.textContent = `${range.value}%`; applyVolumes(); });
-    return el("div", { class: "ed-track" + (enabled ? "" : " off") },
-      el("div", { class: "ed-track-top" }, el("b", { text: name }), listen(i)),
-      el("p", { class: "ed-note", text: about }),
-      el("div", { class: "ed-track-slider" }, range, out));
+  const dom = ed.dom;
+  dom.meters = {};
+  if (!tracks.length) { dom.audio.replaceChildren(el("p", { class: "ed-note", text: "This clip has no sound." })); return; }
+  const strip = ({ key, name, value, muted, solo, set, setMute, setSolo, about }) => {
+    const out = el("span", { class: "mx-val", text: `${value}%` });
+    const fader = el("input", { type: "range", class: "mx-fader", min: "0", max: "200", step: "5", value: String(value), "aria-label": `${name} volume`, orient: "vertical" });
+    fader.addEventListener("input", () => { set(Number(fader.value)); out.textContent = `${fader.value}%`; applyVolumes(); });
+    fader.addEventListener("dblclick", () => { fader.value = "100"; fader.dispatchEvent(new Event("input")); });
+    const bar = el("i");
+    const meter = el("div", { class: "mx-meter" }, bar);
+    dom.meters[key] = bar;
+    const m = el("button", { class: "mx-btn mute", text: "M", title: "Mute", "aria-pressed": String(muted), onclick: () => { setMute(); applyVolumes(); renderAudio(); } });
+    const buttons = [m];
+    if (setSolo) buttons.push(el("button", { class: "mx-btn solo", text: "S", title: "Listen to only this", "aria-pressed": String(solo), onclick: () => { setSolo(); applyVolumes(); if (ed.solo >= 0 && dom.video.paused) togglePlay(); renderAudio(); } }));
+    return el("div", { class: "mx-strip" + (muted ? " off" : ""), title: about || "" },
+      stripIcon(name), el("b", { class: "mx-name", text: name }),
+      el("div", { class: "mx-fade" }, fader, meter), out, el("div", { class: "mx-btns" }, ...buttons));
   };
-  const simple = ed.mode === "simple";
-  const others = tracks.map((_, i) => i).filter((i) => i !== ed.ev);
-  const kids = [];
-  if (ed.ev >= 0 && others.length) {
-    kids.push(el("div", { class: "seg ed-mode", role: "group", "aria-label": "How to mix" },
-      [["simple", "One volume"], ["separate", "Each source"]].map(([m, label]) => el("button", {
-        "aria-pressed": String(ed.mode === m),
-        onclick: () => { ed.mode = m; ed.solo = -1; applyVolumes(); renderAudio(); },
-      }, label))));
-    kids.push(el("p", { class: "ed-note", text: simple
-      ? "One volume for the whole clip. To change the game, Discord or your mic on their own, pick Each source."
-      : "Each source on its own: the main volume is off, and these sources are mixed instead (other apps' sounds aren't included)." }));
-  }
-  if (ed.ev >= 0) kids.push(row(ed.ev, ed.main, simple, (v) => (ed.main = v)));
-  if (others.length) {
-    kids.push(el("div", { class: "ed-sub", text: "Per source" }));
-    for (const i of others) kids.push(row(i, ed.sep[i], !simple, (v) => (ed.sep[i] = v)));
-  }
-  ed.dom.audio.replaceChildren(...kids);
+  const strips = [strip({
+    key: "master", name: "Master", value: ed.main, muted: ed.mmute, solo: false, about: "Volume of the whole clip",
+    set: (v) => (ed.main = v), setMute: () => (ed.mmute = !ed.mmute),
+  })];
+  tracks.forEach((_, i) => {
+    if (i === ed.ev) return;
+    const [name, about] = trackLabel(i);
+    strips.push(strip({
+      key: i, name, value: ed.sep[i], muted: ed.mute[i], solo: ed.solo === i, about,
+      set: (v) => { ed.sep[i] = v; const h = dom.audio.querySelector(".mx-hint"); if (h) h.textContent = hintText(); },
+      setMute: () => (ed.mute[i] = !ed.mute[i]),
+      setSolo: () => (ed.solo = ed.solo === i ? -1 : i),
+    }));
+  });
+  const hint = ed.ev >= 0 && strips.length > 1
+    ? el("p", { class: "ed-note mx-hint", text: hintText() })
+    : null;
+  dom.audio.replaceChildren(el("div", { class: "mx" }, ...strips), ...(hint ? [hint] : []));
+}
+
+function hintText() {
+  return mixEdited()
+    ? "Mixing each source on its own (other apps' sounds are left out)."
+    : "Move or mute a source to mix them separately. Master is the whole clip.";
+}
+
+function updateMeters() {
+  const a = ed.audio;
+  if (!a.taps || !ed.dom.meters || ed.dom.video.paused) return;
+  const buf = a.buf || (a.buf = new Uint8Array(512));
+  const level = (an) => { an.getByteTimeDomainData(buf); let p = 0; for (let k = 0; k < buf.length; k++) p = Math.max(p, Math.abs(buf[k] - 128)); return Math.min(1, p / 110); };
+  a.taps.forEach((an, i) => { const b = ed.dom.meters[i]; if (b) b.style.height = `${Math.round(level(an) * 100)}%`; });
+  const m = ed.dom.meters.master;
+  if (m) m.style.height = `${Math.round(level(a.master) * 100)}%`;
 }
 
 // ---------- text and image tracks ----------
@@ -654,7 +697,16 @@ function select(id) {
   renderProps();
 }
 
+/// B10: at most MAX_ITEMS things on one clip, so the editor and export stay fast.
+function full() {
+  if (ed.items.length < MAX_ITEMS) return false;
+  toast(`That's the most one clip can hold (${MAX_ITEMS} items). Remove one to add another.`);
+  return true;
+}
+
 function addText(lane) {
+  if (full()) return;
+  snap();
   const start = clamp(ed.dom.video.currentTime, ed.start, ed.end - 0.5);
   const it = { id: nextId++, kind: "text", lane, start, end: Math.min(ed.end, start + 3),
     text: "Your text", font: "Impact", size: 0.075, color: "#FFFFFF", outline: true, x: 0.5, y: 0.85 };
@@ -663,6 +715,8 @@ function addText(lane) {
 }
 
 function addImage(m, lane, t, pos = [0.5, 0.5]) {
+  if (full()) return;
+  snap();
   const start = clamp(t, ed.start, ed.end - 0.5);
   const it = { id: nextId++, kind: "image", lane, start, end: Math.min(ed.end, start + 3),
     img: m.img, name: m.name, aspect: m.img.naturalWidth / Math.max(1, m.img.naturalHeight),
@@ -682,6 +736,8 @@ function mediaElement(m, tag) {
 }
 
 function addVideo(m, lane, t, pos = [0.5, 0.5]) {
+  if (full()) return;
+  snap();
   const start = clamp(t, ed.start, ed.end - 0.5);
   const it = { id: nextId++, kind: "video", lane, start, end: Math.min(ed.end, start + m.info.duration), offset: 0,
     media: m, el: mediaElement(m, "video"), name: m.name, aspect: m.info.width / Math.max(1, m.info.height),
@@ -691,6 +747,8 @@ function addVideo(m, lane, t, pos = [0.5, 0.5]) {
 }
 
 function addAudio(m, lane, t) {
+  if (full()) return;
+  snap();
   const start = clamp(t, 0, ed.info.duration - 0.5);
   const it = { id: nextId++, kind: "audio", lane, start, end: Math.min(ed.info.duration, start + m.info.duration), offset: 0,
     media: m, el: mediaElement(m, "audio"), name: m.name, volume: 100 };
@@ -706,10 +764,96 @@ function place(m, lane, t, pos) {
 }
 
 function deleteSelected() {
-  const gone = selectedItem();
-  if (gone?.el) { gone.el.pause(); gone.el.removeAttribute("src"); gone.el.load(); }
+  snap(); // the item's media element stays alive so Undo can bring it back
   ed.items = ed.items.filter((it) => it.id !== ed.selected);
   select(null);
+}
+
+// ---------- undo / redo, split, join, stick ----------
+const state = () => ({ items: ed.items.map((i) => ({ ...i })), secs: ed.secs.map((s) => ({ ...s })) });
+
+/// Call just before a change: remembers how things were.
+function snap() {
+  ed.undo.push(state());
+  if (ed.undo.length > 100) ed.undo.shift();
+  ed.redo = [];
+}
+
+function restore(s) {
+  ed.items = s.items.map((i) => ({ ...i }));
+  ed.secs = s.secs.map((x) => ({ ...x }));
+  if (!ed.items.some((i) => i.id === ed.selected)) ed.selected = null;
+  ed.secIndex = -1;
+  ed.dirty = true;
+  renderLanes(); renderProps(); renderSections();
+}
+
+function undo() {
+  const s = ed.undo.pop();
+  if (!s) { toast("Nothing to undo"); return; }
+  ed.redo.push(state());
+  restore(s);
+}
+
+function redo() {
+  const s = ed.redo.pop();
+  if (!s) { toast("Nothing to redo"); return; }
+  ed.undo.push(state());
+  restore(s);
+}
+
+/// The items stuck together with `it` on its track, in time order.
+function chainOf(it) {
+  const lane = ed.items.filter((x) => x.kind === it.kind && x.lane === it.lane).sort((a, b) => a.start - b.start);
+  let i = lane.indexOf(it), a = i, b = i;
+  while (a > 0 && lane[a].stuck) a--;
+  while (b < lane.length - 1 && lane[b + 1].stuck) b++;
+  return lane.slice(a, b + 1);
+}
+
+/// Cuts the selected item (or, with none selected, the one under the playhead
+/// on the top track) into two at the playhead. The halves stay stuck together.
+function splitItem() {
+  const t = ed.dom.video.currentTime;
+  const it = selectedItem() || ed.items.find((x) => x.start < t && x.end > t);
+  if (!it) { toast("Select an item on a track first, then press Split"); return; }
+  if (t - it.start < 0.2 || it.end - t < 0.2) { toast("Move the playhead further inside the item to split it"); return; }
+  if (full()) return;
+  snap();
+  const b = { ...it, id: nextId++, start: t, stuck: true };
+  if (it.media) { b.offset = (it.offset || 0) + (t - it.start); b.el = mediaElement(it.media, it.kind === "audio" ? "audio" : "video"); }
+  it.end = t;
+  ed.items.push(b);
+  select(b.id);
+}
+
+/// Puts the next item on the track right after this one and sticks them.
+/// Two pieces of the same sound that were cut apart become one again.
+function joinNext(it) {
+  const next = ed.items.filter((x) => x.kind === it.kind && x.lane === it.lane && x !== it && x.start >= it.start).sort((a, b) => a.start - b.start)[0];
+  if (!next) { toast("There is nothing after this on its track to join"); return; }
+  snap();
+  const shift = it.end - next.start;
+  for (const x of chainOf(next).filter((x) => x.start >= next.start)) { x.start += shift; x.end += shift; }
+  if (next.media === it.media && Math.abs((it.offset || 0) + (it.end - it.start) - (next.offset || 0)) < 0.05) {
+    it.end = next.end;
+    ed.items = ed.items.filter((x) => x !== next);
+  } else next.stuck = true;
+  select(it.id);
+}
+
+function toggleStick(it) {
+  snap();
+  if (it.stuck) { it.stuck = false; toast("Unstuck: it moves on its own again"); }
+  else {
+    const prev = ed.items.filter((x) => x !== it && x.kind === it.kind && x.lane === it.lane && x.start <= it.start).sort((a, b) => b.start - a.start)[0];
+    if (!prev) { toast("Nothing before it on this track to stick to"); ed.undo.pop(); return; }
+    const d = prev.end - it.start;
+    for (const x of chainOf(it).filter((x) => x.start >= it.start)) { x.start += d; x.end += d; }
+    it.stuck = true;
+    toast("Stuck: they move together now");
+  }
+  renderLanes(); renderProps(); ed.dirty = true;
 }
 
 /// An audio track's own settings (like a mixer channel).
@@ -720,7 +864,7 @@ function audioLane(n) {
 
 /// What an item's sound plays at: its own volume times its track's (0 when muted).
 function effectiveVolume(it) {
-  if (it.kind !== "audio") return it.volume;
+  if (it.kind !== "audio") return it.muted ? 0 : it.volume;
   const l = audioLane(it.lane);
   return l.mute ? 0 : Math.round(it.volume * l.vol / 100);
 }
@@ -735,7 +879,8 @@ function renderLanes() {
     const track = el("div", { class: "ed-lane-track" + (kind === "audio" ? " audio" : "") });
     for (const it of ed.items.filter((x) => x.kind === kind && x.lane === n)) {
       const bar = el("div", {
-        class: `ed-item ${kind}` + (it.id === ed.selected ? " on" : ""),
+        class: `ed-item ${kind}` + (it.id === ed.selected ? " on" : "") + (it.stuck ? " stuck" : ""),
+        "data-id": String(it.id),
         style: `left:${pct(it.start)};width:${pct(it.end - it.start)}`,
         title: (kind === "text" ? it.text : it.name) + (kind === "text" ? "" : " · drag the ends to trim"),
       }, el("span", { text: kind === "text" ? it.text.split("\n")[0] || "(empty)" : it.name }));
@@ -803,11 +948,27 @@ function barDrag(bar, it, track) {
     const len = it.media?.info.duration;
     if (ed.selected !== it.id) { ed.selected = it.id; ed.dirty = true; renderProps(); bar.classList.add("on"); }
     bar.setPointerCapture(e.pointerId);
+    // Moving drags everything stuck to it; edges magnet to neighbours and the playhead.
+    const group = mode === "move" ? chainOf(it) : [it];
+    const orig = group.map((x) => [x, x.start, x.end]);
+    const others = ed.items.filter((x) => x.kind === it.kind && x.lane === it.lane && !group.includes(x));
+    const pins = [ed.dom.video.currentTime, ...others.flatMap((x) => [x.start, x.end])];
+    const gs = Math.min(...orig.map((o) => o[1])), ge = Math.max(...orig.map((o) => o[2]));
+    let snapped = false;
     const move = (ev) => {
+      if (!snapped) { snapped = true; snap(); }
       const dt = (ev.clientX - x0) * secPerPx;
       if (mode === "move") {
-        it.start = clamp(s0 + dt, 0, ed.info.duration - (e0 - s0));
-        it.end = it.start + (e0 - s0);
+        let d = clamp(dt, -gs, ed.info.duration - ge);
+        const near = 8 * secPerPx;
+        let best = near;
+        for (const p of pins) for (const edge of [gs + d, ge + d]) if (Math.abs(p - edge) < best) { best = Math.abs(p - edge); d = p - (edge - d); }
+        d = clamp(d, -gs, ed.info.duration - ge);
+        for (const [x, s, en] of orig) { x.start = s + d; x.end = en + d; }
+        for (const x of group) {
+          const b = ed.dom.lanes.querySelector(`[data-id="${x.id}"]`);
+          if (b) { b.style.left = pct(x.start); b.style.width = pct(x.end - x.start); }
+        }
       } else if (mode === "start") {
         // Media: moving the start trims the front, so it can't go before the file's start.
         const lo = it.media ? Math.max(0, s0 - o0) : 0;
@@ -824,6 +985,16 @@ function barDrag(bar, it, track) {
     const up = () => {
       bar.removeEventListener("pointermove", move);
       bar.removeEventListener("pointerup", up);
+      // Dropped touching another item: they stick together (Unstick in the panel undoes it).
+      if (mode === "move" && snapped) {
+        const first = group[0];
+        const hit = others.find((x) => Math.abs(x.end - first.start) < 0.02);
+        if (hit && !first.stuck) {
+          const d = hit.end - first.start;
+          for (const x of group) { x.start += d; x.end += d; }
+          first.stuck = true;
+        }
+      }
       renderLanes();
       renderProps();
     };
@@ -844,6 +1015,8 @@ function renderBay() {
   zone.addEventListener("dragover", (e) => { if (e.dataTransfer.types.includes("Files")) { e.preventDefault(); zone.classList.add("over"); } });
   zone.addEventListener("dragleave", () => zone.classList.remove("over"));
   zone.addEventListener("drop", (e) => { e.preventDefault(); zone.classList.remove("over"); importFiles(e.dataTransfer.files); });
+  const drawBtn = el("button", { class: "btn", text: "Draw…", title: "Draw arrows, circles, boxes, lines or freehand, then drop it on the clip", onclick: openDraw });
+  zone.append(drawBtn);
   const list = el("div", { class: "ed-media" }, ed.media.map((m) => {
     const kind = m.kind || "image";
     const tip = `${m.name}${m.info ? ` (${m.info.duration.toFixed(1)} s)` : ""}: drag onto the clip or ${KIND_NAME[kind].startsWith("A") ? "an" : "a"} ${KIND_NAME[kind]} track, or click to add it now`;
@@ -870,6 +1043,8 @@ async function importMedia(f) {
     const bytes = await f.arrayBuffer();
     const staged = await invoke("stage_media", bytes, { headers: { "x-name": encodeURIComponent(f.name) } });
     if (!ed) return;
+    // An added video or GIF can't be longer than the clip itself.
+    if (staged.kind !== "audio") staged.limit = Math.min(staged.limit, ed.info.duration);
     if (staged.duration > staged.limit + 0.5) openTrimmer(staged, f.name);
     else await finishMedia(staged, f.name, 0, staged.duration);
   } catch (e) { toast(String(e)); }
@@ -1027,6 +1202,70 @@ function openTrimmer(staged, name) {
   raf = requestAnimationFrame(follow);
 }
 
+// ---------- B6: drawing tools (arrow, circle, box, line, freehand) -> an image ----------
+function openDraw() {
+  const W = 960, H = Math.round(W * ed.info.height / Math.max(1, ed.info.width));
+  const cv = el("canvas", { class: "draw-canvas", width: W, height: H });
+  const g = cv.getContext("2d");
+  let tool = "arrow", color = "#FF3B30", thick = 8, shapes = [], cur = null;
+  const TOOLS = [["arrow", "Arrow"], ["circle", "Circle"], ["rect", "Box"], ["line", "Line"], ["free", "Freehand"]];
+  const COLORS = ["#FF3B30", "#FFD60A", "#34C759", "#4D8DFF", "#FFFFFF", "#000000"];
+  const paint = () => { g.clearRect(0, 0, W, H); [...shapes, cur].filter(Boolean).forEach(drawShape); };
+  const drawShape = (s) => {
+    g.strokeStyle = g.fillStyle = s.color; g.lineWidth = s.thick; g.lineCap = g.lineJoin = "round";
+    const [a, b] = [s.pts[0], s.pts[s.pts.length - 1]];
+    g.beginPath();
+    if (s.tool === "free") { s.pts.forEach((p, i) => (i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]))); g.stroke(); return; }
+    if (s.tool === "rect") g.strokeRect(a[0], a[1], b[0] - a[0], b[1] - a[1]);
+    else if (s.tool === "circle") { g.ellipse((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, Math.abs(b[0] - a[0]) / 2, Math.abs(b[1] - a[1]) / 2, 0, 0, Math.PI * 2); g.stroke(); }
+    else {
+      g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+      if (s.tool === "arrow") {
+        const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), len = s.thick * 3.5;
+        g.beginPath(); g.moveTo(b[0], b[1]);
+        g.lineTo(b[0] - len * Math.cos(ang - 0.45), b[1] - len * Math.sin(ang - 0.45));
+        g.lineTo(b[0] - len * Math.cos(ang + 0.45), b[1] - len * Math.sin(ang + 0.45));
+        g.closePath(); g.fill();
+      }
+    }
+  };
+  const at = (e) => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height]; };
+  cv.addEventListener("pointerdown", (e) => { cv.setPointerCapture(e.pointerId); cur = { tool, color, thick, pts: [at(e), at(e)] }; paint(); });
+  cv.addEventListener("pointermove", (e) => {
+    if (!cur) return;
+    if (tool === "free") cur.pts.push(at(e)); else cur.pts[1] = at(e);
+    paint();
+  });
+  cv.addEventListener("pointerup", () => { if (cur) { shapes.push(cur); cur = null; paint(); } });
+  const close = () => back.remove();
+  const row = (items) => el("div", { class: "ed-row" }, items);
+  const toolChips = el("div", { class: "chips ed-chips", role: "group", "aria-label": "Drawing tool" });
+  const showTools = () => toolChips.replaceChildren(...TOOLS.map(([v, t]) => el("button", { class: "chip", "aria-pressed": String(v === tool), onclick: () => { tool = v; showTools(); } }, t)));
+  showTools();
+  const colorChips = el("div", { class: "chips ed-chips", role: "group", "aria-label": "Colour" });
+  const showColors = () => colorChips.replaceChildren(...COLORS.map((c) => el("button", { class: "chip", "aria-pressed": String(c === color), "aria-label": c, style: `background:${c};min-width:28px;min-height:28px`, onclick: () => { color = c; showColors(); } })));
+  showColors();
+  const slider = el("input", { type: "range", min: "2", max: "30", value: String(thick), "aria-label": "Thickness" });
+  slider.addEventListener("input", () => { thick = Number(slider.value); });
+  const add = el("button", { class: "btn primary", text: "Add to clip", onclick: () => {
+    if (!shapes.length) { toast("Draw something first"); return; }
+    const url = cv.toDataURL("image/png"), img = new Image();
+    img.onload = () => { if (!ed) return; addImage({ img, name: "Drawing" }, 0, ed.dom.video.currentTime, [0.5, 0.5]); const it = selectedItem(); if (it) it.w = 1; close(); };
+    img.src = url;
+  } }, "Add to clip");
+  const box = el("div", { class: "trim-box", role: "dialog", "aria-modal": "true", "aria-label": "Draw" },
+    el("h3", { text: "Draw on the clip" }),
+    el("div", { class: "draw-wrap" }, cv),
+    row([toolChips]), row([colorChips, el("span", { text: "Thickness" }), slider]),
+    el("div", { class: "ed-row trim-actions" },
+      el("button", { class: "btn", text: "Undo", onclick: () => { shapes.pop(); paint(); } }),
+      el("button", { class: "btn", text: "Clear", onclick: () => { shapes = []; paint(); } }),
+      el("button", { class: "btn", text: "Cancel", onclick: close }), add));
+  const back = el("div", { class: "trim-back" }, box);
+  back.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } });
+  $("#editor").append(back);
+}
+
 // ---------- properties of the selected item ----------
 function chipGroup(label, options, current, pick) {
   return el("div", { class: "chips ed-chips", role: "group", "aria-label": label },
@@ -1101,7 +1340,9 @@ function renderProps() {
       const out = el("span", { class: "ed-vol", text: `${it.volume}%` });
       const range = el("input", { type: "range", min: "0", max: "200", step: "5", value: String(it.volume), "aria-label": "Its sound" });
       range.addEventListener("input", () => { it.volume = Number(range.value); out.textContent = `${it.volume}%`; });
-      kids.push(el("div", { class: "ed-slider ed-row" }, el("span", { text: "Sound" }), range, out));
+      const mute = el("button", { class: "mx-btn mute", text: "M", title: "Mute this video's sound", "aria-pressed": String(!!it.muted),
+        onclick: () => { it.muted = !it.muted; mute.setAttribute("aria-pressed", String(it.muted)); } });
+      kids.push(el("div", { class: "ed-slider ed-row" }, el("span", { text: "Sound" }), range, out, mute));
     } else kids.push(el("p", { class: "ed-note", text: "No sound." }));
   } else {
     kids.push(el("p", { class: "ed-note", text: it.name }),
@@ -1109,8 +1350,13 @@ function renderProps() {
   }
   kids.push(timeInputs(it),
     el("div", { class: "ed-row" },
-      it.kind === "audio" ? null : el("button", { class: "btn", text: "Center", onclick: () => { it.x = 0.5; it.y = 0.5; ed.dirty = true; } }),
-      el("button", { class: "btn danger", text: "Delete", onclick: deleteSelected })));
+      it.kind === "audio" ? null : el("button", { class: "btn", text: "Center", onclick: () => { snap(); it.x = 0.5; it.y = 0.5; ed.dirty = true; } }),
+      el("button", { class: "btn danger", text: "Delete", onclick: deleteSelected })),
+    el("div", { class: "ed-row" },
+      el("button", { class: "btn", text: "Split at playhead (S)", onclick: splitItem }),
+      el("button", { class: "btn", text: it.kind === "audio" ? "Join audio with next" : "Join with next", onclick: () => joinNext(it) }),
+      el("button", { class: "btn", text: it.stuck ? "Unstick" : "Stick to previous", onclick: () => toggleStick(it) })),
+    el("p", { class: "ed-note", text: "Stuck items move together and snap with no gap. Undo Ctrl+Z, redo Ctrl+Y." }));
   box.replaceChildren(...kids);
 }
 
@@ -1179,7 +1425,7 @@ function renderExport() {
   const gif = ed.format === "gif";
   const len = ed.end - ed.start;
   const fmtSeg = el("div", { class: "seg", role: "group", "aria-label": "Format" },
-    [["mp4", "MP4 video"], ["gif", "GIF"]].map(([v, label]) => el("button", {
+    [["mp4", "MP4 video"], ["gif", "GIF"], ["mp3", "MP3 sound"]].map(([v, label]) => el("button", {
       "aria-pressed": String(ed.format === v), onclick: () => { ed.format = v; renderExport(); },
     }, label)));
   const gifOpts = gif ? el("div", {},
@@ -1209,7 +1455,7 @@ function renderExport() {
 }
 
 function untouched() {
-  const sound = ed.ev >= 0 ? ed.mode === "simple" && ed.main === 100 : ed.sep.every((v) => v === 100);
+  const sound = ed.main === 100 && !ed.mmute && !mixEdited() && (ed.ev >= 0 || ed.sep.every((v, i) => v === 100 && !ed.mute[i]));
   return ed.format === "mp4" && ed.aspect === "original" && trivialSections() && ed.start < 0.05 && ed.end > ed.info.duration - 0.05 && !ed.items.length && sound;
 }
 
@@ -1267,7 +1513,7 @@ async function runExport(toClipboard) {
       crop: cropRect(),
       sections: exportSections(),
     } });
-    const kind = mine.format === "gif" ? "GIF" : "Video";
+    const kind = mine.format === "gif" ? "GIF" : mine.format === "mp3" ? "MP3" : "Video";
     if (toClipboard) toast(`${kind} copied. Paste it into Discord or any chat`);
     else { toast(`${kind} saved`); loadClips(); }
   } catch (e) {
@@ -1285,8 +1531,17 @@ document.addEventListener("keydown", (e) => {
   if (!ed) return;
   const a = document.activeElement;
   const typing = a && (a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && !["range", "checkbox"].includes(a.type)));
+  const mod = e.ctrlKey || e.metaKey;
   if (e.key === "Escape" && !typing) closeEditor();
   else if (typing) return;
+  else if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+  else if (mod && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
+  else if (!mod && e.key.toLowerCase() === "s") { e.preventDefault(); selectedItem() ? splitItem() : splitHere(); }
+  else if (!mod && (e.key === "ArrowLeft" || e.key === "ArrowRight") && a?.type !== "range") {
+    e.preventDefault();
+    const v = ed.dom.video;
+    v.currentTime = clamp(v.currentTime + (e.key === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? 1 : 0.1), 0, ed.info.duration);
+  }
   else if (e.key === " ") { e.preventDefault(); togglePlay(); }
   else if ((e.key === "Delete" || e.key === "Backspace") && ed.selected != null) { e.preventDefault(); deleteSelected(); }
 });

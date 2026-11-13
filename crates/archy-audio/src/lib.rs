@@ -12,6 +12,7 @@ mod denoise;
 mod mix;
 mod pcm;
 mod process;
+mod resample;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::sync_channel;

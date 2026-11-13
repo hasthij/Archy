@@ -146,13 +146,14 @@ pub(crate) fn device_client(flow: EDataFlow, id: Option<&str>) -> Result<IAudioC
     }
 }
 
-/// Exactly what the AAC encoder takes; Windows converts and resamples to it.
-pub(crate) fn pcm_format() -> WAVEFORMATEX {
+/// 16-bit stereo at `rate`: the device's own rate, so Windows only converts
+/// the sample format; Archy resamples to the encoder's rate itself.
+pub(crate) fn pcm_format(rate: u32) -> WAVEFORMATEX {
     WAVEFORMATEX {
         wFormatTag: WAVE_FORMAT_PCM as u16,
         nChannels: CHANNELS as u16,
-        nSamplesPerSec: SAMPLE_RATE,
-        nAvgBytesPerSec: SAMPLE_RATE * CHANNELS * 2,
+        nSamplesPerSec: rate,
+        nAvgBytesPerSec: rate * CHANNELS * 2,
         nBlockAlign: (CHANNELS * 2) as u16,
         wBitsPerSample: 16,
         cbSize: 0,
@@ -235,16 +236,11 @@ pub fn run(
         Source::Microphone { device } => (device_client(eCapture, device.as_deref())?, false, None),
         Source::Mix { .. } => unreachable!("mixed sources run in mix::run"),
     };
-    // Ask for exactly what the AAC encoder takes; Windows converts and resamples.
-    let format = WAVEFORMATEX {
-        wFormatTag: WAVE_FORMAT_PCM as u16,
-        nChannels: CHANNELS as u16,
-        nSamplesPerSec: SAMPLE_RATE,
-        nAvgBytesPerSec: SAMPLE_RATE * CHANNELS * 2,
-        nBlockAlign: (CHANNELS * 2) as u16,
-        wBitsPerSample: 16,
-        cbSize: 0,
-    };
+    // Capture at the device's own rate (process loopback has no mix format: it takes the encoder's).
+    let rate = if activation.is_some() { SAMPLE_RATE } else { crate::resample::device_rate(&client) };
+    let mut resampler = crate::resample::Resampler::new(rate);
+    let mut resampled: Vec<i16> = Vec::new();
+    let format = pcm_format(rate);
     let mut flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK
         | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
         | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
@@ -263,7 +259,7 @@ pub fn run(
         let _ = ready.send(Ok(encoder.info.clone()));
         unsafe { client.Start()? };
 
-        let frame_time = |frames: i64| frames * 10_000_000 / SAMPLE_RATE as i64;
+        let frame_time = |frames: i64| frames * 10_000_000 / rate as i64;
         let mut next_time: Option<i64> = None;
         let mut silence: Vec<i16> = Vec::new();
         let mut scaled: Vec<i16> = Vec::new();
@@ -306,9 +302,20 @@ pub fn run(
                 if bflags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data.is_null() {
                     silence.clear();
                     silence.resize(samples, 0);
-                    encoder.encode(&silence, time, &mut emit)?;
+                    if let Some(r) = resampler.as_mut() {
+                        resampled.clear();
+                        r.process(&silence, &mut resampled);
+                        encoder.encode(&resampled, time, &mut emit)?;
+                    } else {
+                        encoder.encode(&silence, time, &mut emit)?;
+                    }
                 } else {
                     let mut pcm = unsafe { std::slice::from_raw_parts(data as *const i16, samples) };
+                    if let Some(r) = resampler.as_mut() {
+                        resampled.clear();
+                        r.process(pcm, &mut resampled);
+                        pcm = &resampled;
+                    }
                     if let Some(f) = filter.as_mut().filter(|f| f.active()) {
                         filtered.clear();
                         filtered.extend_from_slice(pcm);

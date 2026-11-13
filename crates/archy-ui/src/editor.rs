@@ -510,7 +510,7 @@ pub struct ExportRequest {
     /// Videos and GIFs, bottom layer first (under the text and images).
     #[serde(default)]
     pub media: Vec<MediaOverlay>,
-    /// "mp4" or "gif".
+    /// "mp4", "gif" or "mp3" (sound only).
     pub format: String,
     pub gif_width: u32,
     pub gif_fps: u32,
@@ -677,7 +677,8 @@ fn clip_size(src: &Path) -> Result<(u32, u32), String> {
 /// (the window shows it as `export-progress` events).
 pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result<PathBuf, String> {
     let gif = req.format == "gif";
-    let ext = if gif { "gif" } else { "mp4" };
+    let mp3 = req.format == "mp3";
+    let ext = if gif { "gif" } else if mp3 { "mp3" } else { "mp4" };
     let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let length = (req.end - req.start).max(0.1);
     let work = temp_dir("export-work");
@@ -829,8 +830,13 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
         graph.push(format!("[{last}]format=yuv420p[vout]"));
     }
 
+    if mp3 && !has_audio {
+        return Err("there's no sound to export; turn a track up first".into());
+    }
     let encoders: Vec<&'static str> = if gif {
         vec!["gif"]
+    } else if mp3 {
+        vec!["mp3"]
     } else {
         // The one that worked last time first, then the rest in order.
         let known = *ENCODER.lock().unwrap_or_else(|e| e.into_inner());
@@ -850,10 +856,15 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
         for (opts, path) in &inputs {
             cmd.args(opts).arg("-i").arg(path);
         }
-        cmd.args(["-filter_complex", &graph.join(";"), "-map", "[vout]"]);
+        cmd.args(["-filter_complex", &graph.join(";")]);
+        if !mp3 {
+            cmd.args(["-map", "[vout]"]);
+        }
         // Never longer than the edit (a looping video or delayed sound can't stretch it).
         cmd.args(["-t", &format!("{out_length:.3}")]);
-        if gif {
+        if mp3 {
+            cmd.args(["-map", &format!("[{audio_out}]"), "-c:a", "libmp3lame", "-b:a", "192k"]);
+        } else if gif {
             cmd.args(["-loop", "0"]);
         } else {
             cmd.args(["-c:v", enc]).args(encoder_args(enc));
@@ -862,7 +873,12 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
             }
             cmd.args(["-movflags", "+faststart"]);
         }
-        cmd.arg(&partial).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.arg(&partial);
+        if mp3 {
+            // The picture graph still has to end somewhere; nothing is encoded from it.
+            cmd.args(["-t", &format!("{out_length:.3}"), "-map", "[vout]", "-f", "null", "-"]);
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
         tie_to_archy(&child);
         let stderr = child.stderr.take();
@@ -894,7 +910,7 @@ pub fn export(src: &Path, req: &ExportRequest, progress: &dyn Fn(f64)) -> Result
             return Err("cancelled".into());
         }
         if ok && std::fs::rename(&partial, &out).is_ok() {
-            if !gif {
+            if !gif && !mp3 {
                 *ENCODER.lock().unwrap_or_else(|e| e.into_inner()) = Some(enc);
             }
             let _ = std::fs::remove_dir_all(&work);
