@@ -836,6 +836,19 @@ async fn audio_devices(input: bool) -> Vec<DeviceView> {
         .collect()
 }
 
+/// Names of the apps playing sound right now (one cheap query).
+#[tauri::command]
+async fn playing_apps() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        archy_audio::playing_apps()
+            .into_iter()
+            .map(|a| a.1.trim_end_matches(".exe").to_string())
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Starts the tray recorder if it isn't running.
 #[tauri::command]
 fn start_recorder() -> Result<(), String> {
@@ -1041,6 +1054,7 @@ fn main() {
             trim_preview,
             finish_media,
             audio_devices,
+            playing_apps,
             running_apps,
             start_recorder,
             calibrate_voice,

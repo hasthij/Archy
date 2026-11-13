@@ -1012,6 +1012,30 @@ function devicePicker(key, list, label, what, note) {
       note ? el("p", { class: "sub", text: note }) : null));
 }
 
+// Apps playing sound now: refreshed every 30 s, only while this page is open.
+let appsTimer = null;
+let playingApps = [];
+let appsLoaded = false;
+async function loadApps() {
+  if (!settings.audio_per_app || $("#audio-settings")?.offsetParent === null) return;
+  try { playingApps = await invoke("playing_apps"); } catch { playingApps = []; }
+  appsLoaded = true;
+  renderAudio();
+}
+function perAppCard() {
+  clearInterval(appsTimer);
+  appsTimer = settings.audio_per_app ? setInterval(loadApps, 30000) : null;
+  if (settings.audio_per_app && !appsLoaded) setTimeout(loadApps, 0);
+  const sw = onOff("audio_per_app", "Per-app volume", "Detects apps playing sound (Spotify, your browser...) and records each as its own track, so the editor shows a volume slider for exactly the apps in that clip.",
+    "Mixing each app later in the editor.", "Fewer audio tracks to encode (slightly lighter).");
+  if (!settings.audio_per_app) return sw;
+  return el("div", {}, sw, el("div", { class: "card setting" },
+    el("div", { class: "about" }, el("h3", { text: "Playing sound now" }), el("p", { text: "Updates every 30 seconds. These get their own slider in the editor." })),
+    el("div", { class: "pick" }, playingApps.length
+      ? el("div", { class: "chips" }, playingApps.map((a) => el("span", { class: "chip", text: a })))
+      : el("p", { class: "sub", text: "Nothing is playing." }))));
+}
+
 function renderAudio() {
   $("#audio-settings").replaceChildren(
     devicePicker("mic_device", devices.mics, "Microphone", "Which mic Archy records for your voice track.",
@@ -1019,6 +1043,7 @@ function renderAudio() {
     devicePicker("output_device", devices.outputs, "Speakers / headphones", "Which output track 1 (everything you heard) records from. Pick the one you actually listen on.",
       "If it's unplugged, Archy uses Windows' default output instead."),
     soundMixCard(),
+    perAppCard(),
     pushToTalkCard(),
     micTestCard(),
     micCleanCard(),

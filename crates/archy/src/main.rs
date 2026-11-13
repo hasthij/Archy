@@ -403,6 +403,21 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
             });
         }
     }
+    if s.audio_per_app && (with_game || with_discord) {
+        // Other apps playing sound right now (Spotify, a browser...), one track each.
+        let me = std::process::id();
+        for (pid, exe) in archy_audio::playing_apps().into_iter().take(6) {
+            let stem = exe.trim_end_matches(".exe").trim_end_matches(".EXE").to_string();
+            if pid == game_pid || pid == me || stem.eq_ignore_ascii_case("discord") || stem.eq_ignore_ascii_case("archy") {
+                continue;
+            }
+            audio.push(AudioSource {
+                name: stem,
+                source: Source::Process { pid },
+                volumes: vols.of(&std::sync::Arc::new(std::sync::atomic::AtomicU32::new(100))),
+            });
+        }
+    }
     if with_mic {
         audio.push(AudioSource {
             name: "Microphone".into(),
@@ -1130,6 +1145,7 @@ impl App {
     /// The session pause hotkey: pauses / resumes writing the session file.
     fn pause_session(&mut self) {
         if !self.session.as_ref().is_some_and(|s| s.recorder.session_active()) {
+            notify(self.window.0 as isize, "Nothing to pause", "No session is recording. Start one with the session key first.", true);
             return;
         }
         self.session_paused = !self.session_paused;
@@ -1139,7 +1155,11 @@ impl App {
         log(if self.session_paused { "session: paused" } else { "session: resumed" });
         // Two different sounds so you can tell without looking: voice ping = recording, chime = paused.
         if self.session_paused {
-            play_for(&self.settings, &self.settings.tone_stop, CLIP_WAV, self.settings.clip_sound_volume.max(30));
+            // Its own sound ("double": two short pips), so it never sounds like stop.
+            let v = self.settings.clip_sound_volume.max(30);
+            if let Some(w) = tone_bytes("double", v) {
+                play_bytes(w, v);
+            }
         } else {
             play_for(&self.settings, &self.settings.tone_start, VOICE_WAV, self.settings.voice_sound_volume.max(30));
         }

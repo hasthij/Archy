@@ -192,6 +192,8 @@ function startAudio(at) {
   stopAudio();
   const a = ed.audio;
   if (!a.buffers) return;
+  // Other speeds: the preview stays silent (the export has the sound); never run it at 1x against a sped-up video.
+  if (ed.secs[secAt(at)]?.speed !== 1) { ed.quietSpeed = true; return; }
   a.ctx.resume();
   const when = a.ctx.currentTime + 0.02;
   a.sources = a.buffers.map((buf, i) => {
@@ -557,7 +559,7 @@ function followSections(t) {
     ed.quietSpeed = quiet;
     if (quiet) stopAudio(); else if (!v.paused) startAudio(t);
   }
-  if (i !== ed.secIndex) { ed.secIndex = i; renderSections(); }
+  if (i !== ed.secIndex) { ed.secIndex = i; if (!v.paused) ed.secPick = null; renderSections(); }
 }
 
 function renderSections() {
@@ -568,33 +570,34 @@ function renderSections() {
     style: `left:${pct(s.from)};width:${pct(s.to - s.from)}`,
     text: !s.keep ? "removed" : s.speed !== 1 || s.zoom !== 1 ? [s.speed !== 1 ? `${s.speed}×` : "", s.zoom !== 1 ? `zoom ${s.zoom}×` : ""].filter(Boolean).join(" · ") : "",
   })));
-  // Always the section under the playhead right now (never a remembered one).
-  const here = () => ed.secs[secAt(d.video.currentTime)];
-  const i = secAt(d.video.currentTime);
+  // Panel acts on the section picked in the list (default: under the playhead), so removed ones can be brought back.
+  const i = ed.secPick != null && ed.secs[ed.secPick] ? ed.secPick : secAt(d.video.currentTime);
   const s = ed.secs[i];
-  const set = (patch) => { snap(); Object.assign(here(), patch); ed.lastT = -1; renderSections(); };
-  d.secPanel.replaceChildren(
+  const set = (patch) => { snap(); Object.assign(ed.secs[i], patch); ed.lastT = -1; renderSections(); };
+  const toggle = (k) => {
+    if (ed.secs[k].keep && ed.secs.filter((x) => x.keep).length === 1) { toast("Keep at least one section"); return; }
+    snap(); ed.secs[k].keep = !ed.secs[k].keep; ed.lastT = -1; renderSections();
+  };
+  const list = ed.secs.length > 1 ? el("div", { class: "ed-seclist" }, ed.secs.map((x, k) => el("div", { class: "ed-secrow" + (k === i ? " on" : "") + (x.keep ? "" : " cut"), onclick: () => { ed.secPick = k; d.video.currentTime = x.from; renderSections(); } },
+    el("b", { text: `Part ${k + 1}` }), el("span", { text: `${fmt(x.from)} – ${fmt(x.to)}${x.keep ? "" : " · removed"}${x.speed !== 1 ? ` · ${x.speed}×` : ""}${x.zoom !== 1 ? ` · zoom ${x.zoom}×` : ""}` }),
+    el("button", { class: "btn" + (x.keep ? " danger" : ""), text: x.keep ? "Remove" : "Bring back", onclick: (e) => { e.stopPropagation(); toggle(k); } })))) : null;
+  d.secPanel.replaceChildren(...[
     el("div", { class: "ed-row" },
-      el("button", { class: "btn primary", text: "Split here", onclick: splitHere }),
+      el("button", { class: "btn primary", text: "Split here", onclick: () => { ed.secPick = null; splitHere(); } }),
       trivialSections() ? null : el("button", { class: "btn", text: "Undo splits", onclick: () => {
         snap();
         ed.secs = [{ from: 0, to: ed.info.duration, speed: 1, zoom: 1, keep: true }];
-        ed.secIndex = -1;
+        ed.secIndex = -1; ed.secPick = null;
         renderSections();
       } })),
     el("p", { class: "ed-note", text: ed.secs.length > 1
-      ? `Section ${i + 1} of ${ed.secs.length} (where the playhead is): ${fmt(s.from)} to ${fmt(s.to)}.`
-      : "Play to a moment and press Split here to cut the clip into sections. Then remove a section, or change its speed or zoom." }),
-    chipGroup("Speed", SPEEDS, s.speed, (v) => set({ speed: v })),
-    chipGroup("Zoom", ZOOMS, s.zoom, (v) => set({ zoom: v })),
-    ed.secs.length > 1 ? el("div", { class: "ed-row" },
-      el("button", { class: "btn" + (s.keep ? " danger" : ""), text: s.keep ? "Remove this section" : "Bring it back",
-        onclick: () => {
-          const now = here();
-          if (now.keep && ed.secs.filter((x) => x.keep).length === 1) { toast("Keep at least one section"); return; }
-          set({ keep: !now.keep });
-        } })) : null,
-    s.speed !== 1 ? el("p", { class: "ed-note", text: "The preview is quiet at other speeds; the saved video has the sound, slowed or sped up without changing its pitch." }) : null);
+      ? "Click a part to pick it, then set its speed or zoom, or remove it."
+      : "Play to a moment and press Split here to cut the clip into parts. Then remove a part, or change its speed or zoom." }),
+    list,
+    chipGroup(`Speed (part ${i + 1})`, SPEEDS, s.speed, (v) => set({ speed: v })),
+    chipGroup(`Zoom (part ${i + 1})`, ZOOMS, s.zoom, (v) => set({ zoom: v })),
+    s.speed !== 1 ? el("p", { class: "ed-note", text: "The preview is quiet at other speeds; the saved video has the sound, slowed or sped up without changing its pitch." }) : null,
+  ].filter(Boolean));
 }
 
 function trimPanel() {
@@ -638,7 +641,7 @@ function renderAudio() {
   if (!tracks.length) { dom.audio.replaceChildren(el("p", { class: "ed-note", text: "This clip has no sound." })); return; }
   const strip = ({ key, name, value, muted, solo, set, setMute, setSolo, about }) => {
     const out = el("span", { class: "mx-val", text: `${value}%` });
-    const fader = el("input", { type: "range", class: "mx-fader", min: "0", max: "200", step: "5", value: String(value), "aria-label": `${name} volume`, orient: "vertical" });
+    const fader = el("input", { type: "range", class: "mx-fader", min: "0", max: "200", step: "5", value: String(value), "aria-label": `${name} volume` });
     fader.addEventListener("input", () => { set(Number(fader.value)); out.textContent = `${fader.value}%`; applyVolumes(); });
     fader.addEventListener("dblclick", () => { fader.value = "100"; fader.dispatchEvent(new Event("input")); });
     const bar = el("i");
@@ -682,9 +685,9 @@ function updateMeters() {
   if (!a.taps || !ed.dom.meters || ed.dom.video.paused) return;
   const buf = a.buf || (a.buf = new Uint8Array(512));
   const level = (an) => { an.getByteTimeDomainData(buf); let p = 0; for (let k = 0; k < buf.length; k++) p = Math.max(p, Math.abs(buf[k] - 128)); return Math.min(1, p / 110); };
-  a.taps.forEach((an, i) => { const b = ed.dom.meters[i]; if (b) b.style.height = `${Math.round(level(an) * 100)}%`; });
+  a.taps.forEach((an, i) => { const b = ed.dom.meters[i]; if (b) b.style.width = `${Math.round(level(an) * 100)}%`; });
   const m = ed.dom.meters.master;
-  if (m) m.style.height = `${Math.round(level(a.master) * 100)}%`;
+  if (m) m.style.width = `${Math.round(level(a.master) * 100)}%`;
 }
 
 // ---------- text and image tracks ----------
@@ -1207,17 +1210,23 @@ function openDraw() {
   const W = 960, H = Math.round(W * ed.info.height / Math.max(1, ed.info.width));
   const cv = el("canvas", { class: "draw-canvas", width: W, height: H });
   const g = cv.getContext("2d");
-  let tool = "arrow", color = "#FF3B30", thick = 8, shapes = [], cur = null;
-  const TOOLS = [["arrow", "Arrow"], ["circle", "Circle"], ["rect", "Box"], ["line", "Line"], ["free", "Freehand"]];
+  // The paused frame is the drawing board; only the strokes are saved, lined up with the frame exactly.
+  if (!ed.dom.video.paused) ed.dom.video.pause();
+  const bg = el("canvas", { class: "draw-bg", width: W, height: H });
+  try { bg.getContext("2d").drawImage(ed.dom.video, 0, 0, W, H); } catch {}
+  let tool = "arrow", color = "#FF3B30", thick = 8, shapes = [], cur = null, filled = false;
+  const TOOLS = [["free", "Pen"], ["marker", "Highlighter"], ["arrow", "Arrow"], ["line", "Line"], ["circle", "Circle"], ["rect", "Box"]];
   const COLORS = ["#FF3B30", "#FFD60A", "#34C759", "#4D8DFF", "#FFFFFF", "#000000"];
   const paint = () => { g.clearRect(0, 0, W, H); [...shapes, cur].filter(Boolean).forEach(drawShape); };
   const drawShape = (s) => {
     g.strokeStyle = g.fillStyle = s.color; g.lineWidth = s.thick; g.lineCap = g.lineJoin = "round";
     const [a, b] = [s.pts[0], s.pts[s.pts.length - 1]];
+    g.globalAlpha = s.tool === "marker" ? 0.4 : 1;
+    if (s.tool === "marker") g.lineWidth = s.thick * 3;
     g.beginPath();
-    if (s.tool === "free") { s.pts.forEach((p, i) => (i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]))); g.stroke(); return; }
-    if (s.tool === "rect") g.strokeRect(a[0], a[1], b[0] - a[0], b[1] - a[1]);
-    else if (s.tool === "circle") { g.ellipse((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, Math.abs(b[0] - a[0]) / 2, Math.abs(b[1] - a[1]) / 2, 0, 0, Math.PI * 2); g.stroke(); }
+    if (s.tool === "free" || s.tool === "marker") { s.pts.forEach((p, i) => (i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]))); g.stroke(); g.globalAlpha = 1; return; }
+    if (s.tool === "rect") { g.rect(a[0], a[1], b[0] - a[0], b[1] - a[1]); s.filled ? g.fill() : g.stroke(); }
+    else if (s.tool === "circle") { g.ellipse((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, Math.abs(b[0] - a[0]) / 2, Math.abs(b[1] - a[1]) / 2, 0, 0, Math.PI * 2); s.filled ? g.fill() : g.stroke(); }
     else {
       g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
       if (s.tool === "arrow") {
@@ -1228,12 +1237,13 @@ function openDraw() {
         g.closePath(); g.fill();
       }
     }
+    g.globalAlpha = 1;
   };
   const at = (e) => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height]; };
-  cv.addEventListener("pointerdown", (e) => { cv.setPointerCapture(e.pointerId); cur = { tool, color, thick, pts: [at(e), at(e)] }; paint(); });
+  cv.addEventListener("pointerdown", (e) => { cv.setPointerCapture(e.pointerId); cur = { tool, color, thick, filled, pts: [at(e), at(e)] }; paint(); });
   cv.addEventListener("pointermove", (e) => {
     if (!cur) return;
-    if (tool === "free") cur.pts.push(at(e)); else cur.pts[1] = at(e);
+    if (tool === "free" || tool === "marker") cur.pts.push(at(e)); else cur.pts[1] = at(e);
     paint();
   });
   cv.addEventListener("pointerup", () => { if (cur) { shapes.push(cur); cur = null; paint(); } });
@@ -1245,6 +1255,8 @@ function openDraw() {
   const colorChips = el("div", { class: "chips ed-chips", role: "group", "aria-label": "Colour" });
   const showColors = () => colorChips.replaceChildren(...COLORS.map((c) => el("button", { class: "chip", "aria-pressed": String(c === color), "aria-label": c, style: `background:${c};min-width:28px;min-height:28px`, onclick: () => { color = c; showColors(); } })));
   showColors();
+  const fill = el("input", { type: "checkbox", "aria-label": "Fill circles and boxes" });
+  fill.addEventListener("change", () => { filled = fill.checked; });
   const slider = el("input", { type: "range", min: "2", max: "30", value: String(thick), "aria-label": "Thickness" });
   slider.addEventListener("input", () => { thick = Number(slider.value); });
   const add = el("button", { class: "btn primary", text: "Add to clip", onclick: () => {
@@ -1255,8 +1267,8 @@ function openDraw() {
   } }, "Add to clip");
   const box = el("div", { class: "trim-box", role: "dialog", "aria-modal": "true", "aria-label": "Draw" },
     el("h3", { text: "Draw on the clip" }),
-    el("div", { class: "draw-wrap" }, cv),
-    row([toolChips]), row([colorChips, el("span", { text: "Thickness" }), slider]),
+    el("div", { class: "draw-wrap" }, bg, cv),
+    row([toolChips]), row([colorChips, el("label", { class: "ed-note" }, fill, " Filled")]), row([el("span", { text: "Thickness" }), slider]),
     el("div", { class: "ed-row trim-actions" },
       el("button", { class: "btn", text: "Undo", onclick: () => { shapes.pop(); paint(); } }),
       el("button", { class: "btn", text: "Clear", onclick: () => { shapes = []; paint(); } }),

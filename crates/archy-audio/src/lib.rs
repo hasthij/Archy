@@ -22,7 +22,7 @@ use std::thread::JoinHandle;
 pub use aac::AacInfo;
 pub use denoise::{Filter, MicFilter, GATE_OFF};
 pub use pcm::{listen_microphone, monitor_microphone};
-pub use process::find_root_process;
+pub use process::{find_root_process, playing_apps};
 use windows::core::{Error, Result};
 use windows::Win32::Foundation::E_FAIL;
 

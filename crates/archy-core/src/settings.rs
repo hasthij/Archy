@@ -77,6 +77,9 @@ pub struct Settings {
     pub audio_game: bool,
     /// Separate track with only Discord (your friends).
     pub audio_discord: bool,
+    /// Detect apps playing sound (Spotify, a browser...) and record each as its own
+    /// track, so the editor can set their volume per clip.
+    pub audio_per_app: bool,
     /// Separate track with your microphone.
     pub audio_mic: bool,
     /// Track volumes, 0-200 (%). Everything = what the PC plays in track 1.
@@ -258,6 +261,7 @@ impl Default for Settings {
             audio_everything: true,
             audio_game: true,
             audio_discord: true,
+            audio_per_app: true,
             audio_mic: true,
             audio_kbps: 160,
             audio_mode: "main".into(),
