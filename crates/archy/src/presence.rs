@@ -9,10 +9,9 @@ use std::io::{Read, Write};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::time::Duration;
 
-/// The Discord application ID whose name and icon show as "Playing Archy".
-/// Empty = Discord status stays inert. Create one at discord.com/developers
-/// (name it "Archy", upload the icon) and paste its Application ID here.
-const CLIENT_ID: &str = "";
+
+
+const CLIENT_ID: &str = "1570755301219504220";
 
 /// What the status should say.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -56,8 +55,8 @@ impl Presence {
                 if CLIENT_ID.is_empty() { continue; }
                 if pipe.is_none() { pipe = connect(); }
                 let Some(p) = pipe.as_mut() else { continue };
-                let (details, state) = match &want { Want::Game(g) => (g.as_str(), "Clipping with Archy"), _ => ("Archy", "Ready to clip") };
-                if set_activity(p, Some((details, state))).is_ok() { sent = Some(want.clone()); }
+                let (details, state) = match &want { Want::Game(g) => (format!("Clipping {g} with Archy"), "Ready to clip"), _ => ("Archy".to_string(), "Ready to clip") };
+                if set_activity(p, Some((details.as_str(), state))).is_ok() { sent = Some(want.clone()); }
                 else { pipe = None; sent = None; }
             }
         });
@@ -99,7 +98,7 @@ fn connect() -> Option<File> {
 }
 
 fn set_activity(p: &mut File, text: Option<(&str, &str)>) -> std::io::Result<()> {
-    let activity = text.map(|(d, st)| serde_json::json!({ "details": d, "state": st, "assets": { "large_image": "archy" } }));
+    let activity = text.map(|(d, st)| serde_json::json!({ "details": d, "state": st, "assets": { "large_image": "archy", "large_text": "Archy" } }));
     let msg = serde_json::json!({
         "cmd": "SET_ACTIVITY",
         "args": { "pid": std::process::id(), "activity": activity },
