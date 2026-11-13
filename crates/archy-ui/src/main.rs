@@ -150,7 +150,12 @@ fn get_status() -> StatusView {
 }
 
 #[tauri::command]
-fn list_clips() -> Vec<Clip> {
+async fn list_clips() -> Vec<Clip> {
+    // Off the UI thread: a big library must never freeze the window.
+    tauri::async_runtime::spawn_blocking(list_clips_sync).await.unwrap_or_default()
+}
+
+fn list_clips_sync() -> Vec<Clip> {
     let folder = Settings::load().0.save_folder;
     let Ok(entries) = std::fs::read_dir(&folder) else {
         return Vec::new();

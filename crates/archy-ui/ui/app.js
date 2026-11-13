@@ -1786,6 +1786,7 @@ const thumbObserver = new IntersectionObserver((entries) => {
 
 // ---------- start ----------
 (async function start() {
+  const firstClips = invoke("list_clips").catch(() => []); // starts now, in parallel with settings
   try {
     [settings, presets] = await Promise.all([invoke("get_settings"), invoke("presets")]);
   } catch (e) {
@@ -1798,7 +1799,8 @@ const thumbObserver = new IntersectionObserver((entries) => {
   $("#update-btn").addEventListener("click", () => updateDialog(knownUpdate));
   renderAll();
   refreshStatus();
-  loadClips();
+  clips = await firstClips;
+  renderClips();
   window.maybeWelcome?.();
   loadDevices();
   checkUpdate();
