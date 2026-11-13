@@ -228,7 +228,7 @@ impl Default for Settings {
             noise_suppression: false,
             mic_gate_db: -100,
             // Off by default: a key that silently stops recording is easy to hit by accident.
-            hotkey_pause: String::new(),
+            hotkey_pause: "F9".into(),
             games: vec!["RobloxPlayerBeta.exe".into()],
             record_fullscreen_apps: true,
             never_record: Vec::new(),

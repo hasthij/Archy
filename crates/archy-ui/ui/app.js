@@ -309,6 +309,30 @@ function viewShot(c) {
   document.body.append(box);
 }
 
+function renameClip(c) {
+  $("#rn-back")?.remove();
+  const stem = c.name.replace(/\.[^.]+$/, "");
+  const input = el("input", { type: "text", class: "cmp-num", value: stem, maxlength: 120, "aria-label": "New name", style: "width:100%" });
+  const msg = el("p", { class: "sub cmp-msg" });
+  const close = () => back.remove();
+  const save = async () => {
+    const name = input.value.trim();
+    if (!name || name === stem) return close();
+    try { await invoke("rename_clip", { path: c.path, name }); toast("Renamed"); loadClips(); close(); }
+    catch (e) { msg.textContent = String(e); }
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+  const box = el("div", { class: "upd-box cmp-box", role: "dialog", "aria-modal": "true", "aria-label": "Rename clip" },
+    el("div", { class: "upd-top" }, el("h3", { text: "Rename clip" }), el("span", { class: "sub", text: "The file type stays the same." })),
+    el("div", { class: "upd-body" }, input, msg),
+    el("div", { class: "upd-actions" }, el("button", { class: "btn", text: "Cancel", onclick: close }), el("button", { class: "btn primary", text: "Rename", onclick: save })));
+  const back = el("div", { class: "upd-back", id: "rn-back" }, box);
+  back.addEventListener("click", (e) => { if (e.target === back) close(); });
+  back.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+  document.body.append(back);
+  input.focus(); input.select();
+}
+
 function clipCard(c, hero = false) {
   if (c.kind === "shot") return shotCard(c);
   // A small cached JPEG, fetched when the card scrolls into view (decoding a
@@ -342,8 +366,8 @@ function clipCard(c, hero = false) {
           try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); }
           catch (e) { toast(String(e)); }
         } }), "copy"),
-        iconize(el("button", { class: "btn", text: "Edit", onclick: () => openEditor(c) }), "edit"),
-        iconize(el("button", { class: "btn", text: "GIF", title: "Make a GIF from this clip", onclick: () => openEditor(c, { format: "gif" }) }), "gif"),
+        iconize(el("button", { class: "btn", text: "Rename", title: "Rename this clip", onclick: () => renameClip(c) }), "edit"),
+        iconize(el("button", { class: "btn", text: "Edit", title: "Trim, add audio, export as MP4 or GIF", onclick: () => openEditor(c) }), "gif"),
         iconize(el("button", { class: "btn", text: "Folder", onclick: () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e))) }), "folder"),
         del)));
 }
@@ -879,7 +903,7 @@ function renderHotkeys() {
   $("#hotkey-settings").replaceChildren(el("div", { class: "card" },
     hotkeyRow("hotkey_save", "Save clip", `Saves the last ${lengthLabel(settings.clip_seconds)}`),
     hotkeyRow("hotkey_save_long", "Save long clip", `Saves the last ${lengthLabel(settings.long_clip_seconds)}`),
-    hotkeyRow("hotkey_pause", "Pause / resume", "Stops recording completely: zero load. Off by default so it can't be hit by accident; the tray menu can pause too."),
+    hotkeyRow("hotkey_pause", "Pause / resume", "Stops recording completely: zero load. F9 by default, separate from the save key; clear it to turn it off. The tray menu can pause too."),
     hotkeyRow("hotkey_screenshot", "Screenshot", "Saves a full-size picture (PNG) of the game into your clips. Off until you set a key; costs nothing until you press it."),
     hotkeyRow("hotkey_session", "Start / stop session recording", "Records the whole session to one video. Only when Record whole sessions (Recording page) is set to With a hotkey.")),
     extraHotkeysCard());
