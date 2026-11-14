@@ -29,7 +29,7 @@
 2. Run it. It installs just for you, so it doesn't need admin rights.
    - **Windows SmartScreen may warn you** because the installer isn't code-signed. Click **More info**, then **Run anyway**.
    - *Why not signed?* A code-signing certificate costs hundreds of dollars every year, which is too much for a free, open-source hobby project. Only download Archy from this repo's [releases](https://github.com/hasthij/Archy/releases); all the source is here, so you can read it or [build it yourself](#building-from-source).
-   - **Flagged or blocked anyway?** Download **Archy-<version>.zip** instead. It holds `Archy-Setup.exe` (works offline, with voice and FFmpeg included) and a `Portable\` folder: copy it anywhere and run `archy.exe`, no install at all.
+   - **Flagged or blocked anyway?** Download **Archy.zip** from the release instead. It holds `Archy-Setup.exe` (works offline, with voice and FFmpeg included) and a `Portable\` folder: copy it anywhere and run `archy.exe`, no install at all.
 3. Setup downloads the voice engine (about 24 MB) and the clip editor's video tools (FFmpeg, about 100 MB). It can look paused for a minute or two while this happens.
 4. If Windows is missing something Archy needs, Setup tells you and opens the right page. You make the change yourself; **Archy never changes Windows settings on its own.** It checks for:
    - microphone access for desktop apps,
