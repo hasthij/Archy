@@ -7,3 +7,6 @@
 # Notes for me only: all markdown except the README
 *.md
 !README.md
+
+# big local-only promo models
+promo/audio/models/

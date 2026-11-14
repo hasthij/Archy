@@ -21,8 +21,17 @@ fn main() {
     println!("cargo:rerun-if-changed=../../assets/archy.ico");
     let mut res = winresource::WindowsResource::new();
     res.set_icon("../../assets/archy.ico");
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
     res.set("FileDescription", "Archy Setup");
     res.set("ProductName", "Archy");
+    res.set("CompanyName", "Archy");
+    res.set("FileVersion", &version);
+    res.set("ProductVersion", &version);
+    res.set("OriginalFilename", "Archy-Setup.exe");
+    res.set("InternalName", "Archy-Setup");
+    res.set("LegalCopyright", "Copyright (c) 2026 Archy contributors. GPL-3.0-only.");
+    println!("cargo:rerun-if-changed=setup.manifest");
+    res.set_manifest_file("setup.manifest");
     if let Err(e) = res.compile() {
         println!("cargo:warning=icon not embedded: {e}");
     }

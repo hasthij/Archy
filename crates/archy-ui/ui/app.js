@@ -586,7 +586,7 @@ function bufferMB(seconds) {
   const videoMbps = p
     ? p.mbps * Math.pow(Math.max(60, settings.fps) / 60, 0.6)
     : 6; // unknown preset
-  const tracks = settings.audio_mode === "separate"
+  const tracks = settings.audio_capture === "game_only" ? 1 : settings.audio_mode === "separate"
     ? 1 + [settings.volume_game, settings.volume_discord, settings.volume_mic].filter((v) => v > 0).length
     : (settings.record_stems ? 4 : 1);
   return Math.round(((videoMbps + (tracks * settings.audio_kbps) / 1000) * seconds) / 8);
@@ -856,14 +856,8 @@ function renderGames() {
   $("#games-settings").replaceChildren(
     appListCard("games", "Always record these", "The program file of each game. Archy starts recording when one is in front.",
       "Game file name, e.g. VALORANT-Win64-Shipping.exe"),
-    settingCard({ key: "record_fullscreen_apps", name: "Other fullscreen apps", rec: true,
-      what: "Also record anything else running fullscreen (browsers, Discord and video players are ignored).",
-      options: [
-        { value: true, label: "On", best: "Catching games that aren't on your list without setting anything up." },
-        { value: false, label: "Off", best: "Only ever recording the games listed above." },
-      ] }),
     appListCard("never_record", "Never record these",
-      "Apps Archy should leave alone, even when they're fullscreen or in front: a video player, a launcher, a work app. This list wins over the one above.",
+      "Apps Archy should leave alone, even when they're fullscreen or in front: a video player, a launcher, a work app. This list wins over everything else.",
       "Program file name, e.g. Netflix.exe"));
 }
 
@@ -1024,6 +1018,15 @@ async function loadApps() {
   appsLoaded = true;
   renderAudio();
 }
+// App icons by lower-case name; apps with none get a generic window glyph.
+const iconCache = {};
+function appIcon(name) {
+  const u = iconCache[name.toLowerCase()];
+  if (u) return el("img", { class: "app-ico", src: u, alt: "" });
+  const s = el("span", { class: "app-ico fallback", "aria-hidden": "true" });
+  s.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18"/></svg>';
+  return s;
+}
 function perAppCard() {
   clearInterval(appsTimer);
   appsTimer = settings.audio_per_app ? setInterval(loadApps, 30000) : null;
@@ -1035,15 +1038,21 @@ function perAppCard() {
     el("div", { class: "about" }, el("h3", { text: "Apps to record" }), el("p", { text: "Ticked apps get their own track and editor slider. Untick an app (Discord chat, WhatsApp, a browser...) and Archy never records it. A newly playing ticked app is added within about 30 seconds, mid-session." })),
     el("div", { class: "pick" }, (() => {
       const blocked = settings.audio_app_blocked || [];
-      const names = [...new Set([...playingApps, ...blocked].map((a) => a.toLowerCase()))]
-        .map((l) => [...playingApps, ...blocked].find((a) => a.toLowerCase() === l));
+      const pnames = playingApps.map((a) => a.name);
+      const names = [...new Set([...pnames, ...blocked].map((a) => a.toLowerCase()))]
+        .map((l) => [...pnames, ...blocked].find((a) => a.toLowerCase() === l));
       if (!names.length) return el("p", { class: "sub", text: "Nothing is playing sound right now." });
       return el("div", { class: "chips" }, names.map((a) => {
         const off = blocked.some((b) => b.toLowerCase() === a.toLowerCase());
-        const live = playingApps.some((p) => p.toLowerCase() === a.toLowerCase());
-        return el("button", { class: "chip", "aria-pressed": String(!off), title: off ? "Not recorded. Click to record it again." : "Recorded. Click to stop recording it.",
-          text: (off ? "☐ " : "☑ ") + a + (live ? "" : " (not playing)"),
+        const hit = playingApps.find((p) => p.name.toLowerCase() === a.toLowerCase());
+        const live = !!hit;
+        if (hit?.icon) iconCache[a.toLowerCase()] = hit.icon;
+        const chip = el("button", { class: "chip", "aria-pressed": String(!off), title: off ? "Not recorded. Click to record it again." : "Recorded. Click to stop recording it.",
+          text: "",
           onclick: () => save({ audio_app_blocked: off ? blocked.filter((b) => b.toLowerCase() !== a.toLowerCase()) : [...blocked, a] }) });
+        chip.append(appIcon(a), (off ? "☐ " : "☑ ") + a + (live ? "" : " (not playing)"));
+        if (!iconCache[a.toLowerCase()]) invoke("app_icon", { name: a }).then((u) => { if (u) { iconCache[a.toLowerCase()] = u; renderAudio(); } }).catch(() => {});
+        return chip;
       }));
     })())));
 }
@@ -1055,7 +1064,7 @@ function renderAudio() {
     devicePicker("output_device", devices.outputs, "Speakers / headphones", "Which output track 1 (everything you heard) records from. Pick the one you actually listen on.",
       "If it's unplugged, Archy uses Windows' default output instead."),
     soundMixCard(),
-    perAppCard(),
+    ...(settings.audio_capture === "game_only" ? [] : [perAppCard()]),
     pushToTalkCard(),
     micTestCard(),
     micCleanCard(),
@@ -1227,7 +1236,20 @@ function soundMixCard() {
     return el("div", { class: "mix-row" + (enabled ? "" : " off") },
       el("div", {}, el("b", { text: name }), el("span", { class: "sub", text: about })), range, out);
   };
-  return el("div", { class: "card" },
+  const gameOnly = settings.audio_capture === "game_only";
+  const capture = el("div", { class: "card" },
+    el("div", { class: "mix-head" },
+      el("div", {}, el("h3", { text: "What to record" }),
+        el("p", { class: "sub", style: "margin:0", text: gameOnly
+          ? "Game only: clips contain the game's own sound and nothing else. No Discord, no mic, no other apps, no notification sounds. Best for clean gameplay clips to post."
+          : "Dynamic: the game plus every app that plays sound (Spotify, a call, your browser...), each as its own track, and your mic. Best for clips that include the whole moment. Untick apps below to leave them out." })),
+      el("div", { class: "seg", role: "group", "aria-label": "What to record" },
+        [["dynamic", "Dynamic"], ["game_only", "Game only"]].map(([m, label]) => el("button", {
+          "aria-pressed": String((settings.audio_capture || "dynamic") === m),
+          onclick: () => save({ audio_capture: m }, m === "game_only" ? "Recording only the game's sound" : "Recording the game and other apps"),
+        }, label)))));
+  if (gameOnly) return capture;
+  return el("div", {}, capture, el("div", { class: "card" },
     el("div", { class: "mix-head" },
       el("div", {}, el("h3", { text: "Sound in your clips" }),
         el("p", { class: "sub", style: "margin:0", text: separate
@@ -1245,7 +1267,7 @@ function soundMixCard() {
     slider("volume_mic", "Microphone", "Your voice", separate, true),
     el("p", { class: "sub", style: "margin-top:12px", text: (separate || settings.record_stems
       ? "Clips always have one mixed track that every player plays, plus the game, Discord and your mic as separate tracks you can rebalance later in the editor."
-      : "Clips have one mixed track (separate tracks are off below).") + " Double-click a slider to reset it to 100%." }));
+      : "Clips have one mixed track (separate tracks are off below).") + " Double-click a slider to reset it to 100%." })));
 }
 
 // A 0-200% volume slider; saves when released.
@@ -1861,7 +1883,7 @@ async function updateDialog(u = null) {
   const install = el("button", { class: "btn primary", text: "Install now", onclick: async () => {
     install.disabled = true;
     status.textContent = "Downloading the installer… (checked against GitHub's fingerprint before it runs)";
-    try { await invoke("install_update"); status.textContent = "The installer is open: click Yes there. Archy restarts on the new version; your clips and settings are kept."; }
+    try { await invoke("install_update"); status.textContent = "The update window is open and installing. Archy restarts on the new version; your clips and settings are kept."; }
     catch (err) { status.textContent = "Update failed: " + err; install.disabled = false; }
   } });
   show([

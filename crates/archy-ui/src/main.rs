@@ -484,7 +484,7 @@ async fn install_update() -> Result<(), String> {
     let path = tauri::async_runtime::spawn_blocking(move || archy_core::update::download(&update))
         .await
         .map_err(|e| e.to_string())??;
-    std::process::Command::new(&path).spawn().map_err(|e| format!("couldn't start the installer: {e}"))?;
+    std::process::Command::new(&path).arg("--update").spawn().map_err(|e| format!("couldn't start the installer: {e}"))?;
     Ok(())
 }
 
@@ -836,17 +836,33 @@ async fn audio_devices(input: bool) -> Vec<DeviceView> {
         .collect()
 }
 
-/// Names of the apps playing sound right now (one cheap query).
+fn icon_url(png: Option<Vec<u8>>) -> Option<String> {
+    use base64::Engine;
+    png.map(|b| format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(b)))
+}
+
+/// Apps playing sound right now (one cheap query): name and icon (None = use the fallback).
 #[tauri::command]
-async fn playing_apps() -> Vec<String> {
+async fn playing_apps() -> Vec<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(|| {
-        archy_audio::playing_apps()
+        let dir = archy_core::settings::app_dir().join("icons");
+        archy_audio::playing_apps(true)
             .into_iter()
-            .map(|a| a.1.trim_end_matches(".exe").to_string())
+            .map(|(pid, exe)| {
+                let name = exe.trim_end_matches(".exe").to_string();
+                let icon = icon_url(archy_audio::cache_icon(&dir, &name, pid));
+                serde_json::json!({ "name": name, "icon": icon })
+            })
             .collect()
     })
     .await
     .unwrap_or_default()
+}
+
+/// The saved icon of an app (by name), for the settings list and the editor mixer.
+#[tauri::command]
+fn app_icon(name: String) -> Option<String> {
+    icon_url(archy_audio::cached_icon(&archy_core::settings::app_dir().join("icons"), &name))
 }
 
 /// Starts the tray recorder if it isn't running.
@@ -1055,6 +1071,7 @@ fn main() {
             finish_media,
             audio_devices,
             playing_apps,
+            app_icon,
             running_apps,
             start_recorder,
             calibrate_voice,

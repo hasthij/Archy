@@ -49,8 +49,6 @@ pub struct Settings {
     pub hotkey_pause: String,
     /// Executable names that always count as games.
     pub games: Vec<String>,
-    /// Also record any other app running fullscreen.
-    pub record_fullscreen_apps: bool,
     /// Executable names that are never recorded (wins over `games`).
     pub never_record: Vec<String>,
     /// The game the user picked to record ("Client-Win64-Shipping.exe"), whether
@@ -95,6 +93,9 @@ pub struct Settings {
     /// "main": one volume (`volume_everything`) for the whole clip; "separate":
     /// game, Discord and mic each at their own volume (0 = not recorded).
     pub audio_mode: String,
+    /// "dynamic": record every app that plays sound (minus unticked ones);
+    /// "game_only": the game's own audio and nothing else (no apps, Discord or mic).
+    pub audio_capture: String,
     /// "main" mode: also record game, Discord and mic as their own tracks, so the
     /// editor can change each one later. Off: one track only (lightest: one audio
     /// encoder instead of four).
@@ -250,7 +251,6 @@ impl Default for Settings {
             // End, not F9: F9 is the whole-session pause key.
             hotkey_pause: "End".into(),
             games: vec!["RobloxPlayerBeta.exe".into()],
-            record_fullscreen_apps: true,
             never_record: Vec::new(),
             record_target: String::new(),
             capture: "window".into(),
@@ -268,6 +268,7 @@ impl Default for Settings {
             audio_mic: true,
             audio_kbps: 160,
             audio_mode: "main".into(),
+            audio_capture: "dynamic".into(),
             record_stems: true,
             frame_timing: "smooth".into(),
             clips_max_gb: 0,
@@ -455,6 +456,9 @@ impl Settings {
         }
         self.voice_fine_tune = self.voice_fine_tune.clamp(-50, 50);
         // Unknown look values (a hand edit, a newer Archy) fall back to the defaults.
+        if self.audio_capture != "game_only" {
+            self.audio_capture = "dynamic".into();
+        }
         if self.audio_mode != "separate" {
             self.audio_mode = "main".into();
         }
@@ -473,7 +477,7 @@ impl Settings {
     /// Whether the microphone is heard in the clip at all (mixed into track 1).
     /// In "separate" mode a mic at 0% is never opened.
     pub fn mic_wanted(&self) -> bool {
-        self.audio_mode != "separate" || self.volume_mic > 0
+        self.audio_capture != "game_only" && (self.audio_mode != "separate" || self.volume_mic > 0)
     }
 
     /// Which sources get their own track (game, Discord, mic). Everything always
@@ -481,7 +485,9 @@ impl Settings {
     /// (a mic at 0% is never opened); in "main" mode all are kept for the editor
     /// unless `record_stems` is off.
     pub fn audio_sources(&self) -> (bool, bool, bool) {
-        if self.audio_mode == "separate" {
+        if self.audio_capture == "game_only" {
+            (false, false, false) // one track: the game, nothing else
+        } else if self.audio_mode == "separate" {
             (self.volume_game > 0, self.volume_discord > 0, self.volume_mic > 0)
         } else if self.record_stems {
             (true, true, true)
@@ -494,7 +500,10 @@ impl Settings {
     /// "main" mode only the main volume applies; in "separate" mode track 1 stays
     /// at 100% and each source has its own.
     pub fn audio_volumes(&self) -> (u32, u32, u32, u32) {
-        if self.audio_mode == "separate" {
+        if self.audio_capture == "game_only" {
+            let v = if self.audio_mode == "separate" { self.volume_game } else { self.volume_everything };
+            (v, 100, 100, 100)
+        } else if self.audio_mode == "separate" {
             (100, self.volume_game, self.volume_discord, self.volume_mic)
         } else {
             (self.volume_everything, 100, 100, 100)
@@ -559,6 +568,16 @@ mod tests {
         assert_eq!(s.audio_volumes(), (100, 120, 0, 80));
         let quiet_mic = Settings { volume_mic: 0, ..s };
         assert!(!quiet_mic.audio_sources().2, "a mic at 0% is never opened");
+    }
+
+    #[test]
+    fn game_only_records_one_track_and_no_mic() {
+        let s = Settings { audio_capture: "game_only".into(), ..Default::default() };
+        assert_eq!(s.audio_sources(), (false, false, false));
+        assert!(!s.mic_wanted());
+        let d = Settings::default();
+        assert_eq!(d.audio_capture, "dynamic");
+        assert!(d.mic_wanted());
     }
 
     #[test]

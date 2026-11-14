@@ -1,6 +1,6 @@
 [package]
 name = "archy-setup"
-version = "0.6.4"
+version = "0.6.5"
 edition.workspace = true
 license.workspace = true
 description = "Archy installer"
@@ -14,7 +14,7 @@ archy-core.workspace = true
 bzip2-rs = "0.1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-windows.workspace = true
+windows = { workspace = true, features = ["Win32_Graphics_Dwm"] }
 
 [build-dependencies]
 winresource = "0.1.31"

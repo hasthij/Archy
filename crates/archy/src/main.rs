@@ -370,14 +370,17 @@ impl TrackVolumes {
 /// Other apps playing sound right now (Spotify, a browser...) that get their own
 /// track: not the game, Discord or Archy, and not ones the user unticked.
 fn extra_apps(s: &Settings, game_pid: u32) -> Vec<(u32, String)> {
-    let (with_game, with_discord, _) = s.audio_sources();
-    if !s.audio_per_app || s.audio_mode == "separate" || !(with_game || with_discord) {
+    if !s.audio_per_app || s.audio_capture == "game_only" {
         return Vec::new();
     }
     let me = std::process::id();
-    archy_audio::playing_apps()
+    let icons = archy_core::settings::app_dir().join("icons");
+    archy_audio::playing_apps(false)
         .into_iter()
         .map(|(pid, exe)| (pid, exe.trim_end_matches(".exe").trim_end_matches(".EXE").to_string()))
+        .inspect(|(pid, stem)| {
+            archy_audio::cache_icon(&icons, stem, *pid); // for the editor's sliders
+        })
         .filter(|(pid, stem)| {
             *pid != game_pid
                 && *pid != me
@@ -397,7 +400,7 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
         // single-track players (Discord, phones) play.
         // Game only (separate mode, game on, Discord and mic off): track 1 is just the
         // game's process, so WhatsApp, Spotify and notifications never get in.
-        let game_only = s.audio_mode == "separate" && with_game && !with_discord && !s.mic_wanted() && game_pid != 0;
+        let game_only = (s.audio_capture == "game_only" || (s.audio_mode == "separate" && with_game && !with_discord && !s.mic_wanted())) && game_pid != 0;
         let source = if game_only {
             Source::Process { pid: game_pid }
         } else if s.mic_wanted() {
@@ -844,7 +847,7 @@ impl App {
                 let Some(fg) = watch::foreground() else {
                     return;
                 };
-                if !fg.is_game(&self.settings.games, self.settings.record_fullscreen_apps, &self.settings.never_record) {
+                if !fg.is_game(&self.settings.games, &self.settings.never_record) {
                     return;
                 }
                 fg

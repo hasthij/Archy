@@ -137,15 +137,14 @@ pub fn foreground() -> Option<Foreground> {
 
 impl Foreground {
     /// `never`: apps the user excluded; they win over everything else.
-    pub fn is_game(&self, games: &[String], any_fullscreen: bool, never: &[String]) -> bool {
+    pub fn is_game(&self, games: &[String], never: &[String]) -> bool {
         if never.iter().any(|g| g.eq_ignore_ascii_case(&self.exe)) {
             return false;
         }
         if games.iter().any(|g| g.eq_ignore_ascii_case(&self.exe)) {
             return true;
         }
-        any_fullscreen
-            && self.fullscreen
+        self.fullscreen
             && !NOT_GAMES.iter().any(|n| n.eq_ignore_ascii_case(&self.exe))
     }
 }
@@ -241,7 +240,7 @@ pub fn game_name(exe: &str) -> String {
         "valorant-win64-shipping" => "Valorant".into(),
         "fortniteclient-win64-shipping" => "Fortnite".into(),
         "cs2" => "Counter-Strike 2".into(),
-        "javaw" => "Minecraft".into(),
+        "javaw" | "java" => "Minecraft".into(),
         _ => stem.to_string(),
     }
 }
@@ -254,10 +253,10 @@ mod tests {
     fn never_record_wins() {
         let fg = Foreground { hwnd: HWND::default(), exe: "Game.exe".into(), pid: 1, fullscreen: true, minimized: false };
         let games = vec!["game.exe".to_string()];
-        assert!(fg.is_game(&games, true, &[]));
-        assert!(!fg.is_game(&games, true, &["GAME.EXE".to_string()]));
-        assert!(fg.is_game(&[], true, &[]), "fullscreen apps count");
-        assert!(!fg.is_game(&[], true, &["game.exe".to_string()]));
+        assert!(fg.is_game(&games, &[]));
+        assert!(!fg.is_game(&games, &["GAME.EXE".to_string()]));
+        assert!(fg.is_game(&[], &[]), "fullscreen apps count");
+        assert!(!fg.is_game(&[], &["game.exe".to_string()]));
     }
 
     #[test]

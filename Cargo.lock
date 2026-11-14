@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "archy"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "archy-audio",
  "archy-core",
@@ -80,6 +80,7 @@ name = "archy-audio"
 version = "0.1.0"
 dependencies = [
  "nnnoiseless",
+ "png 0.17.16",
  "windows",
  "windows-core",
 ]
@@ -152,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "archy-setup"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "archy-core",
  "bzip2-rs",
@@ -164,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "archy-ui"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "archy-audio",
  "archy-core",

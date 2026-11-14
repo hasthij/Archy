@@ -9,6 +9,7 @@
 
 mod ffmpeg;
 mod voice;
+mod wizard;
 
 use std::path::{Path, PathBuf};
 
@@ -23,8 +24,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-    KEY_ALL_ACCESS, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegGetValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+    KEY_ALL_ACCESS, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
@@ -68,8 +69,36 @@ fn env_dir(var: &str) -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-fn install_dir() -> PathBuf {
+pub fn default_dir() -> PathBuf {
     env_dir("LOCALAPPDATA").join("Programs").join("Archy")
+}
+
+/// Where Archy is installed now (the registered folder), else the default.
+pub fn install_dir() -> PathBuf {
+    registered_dir().unwrap_or_else(default_dir)
+}
+
+/// The installed folder, only when Archy is registered AND its files are there
+/// (a stray folder doesn't count, so a fresh PC never gets an "Update" screen).
+pub fn registered_dir() -> Option<PathBuf> {
+    unsafe {
+        let mut buf = [0u16; 520];
+        let mut size = (buf.len() * 2) as u32;
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            UNINSTALL_KEY,
+            w!("InstallLocation"),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr() as *mut _),
+            Some(&mut size),
+        )
+        .ok()
+        .ok()?;
+        let n = (size as usize / 2).saturating_sub(1);
+        let p = PathBuf::from(String::from_utf16_lossy(&buf[..n]));
+        p.join("archy.exe").exists().then_some(p)
+    }
 }
 
 fn start_menu_link() -> PathBuf {
@@ -256,84 +285,144 @@ fn register(dir: &Path, uninstaller: &Path) {
     }
 }
 
-fn install() -> Result<(), String> {
-    let dir = install_dir();
-    let upgrading = dir.join("archy.exe").exists();
-    let question = if upgrading {
-        "Update Archy to the latest version?\n\nYour clips and settings are kept."
-    } else {
-        "Install Archy?\n\nArchy records the last moments of your games and saves them with a hotkey or your voice. Everything stays on this PC.\n\nIt installs just for you (no admin needed)."
-    };
-    if !ask(question) {
-        return Ok(());
+/// Something to tell the user on the last page, with an optional fix button.
+pub struct Note {
+    pub text: String,
+    pub fix: Option<fn()>,
+}
+
+pub struct Opts {
+    pub dir: PathBuf,
+    pub upgrading: bool,
+    pub desktop: bool,
+    pub startup: bool,
+}
+
+/// Appends to %TEMP%\archy-setup.log (what to ask for when an install fails).
+pub fn log(msg: &str) {
+    use std::io::Write;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::env::temp_dir().join("archy-setup.log"))
+    {
+        let _ = writeln!(f, "[{secs}] {msg}");
     }
+}
+
+/// A folder shipped next to Setup (the zip's Portable folder), if there is one.
+fn bundled(name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let d = exe.parent()?;
+    [d.join("Portable").join(name), d.join(name)].into_iter().find(|p| p.is_dir())
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let target = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir(&e.path(), &target)?;
+        } else {
+            std::fs::copy(e.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Does the whole install. `step(end, text)` is called as each step starts, with
+/// where the bar should be when it ends. Voice and FFmpeg come from the zip's
+/// folders when present, else they're downloaded; failing either isn't fatal.
+pub fn perform(o: &Opts, step: &dyn Fn(f32, &str)) -> Result<Vec<Note>, String> {
+    let dir = &o.dir;
+    let mut notes: Vec<Note> = Vec::new();
+    log(&format!("install to {} (upgrade={})", dir.display(), o.upgrading));
+    step(0.06, "Closing Archy…");
     stop_archy();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
-    put_files(&dir, &[("archy.exe", ARCHY), ("archy-ui.exe", ARCHY_UI)])?;
+    step(0.15, "Copying Archy…");
+    std::fs::create_dir_all(dir).map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
+    put_files(dir, &[("archy.exe", ARCHY), ("archy-ui.exe", ARCHY_UI)])?;
     // A copy of this installer does the uninstalling from Settings > Apps.
     let uninstaller = dir.join("uninstall.exe");
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     if me != uninstaller {
-        std::fs::copy(&me, &uninstaller)
-            .map_err(|e| format!("couldn't write uninstall.exe: {e}"))?;
+        std::fs::copy(&me, &uninstaller).map_err(|e| format!("couldn't write uninstall.exe: {e}"))?;
     }
 
-    // Voice clipping's engine and model are downloaded, not bundled (~24 MB).
-    // Without them everything else still works, so a failure isn't fatal.
-    let voice_problem = if voice::installed(&dir) { None } else { voice::install(&dir).err() };
-    // The clip editor's FFmpeg (~100 MB download), same deal.
-    let editor_problem = if ffmpeg::installed(&dir) { None } else { ffmpeg::install(&dir).err() };
+    step(0.30, "Setting up voice clipping…");
+    if !voice::installed(dir) {
+        if let Some(b) = bundled("voice") {
+            let _ = copy_dir(&b, &dir.join("voice"));
+        }
+    }
+    if !voice::installed(dir) {
+        if let Err(e) = voice::install(dir) {
+            log(&format!("voice: {e}"));
+            notes.push(Note {
+                text: format!("Voice clipping couldn't be set up: {e} Hotkeys work. Run Setup again to retry."),
+                fix: None,
+            });
+        }
+    }
+    step(0.88, "Setting up the clip editor…");
+    if !ffmpeg::installed(dir) {
+        if let Some(b) = bundled("ffmpeg") {
+            let _ = copy_dir(&b, &dir.join("ffmpeg"));
+        }
+    }
+    if !ffmpeg::installed(dir) {
+        if let Err(e) = ffmpeg::install(dir) {
+            log(&format!("ffmpeg: {e}"));
+            notes.push(Note {
+                text: format!("The clip editor couldn't be set up: {e} Recording works. Run Setup again to retry."),
+                fix: None,
+            });
+        }
+    }
 
+    step(0.94, "Adding shortcuts…");
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
     let ui = dir.join("archy-ui.exe");
     make_shortcut(&start_menu_link(), &ui, "Archy: game clips")
         .map_err(|e| format!("Start menu shortcut: {}", e.message()))?;
-    if !upgrading && ask("Add an Archy shortcut to your desktop?") {
+    if !o.upgrading && o.desktop {
         let _ = make_shortcut(&desktop_link(), &ui, "Archy: game clips");
     }
-    register(&dir, &uninstaller);
-
-    if !upgrading {
+    register(dir, &uninstaller);
+    if !o.upgrading {
         let mut settings = Settings::load().0;
-        settings.start_with_windows = ask("Start Archy automatically when you sign in to Windows?\n\nRecommended: then clips are always ready. You can change this later in Archy > General.");
+        settings.start_with_windows = o.startup;
         let _ = settings.save();
     }
 
-    if let Some(e) = &editor_problem {
-        tell(&format!("The clip editor couldn't be set up: {e}
-
-Recording and everything else work. Run Archy Setup again later to retry."), true);
-    }
     // Things Archy needs that only the user can change; Archy never changes them itself.
-    if let Some(e) = &voice_problem {
-        tell(&format!("Voice clipping couldn't be set up: {e}
-
-Hotkeys and everything else work. Run Archy Setup again later to retry."), true);
-    } else if !permissions::cpp_runtime_installed()
-        && ask("Voice clipping needs Microsoft's Visual C++ runtime, which isn't on this PC.
-
-Open Microsoft's download for it now? (Run it, then restart Archy.)")
-    {
-        permissions::open_cpp_runtime_download();
+    if !permissions::cpp_runtime_installed() {
+        notes.push(Note {
+            text: "Voice clipping needs Microsoft's Visual C++ runtime, which isn't on this PC.".into(),
+            fix: Some(permissions::open_cpp_runtime_download),
+        });
     }
-    if !permissions::microphone_allowed()
-        && ask("Windows is blocking microphone access for desktop apps, so Archy can't record your voice or hear voice commands.
-
-Open Settings > Privacy & security > Microphone to allow it?")
-    {
-        permissions::open_microphone_settings();
+    if !permissions::microphone_allowed() {
+        notes.push(Note {
+            text: "Windows blocks microphone access for desktop apps, so voice and mic recording won't work.".into(),
+            fix: Some(permissions::open_microphone_settings),
+        });
     }
-    if !permissions::webview2_installed()
-        && ask("Archy's settings window needs Microsoft Edge WebView2, which isn't on this PC.
-
-Open Microsoft's download for it now?")
-    {
-        permissions::open_webview2_download();
+    if !permissions::webview2_installed() {
+        notes.push(Note {
+            text: "Archy's window needs Microsoft Edge WebView2, which isn't on this PC.".into(),
+            fix: Some(permissions::open_webview2_download),
+        });
     }
 
-    // Start the recorder in the tray and make sure it stays up, then open the window.
+    step(0.99, "Starting Archy…");
     let started = std::process::Command::new(dir.join("archy.exe"))
         .spawn()
         .map_err(|e| e.to_string())
@@ -346,22 +435,18 @@ Open Microsoft's download for it now?")
             }
         });
     let _ = std::process::Command::new(&ui).spawn();
-    let key = Settings::load().0.hotkey_save;
-    match started {
-        Ok(()) => tell(
-            &format!("Archy is installed and running in your system tray (bottom-right, next to the clock).
-
-Open a game and press {key} to save the last seconds."),
-            false,
-        ),
-        Err(e) => tell(
-            &format!("Archy is installed, but the recorder didn't start: {e}.
-
-If antivirus blocked it, allow archy.exe in {}, then open Archy from the Start menu. Details are in %APPDATA%\\Archy\\archy.log.", dir.display()),
-            true,
-        ),
+    if let Err(e) = started {
+        log(&format!("start: {e}"));
+        notes.insert(
+            0,
+            Note {
+                text: format!("The recorder didn't start: {e}. If antivirus blocked archy.exe, allow it, then open Archy from the Start menu."),
+                fix: None,
+            },
+        );
     }
-    Ok(())
+    log("install ok");
+    Ok(notes)
 }
 
 fn uninstall() {
@@ -415,9 +500,11 @@ fn uninstall() {
 }
 
 fn main() {
-    if std::env::args().any(|a| a == "--uninstall") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--uninstall") {
         uninstall();
-    } else if let Err(e) = install() {
-        tell(&format!("Archy couldn't be installed:\n\n{e}"), true);
+    } else {
+        // --update: the in-app updater; the wizard starts installing at once.
+        wizard::run(args.iter().any(|a| a == "--update"));
     }
 }

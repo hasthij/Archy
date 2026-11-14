@@ -147,16 +147,24 @@ function closeEditor() {
 // ---------- audio ----------
 /// Export/preview volumes per track. Untouched sources: play the Everything track.
 /// Any source changed or muted: mix the sources instead (master scales them all).
+/// A real mixer: with any source strips, Master scales the sources together and the
+/// Everything track is not played. Everything alone only when it is the clip's only track.
 function mixEdited() {
-  return ed.ev < 0 || ed.info.tracks.some((_, i) => i !== ed.ev && (ed.sep[i] !== 100 || ed.mute[i]));
+  return ed.ev < 0 || ed.info.tracks.length > 1;
+}
+function sourcesTouched() {
+  return ed.info.tracks.some((_, i) => i !== ed.ev && (ed.sep[i] !== 100 || ed.mute[i]));
 }
 function volumes() {
-  // Everything stays on; a source moved off 100 is added or taken back out of it (negative = subtract).
+  // Untouched sources: play Everything alone. Any source moved or muted: Everything goes
+  // quiet and the sources are mixed instead (subtracting one from Everything never cancels:
+  // both are separately compressed).
+  const mixing = mixEdited();
   return ed.info.tracks.map((_, i) => {
     if (ed.mmute) return 0;
-    if (i === ed.ev) return ed.main;
+    if (i === ed.ev) return mixing ? 0 : ed.main;
     const want = ed.mute[i] ? 0 : ed.sep[i];
-    return ed.ev >= 0 ? Math.round((want - 100) * ed.main / 100) : Math.round(want * ed.main / 100);
+    return mixing ? Math.round(want * ed.main / 100) : 0;
   });
 }
 
@@ -697,7 +705,13 @@ function stripIcon(name) {
   const box = el("span", { class: "mx-icon", "aria-hidden": "true" });
   if (d) {
     box.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
-  } else box.textContent = (name.trim()[0] || "?").toUpperCase(); // unknown app: first letter
+  } else {
+    // An app's own icon if Archy saved one; else a generic app glyph.
+    box.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18"/></svg>`;
+    invoke("app_icon", { name }).then((u) => {
+      if (u) { box.replaceChildren(el("img", { src: u, alt: "" })); box.classList.add("img"); }
+    }).catch(() => {});
+  }
   return box;
 }
 
@@ -722,7 +736,7 @@ function renderAudio() {
       el("div", { class: "mx-fade" }, fader, meter), out, el("div", { class: "mx-btns" }, ...buttons));
   };
   const strips = [strip({
-    key: "master", name: "Master", value: ed.main, muted: ed.mmute, solo: false, about: "Volume of the whole clip",
+    key: "master", name: "Master", value: ed.main, muted: ed.mmute, solo: false, about: "Turns all the sources below up or down together",
     set: (v) => (ed.main = v), setMute: () => (ed.mmute = !ed.mmute),
   })];
   tracks.forEach((_, i) => {
@@ -742,9 +756,7 @@ function renderAudio() {
 }
 
 function hintText() {
-  return mixEdited()
-    ? "Each source is turned up or down inside the full mix."
-    : "Move or mute a source to change just that sound. Master is the whole clip.";
+  return "Each strip is one app or source. Master turns them all up or down together. Sounds with no strip of their own are left out.";
 }
 
 function updateMeters() {
@@ -1534,7 +1546,7 @@ function renderExport() {
 }
 
 function untouched() {
-  const sound = ed.main === 100 && !ed.mmute && !mixEdited() && (ed.ev >= 0 || ed.sep.every((v, i) => v === 100 && !ed.mute[i]));
+  const sound = ed.main === 100 && !ed.mmute && !sourcesTouched() && (ed.ev >= 0 || ed.sep.every((v, i) => v === 100 && !ed.mute[i]));
   return ed.format === "mp4" && ed.aspect === "original" && trivialSections() && ed.start < 0.05 && ed.end > ed.info.duration - 0.05 && !ed.items.length && sound;
 }
 
