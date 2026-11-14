@@ -5,6 +5,8 @@
 //! keeps only as many as its target frame rate, so a game running at 240 fps
 //! costs the same as one at 60.
 
+mod dup;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +42,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub enum Target {
     Window(HWND),
     Monitor(HMONITOR),
+    /// A monitor through DXGI Desktop Duplication (for exclusive fullscreen);
+    /// the bool draws the mouse cursor in.
+    Duplicate(HMONITOR, bool),
 }
 
 // Window and monitor handles are system-wide identifiers, usable from any thread.
@@ -88,7 +93,60 @@ pub fn monitor_of(hwnd: HWND) -> HMONITOR {
     unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) }
 }
 
+/// A running capture: Windows Graphics Capture (windows, monitors) or DXGI
+/// Desktop Duplication (monitor, used for exclusive fullscreen).
 pub struct Capture {
+    inner: Inner,
+    pub width: u32,
+    pub height: u32,
+}
+
+enum Inner {
+    Wgc(Wgc),
+    Dup(dup::Dup),
+}
+
+impl Capture {
+    /// `min_interval`: the compositor/duplication need not deliver faster than this.
+    pub fn start(device: &ID3D11Device, target: Target, min_interval: Duration) -> Result<Self> {
+        match target {
+            Target::Duplicate(mon, cursor) => {
+                let d = dup::Dup::start(device, mon, cursor, min_interval)?;
+                Ok(Self { width: d.width, height: d.height, inner: Inner::Dup(d) })
+            }
+            _ => {
+                let w = Wgc::start(device, target, min_interval)?;
+                Ok(Self { width: w.width, height: w.height, inner: Inner::Wgc(w) })
+            }
+        }
+    }
+
+    /// True once the captured window has closed (or the monitor was removed).
+    pub fn is_closed(&self) -> bool {
+        match &self.inner {
+            Inner::Wgc(c) => c.is_closed(),
+            Inner::Dup(c) => c.is_closed(),
+        }
+    }
+
+    /// Waits up to `timeout` for a new frame. `None` means nothing new in that time.
+    pub fn next(&self, timeout: Duration) -> Result<Option<Frame>> {
+        match &self.inner {
+            Inner::Wgc(c) => c.next(timeout),
+            Inner::Dup(c) => c.next(timeout),
+        }
+    }
+
+    /// Newest frame since the last call; `None` if nothing new.
+    pub fn latest(&self) -> Result<Option<Frame>> {
+        match &self.inner {
+            Inner::Wgc(c) => c.latest(),
+            Inner::Dup(c) => c.latest(),
+        }
+    }
+}
+
+struct Wgc {
     item: GraphicsCaptureItem,
     closed: Arc<AtomicBool>,
     closed_token: i64,
@@ -110,7 +168,7 @@ pub struct Capture {
 /// A captured frame. Holding it keeps its buffer out of the pool; drop it right
 /// after the GPU work that reads `texture` has been queued.
 pub struct Frame {
-    _frame: Direct3D11CaptureFrame,
+    _frame: Option<Direct3D11CaptureFrame>,
     pub texture: ID3D11Texture2D,
     /// When the compositor produced the frame, in 100 ns QPC units. Using this
     /// (not the time we picked it up) keeps clip motion exactly as it was shown.
@@ -120,15 +178,15 @@ pub struct Frame {
     pub content_height: u32,
 }
 
-impl Capture {
+impl Wgc {
     /// `min_interval`: ask the compositor for at most one frame per interval
     /// (Windows 11 24H2+; ignored on older builds, where the recorder paces itself).
-    pub fn start(device: &ID3D11Device, target: Target, min_interval: Duration) -> Result<Self> {
+    fn start(device: &ID3D11Device, target: Target, min_interval: Duration) -> Result<Self> {
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let item: GraphicsCaptureItem = unsafe {
             match target {
                 Target::Window(hwnd) => interop.CreateForWindow(hwnd)?,
-                Target::Monitor(mon) => interop.CreateForMonitor(mon)?,
+                Target::Monitor(mon) | Target::Duplicate(mon, _) => interop.CreateForMonitor(mon)?,
             }
         };
         let size = item.Size()?;
@@ -192,14 +250,13 @@ impl Capture {
         })
     }
 
-    /// True once the captured window has closed (or the monitor was removed).
-    pub fn is_closed(&self) -> bool {
+    fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
 
     /// Waits up to `timeout` for the compositor to deliver a frame, then returns
     /// the newest one. `None` means the window showed nothing new in that time.
-    pub fn next(&self, timeout: Duration) -> Result<Option<Frame>> {
+    fn next(&self, timeout: Duration) -> Result<Option<Frame>> {
         let woke = match self.timer {
             Some(timer) => unsafe {
                 // Negative = relative, in 100 ns units.
@@ -219,7 +276,7 @@ impl Capture {
     }
 
     /// Newest frame since the last call, discarding any older ones; `None` if nothing new.
-    pub fn latest(&self) -> Result<Option<Frame>> {
+    fn latest(&self) -> Result<Option<Frame>> {
         let mut newest = None;
         // TryGetNextFrame reports "no frame" as an error-shaped null.
         while let Ok(frame) = self.pool.TryGetNextFrame() {
@@ -249,7 +306,7 @@ impl Capture {
         let mut desc = Default::default();
         unsafe { texture.GetDesc(&mut desc) };
         Ok(Some(Frame {
-            _frame: frame,
+            _frame: Some(frame),
             texture,
             time,
             content_width: (content.Width.max(1) as u32).min(desc.Width),
@@ -258,7 +315,7 @@ impl Capture {
     }
 }
 
-impl Drop for Capture {
+impl Drop for Wgc {
     fn drop(&mut self) {
         let _ = self.pool.RemoveFrameArrived(self.token);
         let _ = self.item.RemoveClosed(self.closed_token);

@@ -59,6 +59,11 @@ pub struct Settings {
     /// Screen to record in "screen" mode (Windows' name, e.g. `\\.\DISPLAY2`);
     /// empty = the screen the game is on.
     pub capture_monitor: String,
+    /// How the game is captured: "auto" (Desktop Duplication for exclusive fullscreen,
+    /// Windows capture otherwise) | "duplication" (always) | "windows" (always).
+    pub capture_method: String,
+    /// Draw the mouse cursor into Desktop Duplication recordings.
+    pub capture_cursor: bool,
     /// GPU that records ("vvvv:dddd"); empty = automatic.
     pub encoder_gpu: String,
     /// Ask GitHub for a newer Archy when it starts (the only time it goes online).
@@ -103,6 +108,9 @@ pub struct Settings {
     /// "smooth": frames keep the moment they were shown (smoothest playback);
     /// "constant": exactly 1/fps apart (for After Effects / Premiere).
     pub frame_timing: String,
+    /// GPU priority of the recorder relative to the game (0 = same as the game,
+    /// negative = yields to it, positive = above it). -7..=7.
+    pub gpu_priority: i32,
     /// Keep the clips folder under this many GB by moving the oldest clips to the
     /// Recycle Bin after each save (0 = no limit).
     pub clips_max_gb: u32,
@@ -255,6 +263,8 @@ impl Default for Settings {
             record_target: String::new(),
             capture: "window".into(),
             capture_monitor: String::new(),
+            capture_method: "auto".into(),
+            capture_cursor: true,
             encoder_gpu: String::new(),
             check_updates: true,
             skipped_version: String::new(),
@@ -271,6 +281,7 @@ impl Default for Settings {
             audio_capture: "dynamic".into(),
             record_stems: true,
             frame_timing: "smooth".into(),
+            gpu_priority: 0,
             clips_max_gb: 0,
             volume_everything: 100,
             volume_game: 100,
@@ -461,6 +472,9 @@ impl Settings {
         }
         if self.audio_mode != "separate" {
             self.audio_mode = "main".into();
+        }
+        if !["auto", "duplication", "windows"].contains(&self.capture_method.as_str()) {
+            self.capture_method = "auto".into();
         }
         if !["dark", "light", "system"].contains(&self.theme.as_str()) {
             self.theme = "dark".into();

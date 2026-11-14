@@ -119,6 +119,7 @@ fn main() {
         audio_kbps: 160,
         avoid: Vec::new(),
         constant_rate: true,
+        gpu_priority: 0,
     })
     .expect("start");
     pump(Duration::from_secs(3));

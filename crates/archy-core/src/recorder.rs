@@ -60,6 +60,8 @@ pub struct RecorderConfig {
     /// 60 fps clip from a 144 Hz screen judders: frames shown 14 and 21 ms apart
     /// get stamped 16.7 ms apart.
     pub constant_rate: bool,
+    /// GPU thread priority of the recorder (0 = the game's own; see `Settings::gpu_priority`).
+    pub gpu_priority: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +130,8 @@ struct Shared {
     last_input: AtomicI64,
     /// Repeats written as near-free skip frames (oneVPL).
     skip_frames: AtomicU64,
+    /// Real new frames from the capture (repeats not counted).
+    fresh: AtomicU64,
     /// A screenshot waiting for the capture loop (see `Recorder::screenshot`).
     screenshot: Mutex<Option<crate::screenshot::Request>>,
     /// The whole-session writer, while a session records (see `start_session`).
@@ -179,6 +183,7 @@ impl Recorder {
             last_output: AtomicI64::new(0),
             last_input: AtomicI64::new(0),
             skip_frames: AtomicU64::new(0),
+            fresh: AtomicU64::new(0),
             screenshot: Mutex::new(None),
             session: Arc::new(Mutex::new(None)),
         });
@@ -397,6 +402,11 @@ impl Recorder {
     }
 
     /// (frames recorded, frames dropped because the encoder was busy).
+    /// Real new frames the capture has delivered (a stuck capture stays near 0).
+    pub fn fresh_frames(&self) -> u64 {
+        self.shared.fresh.load(Ordering::Relaxed)
+    }
+
     pub fn frame_counts(&self) -> (u64, u64) {
         (
             self.shared.frames.load(Ordering::Relaxed),
@@ -677,7 +687,7 @@ fn capture_loop(
         };
         index += 1;
         let attempt = (|| -> Result<_> {
-            let gpu = Gpu::new(adapter, RECORDER_GPU_PRIORITY)?;
+            let gpu = Gpu::new(adapter, cfg.gpu_priority.clamp(-7, 7))?;
             // At most one frame per 9/10 interval: a game up to 1.1x the clip's rate
             // loses none, and the compositor copies fewer frames nobody uses (3/4
             // let through up to 1.33x, extra GPU work on a shared iGPU).
@@ -902,6 +912,9 @@ fn capture_loop(
                 if frame.is_some() { "a frame" } else { "nothing" },
                 frame.as_ref().map_or(0, |f| (clock_now() - f.time) / 10_000)
             );
+        }
+        if frame.is_some() {
+            shared.fresh.fetch_add(1, Ordering::Relaxed);
         }
         let Some(frame) = frame else {
             // Started with only a stale frame and nothing fresh came: use it now.

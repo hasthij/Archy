@@ -92,6 +92,8 @@ Each setting in Archy explains what it's best for. The main ones:
 - **Quality:** Discord (10 MB), 360p up to 1440p. **720p** is the recommended balance.
 - **Frame rate:** 24 to 144 fps. **60** is recommended; lower is less work for weak PCs. 120 and 144 need a monitor that fast; if your graphics chip can't record that fast, Archy uses 60.
 - **Capture:** *Window* (only the game, popups never appear) or *Screen* (whole monitor, for games that can't be captured as a window; pick which screen, like a screenshare).
+- **Capture method** (top bar): *Auto* uses Desktop Duplication for exclusive-fullscreen games (Minecraft and the like) and Windows capture for everything else. You can force either. If the cursor is missing in a clip, or a game's clip freezes, switch method; Archy also suggests it.
+- **Recorder GPU priority:** how much graphics-chip time the encoder gets next to your game. **Equal** is the default; raise it if clips look choppy on integrated graphics.
 - **Audio tracks:** turn each track on or off, pick the speakers or headphones to record from, and set the audio bitrate.
 - **Efficiency mode:** keeps Archy on efficiency cores at low priority, so your game keeps the fast cores. On by default.
 - **Notifications and sounds:** a chime when a clip saves, a blip when a voice phrase is heard, and notifications for each.

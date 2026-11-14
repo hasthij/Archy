@@ -238,6 +238,7 @@ pub fn run(opts: &Options) -> Result<Report, String> {
         audio_kbps: 160,
         avoid: Vec::new(),
         constant_rate: true,
+        gpu_priority: 0,
     };
     let cpu0 = process_cpu();
     let wall0 = Instant::now();

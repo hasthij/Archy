@@ -10,3 +10,7 @@
 
 # big local-only promo models
 promo/audio/models/
+
+# Build/dev scripts: local only
+/scripts
+assets/make_*.py

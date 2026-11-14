@@ -135,6 +135,9 @@ struct App {
     failed_window: Option<isize>,
     /// The exclusive-fullscreen game we already warned about (once per game window).
     warned_exclusive: Option<isize>,
+    /// (fresh frames at the last tick, ticks in a row with almost none).
+    stall: (u64, u32),
+    warned_stall: Option<isize>,
     volumes: TrackVolumes,
     /// When the voice helper was last (re)started, to space out restarts.
     voice_started: Option<std::time::Instant>,
@@ -484,6 +487,7 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
         audio_kbps,
         avoid: avoid.to_vec(),
         constant_rate: s.frame_timing == "constant",
+        gpu_priority: s.gpu_priority,
     }
 }
 
@@ -722,6 +726,32 @@ impl App {
         strikes >= 3
     }
 
+    /// Suggests the other capture method when the picture has barely moved for ~10 s
+    /// (a frozen capture). Once per game, and only while the user left it on Auto.
+    fn check_stalled(&mut self) {
+        let Some(s) = &self.session else { return };
+        let fresh = s.recorder.fresh_frames();
+        let (last, strikes) = self.stall;
+        let quiet = fresh.saturating_sub(last) < 3;
+        self.stall = (fresh, if quiet { strikes + 1 } else { 0 });
+        if self.stall.1 < 5 || self.settings.capture_method != "auto" {
+            return;
+        }
+        self.stall.1 = 0;
+        let id = s.hwnd.0 as isize;
+        if self.warned_stall == Some(id) {
+            return;
+        }
+        self.warned_stall = Some(id);
+        let other = if s.window_target { "Desktop Duplication" } else { "Windows capture" };
+        notify(
+            self.window.0 as isize,
+            "Clips look frozen?",
+            &format!("This game isn't sending a moving picture. If your clips look stuck, open Archy and switch the capture method (top bar) to {other}."),
+            true,
+        );
+    }
+
     fn watch(&mut self) {
         self.pick_up_settings();
         self.presence.set(if !self.settings.discord_status { presence::Want::Off }
@@ -745,6 +775,7 @@ impl App {
             .filter(|t| !t.is_empty())
             .and_then(|t| watch::find(t));
         let behind = self.falling_behind();
+        self.check_stalled();
         self.ticks = self.ticks.wrapping_add(1);
         let check_discord = self.ticks % 5 == 0 && self.settings.audio_sources().1;
         let check_apps = self.ticks % 15 == 0; // every ~30 s
@@ -873,10 +904,10 @@ impl App {
     fn start(&mut self, fg: watch::Foreground) {
         // On Windows 11 24H2+, screen capture makes the mouse cursor vanish in games
         // running in exclusive fullscreen (an OS bug that also hits OBS). Say so once.
-        if fg.fullscreen
-            && self.warned_exclusive != Some(fg.hwnd.0 as isize)
-            && unsafe { SHQueryUserNotificationState() } == Ok(QUNS_RUNNING_D3D_FULL_SCREEN)
-        {
+        let exclusive = fg.fullscreen && unsafe { SHQueryUserNotificationState() } == Ok(QUNS_RUNNING_D3D_FULL_SCREEN);
+        let method = self.settings.capture_method.as_str();
+        let duplicate = method == "duplication" || (method == "auto" && exclusive);
+        if exclusive && !duplicate && self.warned_exclusive != Some(fg.hwnd.0 as isize) {
             self.warned_exclusive = Some(fg.hwnd.0 as isize);
             notify(
                 self.window.0 as isize,
@@ -893,12 +924,18 @@ impl App {
             self.encoder_strikes.clear();
             self.avoid_since = None;
         }
-        let target = if self.settings.capture.eq_ignore_ascii_case("screen") {
-            // The screen picked in settings, else (or if it was unplugged) the game's.
-            let chosen = archy_core::monitors::find(&self.settings.capture_monitor);
-            Target::Monitor(chosen.unwrap_or_else(|| unsafe {
-                MonitorFromWindow(fg.hwnd, MONITOR_DEFAULTTONEAREST)
-            }))
+        let screen_mode = self.settings.capture.eq_ignore_ascii_case("screen");
+        // The screen picked in settings, else (or if it was unplugged) the game's.
+        let chosen = || {
+            archy_core::monitors::find(&self.settings.capture_monitor)
+                .unwrap_or_else(|| unsafe { MonitorFromWindow(fg.hwnd, MONITOR_DEFAULTTONEAREST) })
+        };
+        let window_wgc = Target::Window(fg.hwnd);
+        let target = if duplicate {
+            let m = if screen_mode { chosen() } else { unsafe { MonitorFromWindow(fg.hwnd, MONITOR_DEFAULTTONEAREST) } };
+            Target::Duplicate(m, self.settings.capture_cursor)
+        } else if screen_mode {
+            Target::Monitor(chosen())
         } else {
             Target::Window(fg.hwnd)
         };
@@ -934,7 +971,11 @@ impl App {
         if tall {
             attempts.push((config(&at60, target, Some(1080)), "1080p at 60 fps".into()));
         }
-        if let Target::Window(_) = target {
+        if let Target::Duplicate(..) = target {
+            // Duplication can fail (other GPU, HDR desktop): fall back to Windows capture.
+            attempts.push((config(&base, window_wgc, None), format!("Windows capture at {} fps", base.fps)));
+        }
+        if matches!(target, Target::Window(_) | Target::Duplicate(..)) {
             attempts.push((config(&base, screen, None), format!("its screen at {} fps", base.fps)));
             if base.fps > 60 {
                 attempts.push((config(&at60, screen, None), "its screen at 60 fps".into()));
@@ -1022,6 +1063,7 @@ impl App {
                     );
                 }
                 self.keep_up = (0, 0, 0);
+                self.stall = (0, 0);
                 self.minimized_ticks = 0;
                 // Keep apps tried for the same game (a restart), forget them for a new one.
                 if self.previous.as_ref().map_or(true, |p| p.game != s.game) {
@@ -1627,10 +1669,13 @@ fn recording_changed(a: &Settings, b: &Settings) -> bool {
         || a.codec != b.codec
         || a.capture != b.capture
         || a.capture_monitor != b.capture_monitor
+        || a.capture_method != b.capture_method
+        || a.capture_cursor != b.capture_cursor
         || a.encoder_gpu != b.encoder_gpu
         || a.buffer_seconds() != b.buffer_seconds()
         // So excluding the app being recorded stops it right away.
         || a.frame_timing != b.frame_timing
+        || a.gpu_priority != b.gpu_priority
         || a.never_record != b.never_record
         || a.record_target != b.record_target
 }
@@ -1961,6 +2006,8 @@ fn main() {
         dot_shown: false,
         failed_window: None,
         warned_exclusive: None,
+        stall: (0, 0),
+        warned_stall: None,
         volumes: TrackVolumes::default(),
         voice_started: None,
         queued: Arc::new(std::sync::atomic::AtomicU32::new(0)),

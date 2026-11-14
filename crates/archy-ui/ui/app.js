@@ -80,6 +80,7 @@ async function refreshStatus() {
   box.className = "status";
   box.replaceChildren();
   $("#game-btn").textContent = gameLabel();
+  $("#capture-btn").textContent = captureLabel();
   const keys = $("#keys");
   if (settings) {
     const phrase = settings.voice_enabled && settings.voice_phrases[0] ? [el("span", { class: "sep", text: "·" }), `or say "${settings.voice_phrases[0].text}"`] : [];
@@ -171,8 +172,45 @@ async function openGameMenu() {
   menu.replaceChildren(el("div", { class: "game-menu-head", text: "Whole screen" }), ...screens, el("div", { class: "game-menu-head", text: "Or record one game" }), find, list);
 }
 $("#game-btn").addEventListener("click", openGameMenu);
-document.addEventListener("click", (e) => { if (!e.target.closest(".pick-game")) closeGameMenu(); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#game-menu").hidden) closeGameMenu(); });
+// ---------- capture method ----------
+const CAPTURE_METHODS = [
+  ["auto", "Auto (recommended)", "Desktop Duplication for exclusive-fullscreen games (keeps the mouse cursor, works with Minecraft), Windows capture for everything else."],
+  ["duplication", "Desktop Duplication", "Records the screen the game is on. Best for exclusive fullscreen and games that show a frozen or black picture with Windows capture. The cursor is drawn in."],
+  ["windows", "Windows capture only", "Records just the game's window. Best for windowed and borderless games. In exclusive fullscreen the cursor can vanish on Windows 11 24H2+."],
+];
+const captureLabel = () => `Capture: ${({ auto: "Auto", duplication: "Duplication", windows: "Windows" })[settings?.capture_method] || "Auto"}`;
+function closeCaptureMenu() {
+  $("#capture-menu").hidden = true;
+  $("#capture-btn").setAttribute("aria-expanded", "false");
+}
+function openCaptureMenu() {
+  const menu = $("#capture-menu");
+  if (!menu.hidden) { closeCaptureMenu(); return; }
+  const cur = settings.capture_method || "auto";
+  menu.replaceChildren(el("div", { class: "game-menu-head", text: "How the game is captured" }),
+    ...CAPTURE_METHODS.map(([id, name, desc]) => el("button", {
+      class: "game-item", role: "menuitemradio", "aria-checked": String(cur === id),
+      onclick: () => { closeCaptureMenu(); save({ capture_method: id }, `Capture: ${name}`); },
+    }, el("b", { text: name }), el("span", { text: desc }))),
+    el("label", { class: "game-item", style: "flex-direction:row;gap:8px;align-items:center;cursor:pointer" },
+      el("input", { type: "checkbox", checked: settings.capture_cursor !== false,
+        onchange: (e) => save({ capture_cursor: e.target.checked }, e.target.checked ? "Cursor is drawn in Duplication clips" : "Cursor hidden in Duplication clips") }),
+      el("span", { text: "Show mouse cursor (Desktop Duplication)" })));
+  menu.hidden = false;
+  $("#capture-btn").setAttribute("aria-expanded", "true");
+  $("#capture-btn").textContent = captureLabel();
+}
+$("#capture-btn").addEventListener("click", openCaptureMenu);
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".pick-game")) { closeGameMenu(); closeCaptureMenu(); }
+  else if (!e.target.closest("#capture-btn, #capture-menu")) closeCaptureMenu();
+  else if (!e.target.closest("#game-btn, #game-menu")) closeGameMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!$("#game-menu").hidden) closeGameMenu();
+  if (!$("#capture-menu").hidden) closeCaptureMenu();
+});
 
 // ---------- clips ----------
 const MB = (b) => (b / 1e6).toFixed(b < 10e6 ? 1 : 0) + " MB";
@@ -624,6 +662,17 @@ const RECORDING_TIMING = {
   ],
 };
 
+const RECORDING_GPU_PRIORITY = {
+  key: "gpu_priority", name: "Recorder GPU priority", rec: 0,
+  what: "How much graphics-chip time Archy's encoder gets compared with your game. Matters most on integrated graphics, where both share one chip. If your clips look choppy or laggy while the game itself runs fine, raise it.",
+  options: [
+    { value: -4, label: "Yield to game", best: "Zero risk to game FPS, but on integrated graphics the encoder can fall behind and clips lose frames." },
+    { value: 0, label: "Equal to game", best: "Most people. Same priority as the game: smooth clips, and game FPS stayed the same in testing. The default." },
+    { value: 1, label: "Above game", best: "Clips still choppy at Equal. Can take a little FPS from the game; may need Archy run as administrator to take effect." },
+    { value: 2, label: "Highest", best: "Last resort for choppy clips. Most likely to cost game FPS; may need administrator." },
+  ],
+};
+
 const RECORDING_SESSION = () => ({
   key: "session_mode", name: "Record whole sessions", rec: "hotkey",
   what: `Also writes everything you play to one long video in your clips folder, besides the replay buffer. No extra encoding (it's the same video), so no FPS cost; it uses disk space: about ${(bufferMB(3600) / 1000).toFixed(1)} GB per hour at your quality. While it records, your clip key also adds a bookmark you can jump to in the editor.`,
@@ -713,7 +762,7 @@ function compressCard() {
 }
 
 function renderRecording() {
-  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), gpuPicker(), settingCard(RECORDING_TIMING), settingCard(RECORDING_LIMIT), compressCard());
+  $("#recording-settings").replaceChildren(...RECORDING().map(settingCard), selfTestCard(), gpuPicker(), settingCard(RECORDING_GPU_PRIORITY), settingCard(RECORDING_TIMING), settingCard(RECORDING_LIMIT), compressCard());
   loadGpus();
 }
 
