@@ -162,6 +162,8 @@ struct App {
     /// A game that kept failing, and when to try it again.
     blocked: Option<(String, std::time::Instant)>,
     apps_tried: Vec<String>,
+    /// Last time a session was re-hooked to its game after capture dropped (alt-tab).
+    rehooked: Option<std::time::Instant>,
     ticks: u32,
     hdr_warned: bool,
     /// "hotkey" session mode: the user has turned session recording on.
@@ -846,6 +848,26 @@ impl App {
                     fullscreen: watch::covers_monitor(s.hwnd),
                     minimized: unsafe { IsIconic(s.hwnd) }.as_bool(),
                 });
+            }
+            // Capture dropped (alt-tab, focus loss) but the game is still open: hang on to
+            // it. If its window was recreated, follow the same program's new window.
+            // At most once per 10 s so a capture that can never work doesn't spin.
+            if ended && !switch && s.window_target && self.rehooked.is_none_or(|t| t.elapsed().as_secs() >= 10) {
+                let target = if window_gone { watch::find(&s.exe) } else if !failed || s.recorder.status() == RecorderStatus::TargetClosed {
+                    Some(watch::Foreground {
+                        hwnd: s.hwnd,
+                        exe: s.exe.clone(),
+                        pid: watch::pid_of(s.hwnd),
+                        fullscreen: watch::covers_monitor(s.hwnd),
+                        minimized: unsafe { IsIconic(s.hwnd) }.as_bool(),
+                    })
+                } else {
+                    None
+                };
+                if let Some(t) = target {
+                    self.rehooked = Some(std::time::Instant::now());
+                    resume = Some(t);
+                }
             }
             let (exe, game, key) = (s.exe.clone(), s.game.clone(), s.recorder.info.encoder_key.clone());
             if failed {
@@ -2027,6 +2049,7 @@ fn main() {
         failures: Vec::new(),
         blocked: None,
         apps_tried: Vec::new(),
+        rehooked: None,
         ticks: 0,
         hdr_warned: false,
         session_wanted: false,
