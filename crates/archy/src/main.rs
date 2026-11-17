@@ -1740,7 +1740,15 @@ fn with_app(f: impl FnOnce(&mut App)) {
     });
 }
 
+/// A panic must not cross this `extern "system"` boundary: Rust aborts the whole
+/// process there ("non-unwinding panic", exit 0xc0000409), killing the tray and any
+/// recording. It's caught, logged by the panic hook, and the message is skipped.
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wndproc_inner(hwnd, msg, wp, lp)))
+        .unwrap_or_else(|_| unsafe { DefWindowProcW(hwnd, msg, wp, lp) })
+}
+
+fn wndproc_inner(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_TIMER if wp.0 == TIMER_WATCH => {
             if !TRAY_SHOWN.load(Ordering::Relaxed) {
@@ -1927,6 +1935,14 @@ fn self_test_main(args: &[String]) {
 }
 
 fn main() {
+    // Every panic (any thread) is written to archy.log with where it happened.
+    std::panic::set_hook(Box::new(|info| {
+        let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        log(&format!("PANIC at {at}: {msg}"));
+    }));
     // The voice helper process (see voice.rs) shares this exe.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--voice-calibrate") {
