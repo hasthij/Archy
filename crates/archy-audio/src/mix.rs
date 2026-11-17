@@ -52,11 +52,17 @@ impl Timeline {
     }
 
     fn push(&mut self, time: i64, pcm: &[i16]) {
+        let mut pcm = pcm;
         if let Some(end) = self.end() {
             let gap = time - end;
             if gap > GAP {
                 let fill = hns_to_frames(gap.min(20_000_000)) as usize * CHANNELS as usize;
                 self.buf.extend(std::iter::repeat_n(0, fill));
+            } else if gap < -GAP {
+                // A device clock running fast delivers more samples than real time;
+                // left alone the surplus queues up and that source drifts ever later.
+                let skip = (hns_to_frames(-gap) as usize * CHANNELS as usize).min(pcm.len());
+                pcm = &pcm[skip..];
             }
         } else {
             self.start = Some(time);
@@ -223,4 +229,20 @@ pub fn run(
         let _ = mic_client.Stop();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fast_device_clock_is_trimmed() {
+        let mut t = Timeline::default();
+        let block = vec![1i16; BLOCK * CHANNELS as usize];
+        t.push(0, &block);
+        // Claims to start 0.5 s before where the last block ended: the overlap is dropped.
+        let end = t.end().unwrap();
+        t.push(end - 5_000_000, &block);
+        assert!(t.end().unwrap() - end < frames_to_hns(BLOCK as i64));
+    }
 }

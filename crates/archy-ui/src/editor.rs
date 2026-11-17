@@ -218,7 +218,11 @@ pub fn preview_tracks(path: &Path, count: usize) -> Result<Vec<String>, String> 
     let mut outs = Vec::new();
     for i in 0..count {
         let out = dir.join(format!("track{i}.m4a"));
-        cmd.args(["-map", &format!("0:a:{i}"), "-c", "copy", "-vn"]).arg(&out);
+        // Not a stream copy: a track that starts late (Discord joined mid-clip, an idle
+        // source) keeps its start offset only in the MP4 header, and the browser's
+        // decoder ignores that, which played the track early (the "audio delay").
+        // first_pts=0 pads that offset as real silence so every preview starts at 0.
+        cmd.args(["-map", &format!("0:a:{i}"), "-af", "aresample=async=1:first_pts=0", "-c:a", "aac", "-b:a", "192k", "-vn"]).arg(&out);
         outs.push(out.to_string_lossy().into_owned());
     }
     let r = cmd.output().map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
@@ -264,8 +268,8 @@ pub fn thumbnail(clip: &Path) -> Result<PathBuf, String> {
 
 /// Safety bound for a video or GIF; the window limits it to the length of the clip being edited.
 pub const MAX_MEDIA_SECONDS: f64 = 600.0;
-/// Longest sound (music, an effect) that can be put on a clip (clips are at most 60 s).
-pub const MAX_AUDIO_SECONDS: f64 = 60.0;
+/// Longest sound (music, an effect) that can be put on a clip.
+pub const MAX_AUDIO_SECONDS: f64 = 600.0;
 
 /// Where imported media (and its preview copies) is kept.
 pub fn media_dir() -> PathBuf {
@@ -282,7 +286,7 @@ pub struct StagedMedia {
     pub width: u32,
     pub height: u32,
     pub has_audio: bool,
-    /// The most that can be used (20 s for video/GIF, 60 s for sound).
+    /// The most that can be used (10 minutes for any added video, GIF or sound).
     pub limit: f64,
 }
 

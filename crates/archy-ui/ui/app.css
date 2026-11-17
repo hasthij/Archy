@@ -343,6 +343,8 @@ select.input option { background: var(--surface); color: var(--text); }
 .ed-item.video { background: #2A2350; color: #D6CCFF; }
 .ed-item.video.loops { background: repeating-linear-gradient(90deg, #2A2350 0 18px, #352C66 18px 36px); }
 .ed-item.on { border-color: #fff; }
+.ed-item-x { position: absolute; right: 2px; top: 2px; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: rgba(0,0,0,.55); color: #fff; font-size: 14px; line-height: 18px; cursor: pointer; }
+.ed-item-x:hover { background: #C0392B; }
 .ed-item.stuck { border-left: 3px solid var(--accent, #4D8DFF); border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .ed-item::before, .ed-item::after { content: ""; position: absolute; top: 0; bottom: 0; width: 10px; cursor: ew-resize; background: rgba(255,255,255,.22); opacity: 0; transition: opacity .12s; }
 .ed-item::before { left: 0; border-radius: 5px 0 0 5px; }

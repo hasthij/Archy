@@ -212,7 +212,7 @@ fn exe_name(hwnd: HWND) -> Option<String> {
     archy_core::process::exe_name(pid)
 }
 
-fn covers_monitor(hwnd: HWND) -> bool {
+pub fn covers_monitor(hwnd: HWND) -> bool {
     let mut win = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut win) }.is_err() {
         return false;

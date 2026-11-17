@@ -161,9 +161,6 @@ struct App {
     failures: Vec<(String, std::time::Instant)>,
     /// A game that kept failing, and when to try it again.
     blocked: Option<(String, std::time::Instant)>,
-    /// Watch ticks the recorded window has been minimized.
-    minimized_ticks: u32,
-    /// Apps already tried as a live-added track this recording (so each restarts it once).
     apps_tried: Vec<String>,
     ticks: u32,
     hdr_warned: bool,
@@ -730,6 +727,11 @@ impl App {
     /// (a frozen capture). Once per game, and only while the user left it on Auto.
     fn check_stalled(&mut self) {
         let Some(s) = &self.session else { return };
+        // Alt-tabbed away (window minimized): no new frames is expected, not a fault.
+        if s.window_target && unsafe { IsIconic(s.hwnd) }.as_bool() {
+            self.stall.1 = 0;
+            return;
+        }
         let fresh = s.recorder.fresh_frames();
         let (last, strikes) = self.stall;
         let quiet = fresh.saturating_sub(last) < 3;
@@ -756,7 +758,7 @@ impl App {
         self.pick_up_settings();
         self.presence.set(if !self.settings.discord_status { presence::Want::Off }
             else if let Some(s) = &self.session { presence::Want::Game(s.game.clone()) }
-            else { presence::Want::Idle });
+            else { presence::Want::Off });
         self.revive_voice();
         self.expire_previous();
         // A recording being started on the worker thread: take its result, or wait.
@@ -778,7 +780,10 @@ impl App {
         self.check_stalled();
         self.ticks = self.ticks.wrapping_add(1);
         let check_discord = self.ticks % 5 == 0 && self.settings.audio_sources().1;
-        let check_apps = self.ticks % 15 == 0; // every ~30 s
+        let check_apps = self.ticks % 2 == 0; // every ~4 s so Spotify etc. get a track fast
+        // After a restart that only adds a track (or lowers fps) the same game window
+        // is recorded again even if the user alt-tabbed away: Archy hangs on to the game.
+        let mut resume: Option<watch::Foreground> = None;
         if let Some(s) = &self.session {
             let window_gone = !watch::alive(s.hwnd);
             let ended = window_gone || s.recorder.status() != RecorderStatus::Recording;
@@ -788,12 +793,6 @@ impl App {
                 && !target.is_empty()
                 && !s.exe.eq_ignore_ascii_case(target)
                 && picked.as_ref().is_some_and(|w| !w.minimized);
-            // A minimized game gives no new frames: encoding the same frozen
-            // picture for hours is pure waste. Stop (the buffer is kept) and start
-            // again when it's back.
-            let minimized = !ended && s.window_target && unsafe { IsIconic(s.hwnd) }.as_bool();
-            self.minimized_ticks = if minimized { self.minimized_ticks + 1 } else { 0 };
-            let minimized = self.minimized_ticks >= 2;
             // Discord opened after recording started: restart once to add its track.
             let discord = !ended
                 && check_discord
@@ -811,7 +810,7 @@ impl App {
             }
             let app_added = new_app.is_some();
             let slow = !ended && !switch && behind;
-            if !ended && !switch && !slow && !minimized && !discord && !app_added {
+            if !ended && !switch && !slow && !discord && !app_added {
                 return; // keep recording even while alt-tabbed
             }
             if slow {
@@ -831,8 +830,6 @@ impl App {
                 format!("switching to the picked game ({target})")
             } else if window_gone {
                 "the game window closed".to_string()
-            } else if minimized {
-                "the game was minimized (recording resumes when it's back)".to_string()
             } else if discord {
                 "Discord started; adding its track".to_string()
             } else if let Some(n) = &new_app {
@@ -841,6 +838,15 @@ impl App {
             } else {
                 s.recorder.stop_reason()
             };
+            if (slow || discord || app_added) && !failed && !ended && !switch {
+                resume = Some(watch::Foreground {
+                    hwnd: s.hwnd,
+                    exe: s.exe.clone(),
+                    pid: watch::pid_of(s.hwnd),
+                    fullscreen: watch::covers_monitor(s.hwnd),
+                    minimized: unsafe { IsIconic(s.hwnd) }.as_bool(),
+                });
+            }
             let (exe, game, key) = (s.exe.clone(), s.game.clone(), s.recorder.info.encoder_key.clone());
             if failed {
                 // An encoder that stopped working is skipped from now on (C3/C4):
@@ -863,6 +869,7 @@ impl App {
         // A game the user picked is recorded whenever it's open (not minimized),
         // in front or not; otherwise, the game being played.
         let fg = match picked {
+            _ if resume.is_some() => resume.take().expect("checked"),
             // Whole-screen mode needs no game: record the screen all the time.
             // The desktop window stands in for the game's, and never goes away.
             _ if self.settings.capture.eq_ignore_ascii_case("screen") => watch::Foreground {
@@ -1064,7 +1071,6 @@ impl App {
                 }
                 self.keep_up = (0, 0, 0);
                 self.stall = (0, 0);
-                self.minimized_ticks = 0;
                 // Keep apps tried for the same game (a restart), forget them for a new one.
                 if self.previous.as_ref().map_or(true, |p| p.game != s.game) {
                     self.apps_tried.clear();
@@ -2020,7 +2026,6 @@ fn main() {
         encoder_strikes: Vec::new(),
         failures: Vec::new(),
         blocked: None,
-        minimized_ticks: 0,
         apps_tried: Vec::new(),
         ticks: 0,
         hdr_warned: false,

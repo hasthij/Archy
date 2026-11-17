@@ -18,8 +18,6 @@ const CLIENT_ID: &str = "1570755301219504220";
 pub enum Want {
     /// Status off (setting off): clear it and let go of the pipe.
     Off,
-    /// Archy is running, no game in front.
-    Idle,
     /// Archy is clipping this game.
     Game(String),
 }
@@ -36,6 +34,7 @@ impl Presence {
             let mut want = Want::Off;
             let mut pipe: Option<File> = None;
             let mut sent: Option<Want> = None;
+            let mut started: Option<(String, u64)> = None;
             loop {
                 // Sleep until the status changes; while Discord is unreachable retry every 15 s.
                 let retry = want != Want::Off && sent.as_ref() != Some(&want);
@@ -55,8 +54,14 @@ impl Presence {
                 if CLIENT_ID.is_empty() { continue; }
                 if pipe.is_none() { pipe = connect(); }
                 let Some(p) = pipe.as_mut() else { continue };
-                let (details, state) = match &want { Want::Game(g) => (format!("Clipping {g} with Archy"), "Ready to clip"), _ => ("Archy".to_string(), "Ready to clip") };
-                if set_activity(p, Some((details.as_str(), state))).is_ok() { sent = Some(want.clone()); }
+                let Want::Game(g) = &want else { continue };
+                // The timer starts when this game's recording started (kept while reconnecting).
+                if started.as_ref().map(|(n, _)| n) != Some(g) {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                    started = Some((g.clone(), now));
+                }
+                let since = started.as_ref().map_or(0, |(_, t)| *t);
+                if set_activity(p, Some((g.as_str(), "Instant replay on · every moment saved", since))).is_ok() { sent = Some(want.clone()); }
                 else { pipe = None; sent = None; }
             }
         });
@@ -97,8 +102,13 @@ fn connect() -> Option<File> {
     None
 }
 
-fn set_activity(p: &mut File, text: Option<(&str, &str)>) -> std::io::Result<()> {
-    let activity = text.map(|(d, st)| serde_json::json!({ "details": d, "state": st, "assets": { "large_image": "archy", "large_text": "Archy" } }));
+fn set_activity(p: &mut File, text: Option<(&str, &str, u64)>) -> std::io::Result<()> {
+    let activity = text.map(|(d, st, since)| serde_json::json!({
+        "details": format!("Clipping {d}"),
+        "state": st,
+        "timestamps": { "start": since },
+        "assets": { "large_image": "archy", "large_text": "Archy: instant replay clipper" },
+    }));
     let msg = serde_json::json!({
         "cmd": "SET_ACTIVITY",
         "args": { "pid": std::process::id(), "activity": activity },

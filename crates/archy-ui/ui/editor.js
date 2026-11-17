@@ -205,13 +205,15 @@ function startAudio(at) {
   const rate = ed.secs[secAt(at)]?.speed || 1;
   a.ctx.resume();
   const when = a.ctx.currentTime + 0.02;
+  // Sound leaves the speakers outputLatency later than the picture; start that far ahead (Bluetooth can be 100+ ms).
+  const ahead = Math.min(0.5, (a.ctx.outputLatency || 0) + (a.ctx.baseLatency || 0)) * rate;
   a.sources = a.buffers.map((buf, i) => {
-    if (at >= buf.duration) return null;
+    if (at + ahead >= buf.duration) return null;
     const s = a.ctx.createBufferSource();
     s.buffer = buf;
     s.playbackRate.value = rate;
     s.connect(a.taps[i]);
-    s.start(when, at);
+    s.start(when, at + ahead);
     return s;
   }).filter(Boolean);
   a.t0 = when;
@@ -967,6 +969,12 @@ function renderLanes() {
         title: (kind === "text" ? it.text : it.name) + (kind === "text" ? "" : " · drag the ends to trim"),
       }, el("span", { text: kind === "text" ? it.text.split("\n")[0] || "(empty)" : it.name }));
       if (kind === "video" && it.end - it.start > it.media.info.duration - it.offset + 0.05) bar.classList.add("loops");
+      if (it.id === ed.selected) {
+        // A visible way to remove the picked item (also the Delete key or the panel button).
+        const x = el("button", { class: "ed-item-x", text: "×", title: "Delete this (Delete key)", "aria-label": `Delete ${it.name || "item"}`, onclick: (e) => { e.stopPropagation(); deleteSelected(); } });
+        x.addEventListener("pointerdown", (e) => e.stopPropagation());
+        bar.append(x);
+      }
       barDrag(bar, it, track);
       track.append(bar);
     }
