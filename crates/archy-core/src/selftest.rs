@@ -191,7 +191,12 @@ pub fn run(opts: &Options) -> Result<Report, String> {
             let back: ID3D11Texture2D = swap.GetBuffer(0).unwrap();
             let mut buf = vec![0u8; (W * H * 4) as usize];
             let mut n = 0u32;
+            let freeze = std::env::var_os("ARCHY_TEST_FREEZE").is_some(); // a still window after 30 frames
             while !stop.load(Ordering::Acquire) {
+                if freeze && n >= 30 {
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
                 draw(n, &mut buf);
                 gpu.context.UpdateSubresource(&back.cast::<windows::Win32::Graphics::Direct3D11::ID3D11Resource>().unwrap(), 0, None, buf.as_ptr() as *const _, W * 4, 0);
                 let _ = swap.Present(1, DXGI_PRESENT(0)); // waits for the next refresh
@@ -249,12 +254,15 @@ pub fn run(opts: &Options) -> Result<Report, String> {
         // ARCHY_TEST_SESSION=1: also record the whole session to a file (feature test).
         let session_path = std::env::temp_dir().join(format!("archy-selftest-{fps}-session.mp4"));
         let with_session = std::env::var_os("ARCHY_TEST_SESSION").is_some();
+        // ARCHY_TEST_SESSION_AT=<s>: press "start" that many seconds in (default 0).
+        let at: u64 = std::env::var("ARCHY_TEST_SESSION_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(0).min(secs as u64);
+        let frames0 = shown.load(Ordering::Acquire);
+        pump(Duration::from_secs(at));
         if with_session {
             let _ = std::fs::remove_file(&session_path);
             rec.start_session(&session_path);
         }
-        let frames0 = shown.load(Ordering::Acquire);
-        pump(Duration::from_secs(secs as u64));
+        pump(Duration::from_secs(secs as u64 - at));
         let rendered = shown.load(Ordering::Acquire).wrapping_sub(frames0) & 0xFFFF;
         if with_session {
             rec.bookmark();

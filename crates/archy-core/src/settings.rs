@@ -263,7 +263,7 @@ impl Default for Settings {
             record_target: String::new(),
             capture: "window".into(),
             capture_monitor: String::new(),
-            capture_method: "auto".into(),
+            capture_method: "windows".into(),
             capture_cursor: true,
             encoder_gpu: String::new(),
             check_updates: true,

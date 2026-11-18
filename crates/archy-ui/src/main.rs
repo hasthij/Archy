@@ -585,12 +585,12 @@ async fn clip_info(path: String) -> Result<editor::ClipInfo, String> {
 
 /// Each audio track as its own file, for the editor's live volume preview.
 #[tauri::command]
-async fn editor_tracks(app: AppHandle, path: String, count: usize) -> Result<Vec<String>, String> {
+async fn editor_tracks(app: AppHandle, path: String, count: usize, from: f64, len: f64) -> Result<Vec<(String, f64)>, String> {
     let src = clip_path(&path)?;
-    let tracks = tauri::async_runtime::spawn_blocking(move || editor::preview_tracks(&src, count))
+    let tracks = tauri::async_runtime::spawn_blocking(move || editor::preview_tracks(&src, count, from, len))
         .await
         .map_err(|_| "couldn't prepare the audio tracks".to_string())??;
-    if let Some(dir) = tracks.first().and_then(|t| Path::new(t).parent()) {
+    if let Some(dir) = tracks.first().and_then(|t| Path::new(&t.0).parent()) {
         allow_folder(&app, dir);
     }
     Ok(tracks)
@@ -671,10 +671,6 @@ async fn export_clip(app: AppHandle, mut request: editor::ExportRequest) -> Resu
         .map_err(|_| "the export crashed".to_string())??;
     if to_clipboard && !archy_core::clipboard::copy_file(&out) {
         return Err("exported, but the clipboard couldn't be used".into());
-    }
-    if !to_clipboard {
-        // Show where it went.
-        let _ = std::process::Command::new("explorer").arg(format!("/select,{}", out.display())).spawn();
     }
     Ok(out.to_string_lossy().into_owned())
 }

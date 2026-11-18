@@ -30,6 +30,8 @@ pub struct Mp4Writer {
     /// Last time written per stream (video first, then audio tracks): times must
     /// rise, or the sink writer fails the whole save ("The parameter is incorrect").
     last: Vec<Option<i64>>,
+    /// The newest video frame, held until the next one fixes its duration.
+    pending: Option<(Vec<u8>, i64, i64, bool)>,
 }
 
 fn pack(hi: u32, lo: u32) -> u64 {
@@ -156,6 +158,7 @@ impl Mp4Writer {
                 audio: audio_streams,
                 base,
                 last: vec![None; streams],
+                pending: None,
             })
         }
     }
@@ -194,7 +197,17 @@ impl Mp4Writer {
         }
         let base = *self.base.get_or_insert(time);
         let t = self.next_time(0, time - base);
-        let sample = Self::sample(data, t, duration.max(1), keyframe)?;
+        // A frame lasts until the next one: a still window sends none for a
+        // while, and a short duration would squeeze that time out of the file
+        // (video running ahead of the audio).
+        let prev = self.pending.replace((data.to_vec(), t, duration.max(1), keyframe));
+        self.write_pending(prev, Some(t))
+    }
+
+    fn write_pending(&mut self, p: Option<(Vec<u8>, i64, i64, bool)>, next: Option<i64>) -> Result<()> {
+        let Some((data, t, dur, key)) = p else { return Ok(()) };
+        let dur = next.map_or(dur, |n| dur.max(n - t));
+        let sample = Self::sample(&data, t, dur, key)?;
         unsafe { self.writer.WriteSample(self.video, &sample) }
     }
 
@@ -217,6 +230,17 @@ impl Mp4Writer {
     }
 
     pub fn finish(self) -> Result<()> {
+        self.finish_at(None)
+    }
+
+    /// Like `finish`, but the last frame is held until `end` (packet time, 100 ns),
+    /// so a still picture doesn't end before the audio does.
+    pub fn finish_at(mut self, end: Option<i64>) -> Result<()> {
+        let mut last = self.pending.take();
+        if let (Some(p), Some(e), Some(b)) = (last.as_mut(), end, self.base) {
+            p.2 = p.2.max(e - b - p.1);
+        }
+        self.write_pending(last, None)?;
         unsafe { self.writer.Finalize() }
     }
 }

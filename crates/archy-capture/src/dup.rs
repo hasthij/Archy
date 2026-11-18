@@ -223,7 +223,7 @@ impl Dup {
                 let o = st.open.as_ref().expect("opened above");
                 let dst = o.pool[idx].clone();
                 let (w, h) = o.size;
-                unsafe { self.context.CopyResource(&dst, &tex) };
+                unsafe { self.context.CopyResource(&dst, &tex); self.context.Flush(); }
                 Ok((dst, w, h))
             })();
             unsafe { let _ = dupl.ReleaseFrame(); }

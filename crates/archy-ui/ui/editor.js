@@ -168,28 +168,56 @@ function volumes() {
   });
 }
 
+// Long sessions: decoding every track whole costs gigabytes, so only a window around the playhead is decoded.
+const AUDIO_WINDOW = 120, WINDOW_MIN_CLIP = 180;
+
+async function fetchAudioWindow(mine, from) {
+  const windowed = mine.info.duration > WINDOW_MIN_CLIP;
+  const files = await invoke("editor_tracks", { path: mine.clip.path, count: mine.info.tracks.length, from: windowed ? from : 0, len: windowed ? AUDIO_WINDOW : 0 });
+  if (ed !== mine || !files.length) return false;
+  const a = mine.audio;
+  a.ctx ??= new AudioContext();
+  const ctx = a.ctx;
+  const buffers = await Promise.all(files.map((f) =>
+    fetch(fileSrc(f[0])).then((r) => r.arrayBuffer()).then((b) => ctx.decodeAudioData(b))));
+  if (ed !== mine) return false;
+  if (!a.master) {
+    a.master = ctx.createAnalyser();
+    a.master.connect(ctx.destination);
+    a.gains = buffers.map(() => { const g = ctx.createGain(); g.connect(a.master); return g; });
+    // Meters tap each track before its fader, so a muted source still shows it is playing.
+    a.taps = buffers.map(() => { const n = ctx.createAnalyser(); n.fftSize = 512; return n; });
+    a.taps.forEach((n, i) => n.connect(a.gains[i]));
+  }
+  a.buffers = buffers;
+  a.starts = files.map((f) => f[1] || 0);
+  a.winFrom = windowed ? from : 0;
+  a.winEnd = windowed && from + AUDIO_WINDOW < mine.info.duration ? from + AUDIO_WINDOW : Infinity;
+  applyVolumes();
+  return true;
+}
+
 async function loadPreviewAudio() {
   const mine = ed;
-  let files = [];
-  try { files = await invoke("editor_tracks", { path: mine.clip.path, count: mine.info.tracks.length }); }
-  catch (e) { toast("Audio preview unavailable: " + e); return; }
-  if (ed !== mine || !files.length) return;
+  mine.audio.loading = true;
   try {
-    const ctx = new AudioContext();
-    const buffers = await Promise.all(files.map((f) =>
-      fetch(fileSrc(f)).then((r) => r.arrayBuffer()).then((b) => ctx.decodeAudioData(b))));
-    if (ed !== mine) { ctx.close(); return; }
-    mine.audio.ctx = ctx;
-    mine.audio.buffers = buffers;
-    mine.audio.master = ctx.createAnalyser();
-    mine.audio.master.connect(ctx.destination);
-    mine.audio.gains = buffers.map(() => { const g = ctx.createGain(); g.connect(mine.audio.master); return g; });
-    // Meters tap each track before its fader, so a muted source still shows it is playing.
-    mine.audio.taps = buffers.map(() => { const a = ctx.createAnalyser(); a.fftSize = 512; return a; });
-    mine.audio.taps.forEach((a, i) => a.connect(mine.audio.gains[i]));
-    applyVolumes();
-    if (!mine.dom.video.paused) startAudio(mine.dom.video.currentTime);
-  } catch (e) { toast("Audio preview unavailable: " + e); }
+    const t = mine.dom.video?.currentTime || 0;
+    if (!(await fetchAudioWindow(mine, Math.max(0, t - 5)))) return;
+  } catch (e) { toast("Audio preview unavailable: " + e); return; }
+  finally { mine.audio.loading = false; }
+  if (!mine.dom.video.paused) startAudio(mine.dom.video.currentTime);
+}
+
+// Playhead left (or is nearing the end of) the decoded window: load the one around it.
+async function moveAudioWindow(t) {
+  const mine = ed;
+  const a = mine.audio;
+  if (a.loading) return;
+  a.loading = true;
+  try { await fetchAudioWindow(mine, Math.max(0, t - 5)); }
+  catch (e) { toast("Audio preview unavailable: " + e); if (ed === mine) a.failed = true; return; }
+  finally { a.loading = false; }
+  if (ed === mine && !mine.dom.video.paused) startAudio(mine.dom.video.currentTime);
 }
 
 function applyVolumes() {
@@ -197,23 +225,30 @@ function applyVolumes() {
   ed.audio.gains.forEach((g, i) => { g.gain.value = ed.solo >= 0 ? (i === ed.solo ? 1 : 0) : vols[i] / 100; });
 }
 
+// Per-computer nudge (ms) for sound that plays late/early in the preview on this sound device. Preview only.
+const OFFSET_KEY = "archy.previewAudioOffset";
+function previewOffset() { try { return Number(localStorage.getItem(OFFSET_KEY)) || 0; } catch { return 0; } }
+
 function startAudio(at) {
   stopAudio();
   const a = ed.audio;
-  if (!a.buffers) return;
+  if (!a.buffers || a.failed) return;
+  if (at < a.winFrom || at >= a.winEnd - 0.5) { moveAudioWindow(at); return; }
   // Other speeds: the sound runs at that speed too (its pitch shifts in the preview; the export keeps pitch).
   const rate = ed.secs[secAt(at)]?.speed || 1;
   a.ctx.resume();
   const when = a.ctx.currentTime + 0.02;
   // Sound leaves the speakers outputLatency later than the picture; start that far ahead (Bluetooth can be 100+ ms).
-  const ahead = Math.min(0.5, (a.ctx.outputLatency || 0) + (a.ctx.baseLatency || 0)) * rate;
+  const ahead = (Math.min(0.5, (a.ctx.outputLatency || 0) + (a.ctx.baseLatency || 0)) + (when - a.ctx.currentTime) + previewOffset() / 1000) * rate; // + the 20 ms we wait before starting, during which the picture keeps moving
   a.sources = a.buffers.map((buf, i) => {
-    if (at + ahead >= buf.duration) return null;
+    // Where in this track the picture's moment is (a track that started late has silence before it).
+    const pos = at + ahead - (a.starts[i] || 0);
+    if (pos >= buf.duration) return null;
     const s = a.ctx.createBufferSource();
     s.buffer = buf;
     s.playbackRate.value = rate;
     s.connect(a.taps[i]);
-    s.start(when, at + ahead);
+    if (pos >= 0) s.start(when, pos); else s.start(when - pos / rate, 0);
     return s;
   }).filter(Boolean);
   a.t0 = when;
@@ -371,9 +406,10 @@ function tick(now) {
   if (ed.dirty || sig !== ed.sig) { ed.sig = sig; ed.dirty = false; drawPreview(t); }
   // Re-align audio if it has drifted (checked twice a second, not every frame).
   const a = ed.audio;
+  if (!v.paused && a.buffers && !a.loading && isFinite(a.winEnd) && t > a.winEnd - 12) moveAudioWindow(t);
   if (!v.paused && a.sources.length && now - ed.driftAt > 500) {
     ed.driftAt = now;
-    if (Math.abs(a.at + (a.ctx.currentTime - a.t0) * (a.rate || 1) - t) > 0.12) startAudio(t);
+    if (Math.abs(a.at + (a.ctx.currentTime - a.t0) * (a.rate || 1) - t) > 0.05) startAudio(t);
   }
   ed.raf = requestAnimationFrame(tick);
 }
@@ -754,7 +790,18 @@ function renderAudio() {
   const hint = ed.ev >= 0 && strips.length > 1
     ? el("p", { class: "ed-note mx-hint", text: hintText() })
     : null;
-  dom.audio.replaceChildren(el("div", { class: "mx" }, ...strips), ...(hint ? [hint] : []));
+  const offOut = el("span", { class: "mx-val", text: `${previewOffset()} ms` });
+  const off = el("input", { type: "range", class: "mx-fader", min: "-800", max: "800", step: "5", value: String(previewOffset()), "aria-label": "Preview sound sync" });
+  off.addEventListener("input", () => {
+    try { localStorage.setItem(OFFSET_KEY, off.value); } catch {}
+    offOut.textContent = `${off.value} ms`;
+    if (!dom.video.paused) startAudio(dom.video.currentTime);
+  });
+  off.addEventListener("dblclick", () => { off.value = "0"; off.dispatchEvent(new Event("input")); });
+  const sync = el("div", { class: "mx-strip", title: "Only changes what you hear in this preview on this computer; the clip and exports are untouched." },
+    el("b", { class: "mx-name", text: "Sync" }), el("div", { class: "mx-fade" }, off), offOut);
+  const syncNote = el("p", { class: "ed-note", text: "Sound late in this preview? Slide right to play it earlier, left for later. Double-click resets. Your clip and exports aren't changed." });
+  dom.audio.replaceChildren(el("div", { class: "mx" }, ...strips, sync), syncNote, ...(hint ? [hint] : []));
 }
 
 function hintText() {

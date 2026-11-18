@@ -126,6 +126,8 @@ struct Shared {
     reason: Mutex<String>,
     /// Capture-clock time of the encoder's latest packet (0: none yet).
     last_output: AtomicI64,
+    /// End time of the newest encoded packet (capture clock).
+    last_pts: AtomicI64,
     /// Capture-clock time of the latest frame handed to the encoder.
     last_input: AtomicI64,
     /// Repeats written as near-free skip frames (oneVPL).
@@ -181,6 +183,7 @@ impl Recorder {
             encoder_stats: Mutex::new(None),
             reason: Mutex::new(String::new()),
             last_output: AtomicI64::new(0),
+            last_pts: AtomicI64::new(0),
             last_input: AtomicI64::new(0),
             skip_frames: AtomicU64::new(0),
             fresh: AtomicU64::new(0),
@@ -229,16 +232,11 @@ impl Recorder {
             let track = audio.len(); // its index if it starts
             match AudioCapture::start(src.source.clone(), audio_kbps, src.volumes.clone(), move |p| {
                 let packet = StoredPacket { data: Arc::from(p.data), time: p.time, duration: p.duration, keyframe: true };
-                if let Some(tx) = session.lock().ok().and_then(|s| s.clone()) {
-                    let _ = tx.send(crate::session::Msg::Audio(track, packet.clone()));
-                }
                 if let Ok(mut r) = sink.lock() {
-                    r.push(StoredPacket {
-                        data: packet.data,
-                        time: p.time,
-                        duration: p.duration,
-                        keyframe: true,
-                    });
+                    r.push(packet.clone());
+                }
+                if let Some(tx) = session.lock().ok().and_then(|s| s.clone()) {
+                    let _ = tx.send(crate::session::Msg::Audio(track, packet));
                 }
             }) {
                 Ok(capture) => {
@@ -298,7 +296,30 @@ impl Recorder {
                 .collect(),
             names: self.audio.iter().map(|a| a.name.clone()).collect(),
         };
-        *slot = Some(crate::session::start(path.to_path_buf(), format));
+        let tx = crate::session::start(path.to_path_buf(), format);
+        // Decoding starts at the newest keyframe already in the buffer (a still
+        // window may not produce another for a long time), but the file starts now:
+        // those frames are stamped with the start moment, and no earlier audio is kept.
+        if let Ok(ring) = self.shared.ring.lock() {
+            let video = ring.since_keyframe();
+            if let Some(last) = video.last() {
+                let mut now = last.time;
+                for a in &self.audio {
+                    if let Ok(r) = a.ring.lock() {
+                        if let Some(p) = r.since_time(now).last() {
+                            now = now.max(p.time + p.duration);
+                        }
+                    }
+                }
+                let _ = tx.send(crate::session::Msg::Start(now));
+                for p in video {
+                    let _ = tx.send(crate::session::Msg::Video(p));
+                }
+            }
+            *slot = Some(tx);
+        } else {
+            *slot = Some(tx);
+        }
         true
     }
 
@@ -323,8 +344,31 @@ impl Recorder {
     }
 
     /// Ends the session and finishes its file (waits up to 10 s).
+    /// The encoder runs up to a couple of seconds behind the screen when the GPU is busy;
+    /// stopping or saving right away would cut that tail. Waits (at most 2.5 s) until the
+    /// newest encoded packet is close to now. Repeats keep it fresh even on a still screen.
+    fn wait_caught_up(&self) {
+        self.wait_pts(clock_now() - 8_000_000);
+    }
+
+    /// Waits (at most 2.5 s) until encoded output reaches clock time `target`.
+    fn wait_pts(&self, target: i64) {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(2500) {
+            let pts = self.shared.last_pts.load(Ordering::Acquire);
+            if pts != 0 && pts >= target {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     pub fn end_session(&self) -> Option<crate::session::Summary> {
-        let tx = self.shared.session.lock().ok()?.take()?;
+        let stop_at = clock_now();
+        let tx = self.shared.session.lock().ok()?.clone()?;
+        let _ = tx.send(crate::session::Msg::Limit(stop_at));
+        self.wait_pts(stop_at);
+        self.shared.session.lock().ok()?.take();
         let (reply, summary) = sync_channel(1);
         tx.send(crate::session::Msg::Stop(reply)).ok()?;
         summary.recv_timeout(Duration::from_secs(10)).ok()
@@ -423,6 +467,7 @@ impl Recorder {
     /// re-encoded. The file appears atomically (written under a temporary name).
     pub fn save_clip(&self, seconds: u32, path: &Path) -> Result<ClipInfo> {
         let started = Instant::now();
+        self.wait_caught_up();
         let _fast = crate::eco::Unthrottled::new();
         let packets = self
             .shared
@@ -447,10 +492,9 @@ impl Recorder {
                 .ring
                 .lock()
                 .map(|r| {
-                    r.last(seconds + 2)
-                        .into_iter()
-                        .filter(|p| p.time >= start && p.time < end)
-                        .collect()
+                    // The audio must reach back to wherever the video starts (a keyframe,
+                    // possibly well before the requested length) or the clip opens silent.
+                    r.since_time(start).into_iter().filter(|p| p.time < end).collect()
                 })
                 .unwrap_or_default();
             if clip.is_empty() {
@@ -599,12 +643,77 @@ pub fn append_track_names(path: &Path, names: &[&str]) {
     if names.is_empty() {
         return;
     }
+    only_first_audio_default(path);
     let payload = [TRACK_NAMES_MARKER, names.join("|").as_bytes()].concat();
     let mut bx = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
     bx.extend_from_slice(b"free");
     bx.extend_from_slice(&payload);
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(path) {
         let _ = f.write_all(&bx);
+    }
+}
+
+/// External players (Movies & TV, browsers, VLC) play whichever audio track is flagged
+/// "enabled", and the muxer flags all of them, so they land on the last one: the bare
+/// microphone. Clears the enabled flag on every audio track after the first ("Everything")
+/// in place (same length; the editor and FFmpeg still read every track by index).
+fn only_first_audio_default(path: &Path) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let Ok(mut f) = std::fs::OpenOptions::new().read(true).write(true).open(path) else { return };
+    let Ok(len) = f.metadata().map(|m| m.len()) else { return };
+    // Find the top-level moov box.
+    let (mut pos, mut moov) = (0u64, None);
+    while pos + 8 <= len {
+        let mut h = [0u8; 8];
+        if f.seek(SeekFrom::Start(pos)).is_err() || f.read_exact(&mut h).is_err() {
+            return;
+        }
+        let mut size = u32::from_be_bytes([h[0], h[1], h[2], h[3]]) as u64;
+        if size == 1 {
+            let mut big = [0u8; 8];
+            if f.read_exact(&mut big).is_err() {
+                return;
+            }
+            size = u64::from_be_bytes(big);
+        } else if size == 0 {
+            size = len - pos;
+        }
+        if &h[4..8] == b"moov" {
+            moov = Some((pos, size));
+            break;
+        }
+        if size < 8 {
+            return;
+        }
+        pos += size;
+    }
+    let Some((start, size)) = moov else { return };
+    if size > 64 << 20 {
+        return;
+    }
+    let mut buf = vec![0u8; size as usize];
+    if f.seek(SeekFrom::Start(start)).is_err() || f.read_exact(&mut buf).is_err() {
+        return;
+    }
+    // Every `trak` has a tkhd (flags at +9..12 from the box start) and an hdlr whose handler
+    // type says video/audio. Patch audio tkhds after the first one.
+    let find = |from: usize, tag: &[u8; 4]| buf[from..].windows(4).position(|w| w == tag).map(|p| p + from);
+    let (mut at, mut audio_seen) = (0usize, 0);
+    while let Some(t) = find(at, b"tkhd") {
+        let next = find(t + 4, b"tkhd").unwrap_or(buf.len());
+        let Some(h) = buf[t..next].windows(4).position(|w| w == b"hdlr").map(|p| p + t) else { break };
+        // hdlr: tag, version+flags (4), pre_defined (4), handler type (4)
+        if buf.get(h + 12..h + 16) == Some(b"soun") {
+            audio_seen += 1;
+            if audio_seen > 1 {
+                // tkhd tag is at t; version/flags follow: flags are the last 3 bytes.
+                let flag_off = t + 4 + 1;
+                if f.seek(SeekFrom::Start(start + flag_off as u64)).is_ok() {
+                    let _ = f.write_all(&[0, 0, 2]);
+                }
+            }
+        }
+        at = t + 4;
     }
 }
 
@@ -776,19 +885,23 @@ fn capture_loop(
                 } else {
                     Arc::from(p.data)
                 };
+                let p_end = p.time + p.duration;
                 let packet = StoredPacket {
                     data,
                     time: p.time,
                     duration: p.duration,
                     keyframe,
                 };
-                if let Some(tx) = enc_shared.session.lock().ok().and_then(|s| s.clone()) {
-                    let _ = tx.send(crate::session::Msg::Video(packet.clone()));
-                }
+                // Ring first, then the session: start_session primes from the ring,
+                // and the session drops the packets it already got.
                 if let Ok(mut ring) = enc_shared.ring.lock() {
-                    ring.push(packet);
+                    ring.push(packet.clone());
+                }
+                if let Some(tx) = enc_shared.session.lock().ok().and_then(|s| s.clone()) {
+                    let _ = tx.send(crate::session::Msg::Video(packet));
                 }
                 enc_shared.last_output.store(clock_now(), Ordering::Release);
+                enc_shared.last_pts.store(p_end, Ordering::Release);
                 Ok(())
             });
             if let (Ok(s), Ok(mut slot)) = (&stats, enc_shared.encoder_stats.lock()) {
@@ -1046,5 +1159,16 @@ fn capture_loop(
     match encoded {
         Err(e) => Err(e),
         Ok(()) => result,
+    }
+}
+
+#[cfg(test)]
+mod default_track_tests {
+    /// ARCHY_TEST_CLIP=<multi-audio mp4 copy> cargo test -p archy-core first_audio -- --ignored
+    #[test]
+    #[ignore]
+    fn first_audio_only_default() {
+        let p = std::path::PathBuf::from(std::env::var("ARCHY_TEST_CLIP").unwrap());
+        super::append_track_names(&p, &["Everything", "Game", "Discord", "Microphone"]);
     }
 }

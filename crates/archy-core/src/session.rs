@@ -20,9 +20,14 @@ pub enum Msg {
     Video(StoredPacket),
     Audio(usize, StoredPacket),
     Bookmark,
+    /// The moment the session was started (packet time): footage the buffer already
+    /// held is shown as the first frame at that moment, earlier audio is dropped.
+    Start(i64),
     /// true = stop writing (the file stays open); false = continue the same file
     /// from the next keyframe, with the paused time cut out.
     Pause(bool),
+    /// Ignore everything newer than this clock time (the stop request moment).
+    Limit(i64),
     Stop(SyncSender<Summary>),
 }
 
@@ -33,6 +38,8 @@ pub struct Summary {
     pub seconds: f64,
     pub bytes: u64,
     pub bookmarks: usize,
+    /// Video packets received / written (non-empty) / time of the last written one, s.
+    pub video: (u64, u64, f64),
     /// Why it ended early (disk full, write error); `None` = stopped normally.
     pub problem: Option<String>,
 }
@@ -94,9 +101,14 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
     let mut paused = false;
     let mut resume_key = false; // resumed: waiting for a keyframe to continue on
     let mut resume_at = i64::MIN; // source time of that keyframe; earlier audio is dropped
+    let (mut seen_video, mut seen_audio) = (i64::MIN, Vec::<i64>::new());
+    let mut start = i64::MIN;
+    let mut limit = i64::MAX;
+    let mut audio_end = 0i64; // end of the newest audio written (file time)
     let mut shift = 0i64; // total paused time cut out of the file
     let mut bookmarks: Vec<f64> = Vec::new();
     let mut problem: Option<String> = None;
+    let (mut v_in, mut v_out, mut v_last) = (0u64, 0u64, 0f64);
     let mut checked = Instant::now();
     let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let tracks: Vec<AudioTrack> = format
@@ -108,6 +120,15 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
     for msg in rx {
         match msg {
             Msg::Video(p) if problem.is_none() => {
+                if p.time >= limit {
+                    continue;
+                }
+                if p.time <= seen_video {
+                    continue; // already primed from the replay buffer
+                }
+                seen_video = p.time;
+                let mut p = p;
+                p.time = p.time.max(start);
                 if paused {
                     continue;
                 }
@@ -134,6 +155,11 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
                         }
                     }
                 }
+                v_in += 1;
+                if !p.data.is_empty() {
+                    v_out += 1;
+                    v_last = (p.time - shift - base) as f64 / 1e7;
+                }
                 last_video = p.time - shift;
                 last_end = last_video + p.duration;
                 if let Some(w) = writer.as_mut() {
@@ -150,13 +176,26 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
                 }
             }
             Msg::Audio(track, p) if problem.is_none() => {
-                if paused || resume_key || p.time < resume_at {
+                if p.time >= limit {
+                    continue;
+                }
+                if seen_audio.len() <= track {
+                    seen_audio.resize(track + 1, i64::MIN);
+                }
+                if p.time <= seen_audio[track] {
+                    continue;
+                }
+                seen_audio[track] = p.time;
+                if paused || resume_key || p.time < resume_at || p.time < start {
                     continue;
                 }
                 if let Some(w) = writer.as_mut() {
                     let _ = w.write_audio(track, &p.data, p.time - shift, p.duration);
+                    audio_end = audio_end.max(p.time - shift + p.duration);
                 }
             }
+            Msg::Start(t) => start = t,
+            Msg::Limit(t) => limit = t,
             Msg::Pause(on) => {
                 paused = on;
                 if !on {
@@ -170,7 +209,7 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
                 }
             }
             Msg::Stop(reply) => {
-                let ended = writer.take().map(|w| w.finish());
+                let ended = writer.take().map(|w| w.finish_at(Some(audio_end)));
                 if matches!(ended, Some(Ok(_))) {
                     let n: Vec<&str> = format.names.iter().map(String::as_str).collect();
                     crate::recorder::append_track_names(&path, &n);
@@ -183,6 +222,7 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
                     seconds: (last_video - base).max(0) as f64 / 1e7,
                     bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
                     bookmarks: bookmarks.len(),
+                    video: (v_in, v_out, v_last),
                     problem,
                 });
                 return;
@@ -192,7 +232,7 @@ fn run(path: PathBuf, format: Format, rx: Receiver<Msg>) {
     }
     // The sender went away without Stop (recorder dropped): still finish the file.
     if let Some(w) = writer {
-        if w.finish().is_ok() {
+        if w.finish_at(Some(audio_end)).is_ok() {
             let n: Vec<&str> = format.names.iter().map(String::as_str).collect();
             crate::recorder::append_track_names(&path, &n);
         }

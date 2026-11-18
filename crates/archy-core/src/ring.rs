@@ -75,6 +75,19 @@ impl ReplayBuffer {
         }
     }
 
+    /// Everything from the newest keyframe on.
+    pub fn since_keyframe(&self) -> Vec<StoredPacket> {
+        match self.packets.iter().rposition(|p| p.keyframe) {
+            Some(i) => self.packets.range(i..).cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Packets at or after `time`.
+    pub fn since_time(&self, time: i64) -> Vec<StoredPacket> {
+        self.packets.iter().filter(|p| p.time >= time).cloned().collect()
+    }
+
     /// Packets covering the last `seconds`, starting at a keyframe at or before
     /// that point (clips can only start on a keyframe without re-encoding).
     pub fn last(&self, seconds: u32) -> Vec<StoredPacket> {

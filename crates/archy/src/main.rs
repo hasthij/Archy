@@ -207,11 +207,14 @@ fn end_session_file(recorder: &Arc<Recorder>, window: isize) {
     std::thread::spawn(move || {
         if let Some(sum) = recorder.end_session() {
             log(&format!(
-                "session: saved {} ({:.1} min, {:.0} MB, {} bookmarks){}",
+                "session: saved {} ({:.1} min, {:.0} MB, {} bookmarks; video {} in, {} written, last at {:.1}s){}",
                 sum.path.display(),
                 sum.seconds / 60.0,
                 sum.bytes as f64 / 1e6,
                 sum.bookmarks,
+                sum.video.0,
+                sum.video.1,
+                sum.video.2,
                 sum.problem.as_ref().map(|p| format!("; stopped early: {p}")).unwrap_or_default()
             ));
             if let Some(p) = &sum.problem {
@@ -743,8 +746,8 @@ impl App {
         }
         self.stall.1 = 0;
         let id = s.hwnd.0 as isize;
-        if self.warned_stall == Some(id) {
-            return;
+        if self.warned_stall.is_some() {
+            return; // once per run: still windows trip it falsely
         }
         self.warned_stall = Some(id);
         let other = if s.window_target { "Desktop Duplication" } else { "Windows capture" };
@@ -1393,9 +1396,10 @@ impl App {
                     match recorder.save_clip(seconds, &path) {
                         Ok(c) => {
                             log(&format!(
-                                "saved {} ({:.1} s, {:.1} MB, {} ms)",
+                                "saved {} ({:.1} s of the {} s asked, {:.1} MB, {} ms)",
                                 c.path.display(),
                                 c.seconds,
+                                seconds,
                                 c.bytes as f64 / 1e6,
                                 c.save_time.as_millis()
                             ));
@@ -1524,7 +1528,8 @@ impl App {
                 MENU_SETTINGS => open_path(&settings::path()),
                 MENU_OPEN => open_ui(),
                 MENU_QUIT => {
-                    let _ = DestroyWindow(self.window);
+                    // Posted, not called: WM_DESTROY needs the App borrow this menu handler holds.
+                    let _ = PostMessageW(Some(self.window), WM_CLOSE, WPARAM(0), LPARAM(0));
                 }
                 _ => {}
             }

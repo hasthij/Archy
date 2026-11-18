@@ -194,8 +194,13 @@ pub fn track_names(path: &Path, count: usize) -> Vec<String> {
 }
 
 /// Each audio track as its own file, so the editor can play them together
-/// with live volumes (the video element only plays track 1). Fast: no re-encode.
-pub fn preview_tracks(path: &Path, count: usize) -> Result<Vec<String>, String> {
+/// with live volumes (the video element only plays track 1). Returns (file, start):
+/// a stream copy (seconds, even for a long session; a re-encode took minutes) keeps a
+/// late-starting track's offset only in the MP4 header, which the browser ignores, so
+/// that offset comes back separately and the editor applies it when it plays the track.
+/// `len` > 0 makes only that many seconds from `from` (long sessions: decoding every
+/// track whole would take gigabytes); the returned start is then where the file begins in the clip.
+pub fn preview_tracks(path: &Path, count: usize, from: f64, len: f64) -> Result<Vec<(String, f64)>, String> {
     // A fresh folder each time: the window may still hold the last ones open
     // for a moment, and a locked file can't be overwritten. Old ones are cleared.
     let root = preview_dir();
@@ -213,17 +218,32 @@ pub fn preview_tracks(path: &Path, count: usize) -> Result<Vec<String>, String> 
     if count == 0 {
         return Ok(Vec::new());
     }
+    // Where each audio track starts (header only, instant).
+    let probe = tool("ffprobe.exe")?
+        .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=start_time", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("couldn't run ffprobe: {e}"))?;
+    let starts: Vec<f64> = String::from_utf8_lossy(&probe.stdout)
+        .lines()
+        .map(|l| l.trim().parse().unwrap_or(0.0))
+        .collect();
     let mut cmd = tool("ffmpeg.exe")?;
-    cmd.args(["-y", "-v", "error", "-i"]).arg(path);
+    cmd.args(["-y", "-v", "error"]);
+    if len > 0.0 {
+        cmd.args(["-ss", &format!("{from:.3}")]);
+    }
+    cmd.arg("-i").arg(path);
     let mut outs = Vec::new();
     for i in 0..count {
         let out = dir.join(format!("track{i}.m4a"));
-        // Not a stream copy: a track that starts late (Discord joined mid-clip, an idle
-        // source) keeps its start offset only in the MP4 header, and the browser's
-        // decoder ignores that, which played the track early (the "audio delay").
-        // first_pts=0 pads that offset as real silence so every preview starts at 0.
-        cmd.args(["-map", &format!("0:a:{i}"), "-af", "aresample=async=1:first_pts=0", "-c:a", "aac", "-b:a", "192k", "-vn"]).arg(&out);
-        outs.push(out.to_string_lossy().into_owned());
+        cmd.args(["-map", &format!("0:a:{i}"), "-c:a", "copy"]);
+        if len > 0.0 {
+            cmd.args(["-t", &format!("{len:.3}")]);
+        }
+        cmd.arg("-vn").arg(&out);
+        let start = starts.get(i).copied().unwrap_or(0.0);
+        outs.push((out.to_string_lossy().into_owned(), if len > 0.0 { start.max(from) } else { start }));
     }
     let r = cmd.output().map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
     if !r.status.success() {
@@ -1227,8 +1247,8 @@ mod export_tests {
         let t1 = std::time::Instant::now();
         assert_eq!(thumbnail(&src).unwrap(), thumb);
         println!("thumbnail: made in {} ms, cached in {} us", made.as_millis(), t1.elapsed().as_micros());
-        let previews = preview_tracks(&src, clip_info.tracks.len()).unwrap();
-        assert!(previews.iter().all(|p| std::fs::metadata(p).unwrap().len() > 0));
+        let previews = preview_tracks(&src, clip_info.tracks.len(), 0.0, 0.0).unwrap();
+        assert!(previews.iter().all(|(p, _)| std::fs::metadata(p).unwrap().len() > 0));
 
         // A half-transparent bar as the caption image, at the clip's size.
         let png = work.join("cap.png");

@@ -506,6 +506,9 @@ fn video_param(cfg: &Config, low_power: bool, icq: bool) -> mfxVideoParam {
 /// GPU stays fed and packets are collected oldest-first, in order.
 const PIPELINE: usize = 3;
 
+/// Longest wanted gap between keyframes, 100 ns units.
+const KEY_AGE: i64 = 25_000_000;
+
 /// One output buffer; each in-flight frame needs its own.
 struct Slot {
     bitstream: mfxBitstream,
@@ -538,6 +541,10 @@ pub struct VplEncoder {
     slots: Vec<Slot>,
     free: Vec<usize>,
     in_flight: VecDeque<(mfxSyncPoint, usize)>,
+    /// Times (100 ns) of the newest keyframe out, the newest keyframe asked for, and the frame being submitted.
+    last_key: i64,
+    last_forced: i64,
+    cur_time: i64,
     frame_duration: i64,
     /// AV1 reports key frames as I (no IDR concept).
     av1: bool,
@@ -565,6 +572,9 @@ impl VplEncoder {
             slots: Vec::new(),
             free: Vec::new(),
             in_flight: VecDeque::new(),
+            last_key: 0,
+            last_forced: i64::MIN / 2,
+            cur_time: 0,
             frame_duration: 10_000_000 / cfg.fps as i64,
             av1: cfg.codec == Codec::Av1,
             skip_repeats: false,
@@ -742,12 +752,23 @@ impl VplEncoder {
         // A repeat becomes a dummy frame (every block "unchanged"): near-free to
         // encode. The picture is still copied in, so a runtime that ignores the
         // request encodes the right frame anyway.
-        let skip = repeat && self.skip_repeats && !surface.is_null();
-        let ctrl: *mut c_void = if skip {
+        let overdue = !surface.is_null()
+            && self.cur_time - self.last_key > KEY_AGE
+            && self.cur_time - self.last_forced > KEY_AGE / 2;
+        let skip = repeat && self.skip_repeats && !surface.is_null() && !overdue;
+        // A quiet screen sends few frames, so a frame-count GOP can span many seconds
+        // and a clip would start that far back: ask for a keyframe when overdue.
+        let force = overdue && !skip;
+        let ctrl: *mut c_void = if skip || force {
             let c = &mut self.slots[slot].ctrl;
             **c = unsafe { std::mem::zeroed() };
-            c.SkipFrame = MFX_SKIPFRAME_INSERT_DUMMY;
-            stats.skipped += 1;
+            if skip {
+                c.SkipFrame = MFX_SKIPFRAME_INSERT_DUMMY;
+                stats.skipped += 1;
+            } else {
+                c.FrameType = MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_I | 0x40;
+                self.last_forced = self.cur_time;
+            }
             &mut **c as *mut mfxEncodeCtrl as *mut c_void
         } else {
             null_mut()
@@ -827,6 +848,9 @@ impl VplEncoder {
                 bs.FrameType & MFX_FRAMETYPE_IDR != 0
             },
         };
+        if packet.keyframe {
+            self.last_key = packet.time;
+        }
         stats.count(&packet);
         let result = on_packet(packet);
         bs.DataOffset = 0;
@@ -840,11 +864,25 @@ impl VplEncoder {
         mut on_packet: impl FnMut(Packet) -> Result<()>,
     ) -> Result<Stats> {
         let mut stats = Stats::default();
-        while let Ok(SendPtr(input)) = inputs.recv() {
+        loop {
+            // Quiet screen: collect what is in flight now, else the last frames only come out
+            // when later ones arrive (seconds on a still page) and a clip/session tail is cut.
+            let next = match inputs.recv_timeout(std::time::Duration::from_millis(40)) {
+                Ok(i) => i,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    while !self.in_flight.is_empty() {
+                        self.finish_oldest(&mut on_packet, &mut stats)?;
+                    }
+                    continue;
+                }
+                Err(_) => break,
+            };
+            let SendPtr(input) = next;
             let t_copy = trace::now();
             let surface = self.input_surface(&input.texture)?;
             trace::add(2, t_copy);
             unsafe { (*surface).Data.TimeStamp = (input.time * 9 / 1000) as u64 };
+            self.cur_time = input.time;
             let result = self.submit(surface, input.repeat, &mut on_packet, &mut stats);
             // The encoder holds its own reference while it needs the frame.
             unsafe { ((*(*surface).FrameInterface).Release)(surface) };

@@ -50,6 +50,9 @@ struct Slot {
 }
 
 /// More than any encoder should ever hold; past this the encoder is stuck.
+/// A quiet screen sends few frames, so a frame-count GOP can span many seconds;
+/// clips start on a keyframe, so ask for one at least this often.
+const MAX_KEY_AGE: std::time::Duration = std::time::Duration::from_secs(2);
 const MAX_POOL: usize = 32;
 
 /// Called by Media Foundation when the encoder lets go of an input sample.
@@ -175,6 +178,7 @@ impl MfEncoder {
         // Packets since the last real keyframe, and whether one was requested.
         let mut since_key = 0u32;
         let mut force_pending = false;
+        let mut key_at = std::time::Instant::now();
         unsafe {
             self.transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
@@ -197,7 +201,7 @@ impl MfEncoder {
                     Ok(SendPtr(input)) => {
                         // Some drivers ignore the keyframe interval; clips can only start
                         // on a keyframe, so ask for one when it's overdue.
-                        if !force_pending && since_key >= self.gop + self.gop / 4 {
+                        if !force_pending && (since_key >= self.gop + self.gop / 4 || key_at.elapsed() > MAX_KEY_AGE) {
                             if let Some(api) = &self.codec_api {
                                 unsafe {
                                     let _ = api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &var_u32(1));
@@ -228,6 +232,7 @@ impl MfEncoder {
                     Some(true) => {
                         since_key = 0;
                         force_pending = false;
+                        key_at = std::time::Instant::now();
                     }
                     Some(false) => since_key += 1,
                     None => {}
