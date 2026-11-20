@@ -570,10 +570,10 @@ textarea { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid
 .welcome-dots i.on { width: 22px; border-radius: 4px; background: var(--accent); }
 .spot-shade { position: fixed; inset: 0; z-index: 70; background: transparent; pointer-events: auto; }
 /* The ring's huge shadow darkens everything except the target: a real spotlight that glides between stops. */
-.spot-ring { position: fixed; z-index: 71; border-radius: 14px; border: 2px solid var(--accent); box-shadow: 0 0 0 9999px color-mix(in srgb, #000 55%, transparent); pointer-events: none; transition: left 0.38s cubic-bezier(.2,.7,.2,1), top 0.38s cubic-bezier(.2,.7,.2,1), width 0.38s cubic-bezier(.2,.7,.2,1), height 0.38s cubic-bezier(.2,.7,.2,1); }
-.spot-ring.pulse::after { content: ""; position: absolute; inset: -2px; border-radius: inherit; border: 2px solid var(--accent); animation: spot-pulse 1.1s 0.3s ease-out 2 both; }
-.spot-tip { position: fixed; z-index: 72; width: 320px; padding: 18px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); transition: left 0.38s cubic-bezier(.2,.7,.2,1), top 0.38s cubic-bezier(.2,.7,.2,1); }
-.spot-body { animation: swap 0.3s 0.12s cubic-bezier(.2,.7,.2,1) both; }
+.spot-ring { position: fixed; z-index: 71; border-radius: 14px; border: 2px solid var(--accent); box-shadow: 0 0 0 9999px color-mix(in srgb, #000 55%, transparent); pointer-events: none; transition: left 0.22s cubic-bezier(.3,.7,.2,1), top 0.22s cubic-bezier(.3,.7,.2,1), width 0.22s cubic-bezier(.3,.7,.2,1), height 0.22s cubic-bezier(.3,.7,.2,1); }
+.spot-ring.pulse::after { content: ""; position: absolute; inset: -2px; border-radius: inherit; border: 2px solid var(--accent); animation: spot-pulse 0.7s 0.15s ease-out 1 both; }
+.spot-tip { position: fixed; z-index: 72; width: 320px; padding: 18px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); transition: left 0.22s cubic-bezier(.3,.7,.2,1), top 0.22s cubic-bezier(.3,.7,.2,1); }
+.spot-body { animation: swap 0.18s cubic-bezier(.2,.7,.2,1) both; }
 .spot-prog { height: 3px; border-radius: 2px; background: var(--line-soft); margin-bottom: 12px; overflow: hidden; }
 .spot-prog i { display: block; height: 100%; border-radius: 2px; background: var(--accent); transition: width 0.4s cubic-bezier(.2,.7,.2,1); }
 .spot-tip h3 { margin: 4px 0 6px; }
@@ -914,3 +914,6 @@ select:focus-visible { border-color: var(--accent); outline: 2px solid var(--acc
   .demo *, .welcome-logo, .welcome-card, .spot-body, .spot-ring, .spot-ring::after, .spot-tip, .welcome-keys kbd.press { animation: none !important; transition: none !important; }
   .demo-clip, .demo-chip { opacity: 1; }
 }
+
+/* While the window is being resized or maximised, freeze motion so the page only has to lay out once */
+html.resizing *, html.resizing *::before, html.resizing *::after { transition: none !important; animation-play-state: paused !important; }

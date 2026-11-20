@@ -2461,6 +2461,13 @@ function renderSounds() {
   max.onclick = () => win.toggleMaximize();
   close.onclick = () => win.close();
   const sync = () => win.isMaximized().then((m) => { max.classList.toggle("on", m); max.title = max.ariaLabel = m ? "Restore" : "Maximize"; }).catch(() => {});
-  window.addEventListener("resize", sync);
+  // Resizing (and maximize) fires a burst of resize events: pause animations and transitions while it
+  // lasts and ask the window about its state once at the end, not on every event.
+  let t = 0;
+  window.addEventListener("resize", () => {
+    document.documentElement.classList.add("resizing");
+    clearTimeout(t);
+    t = setTimeout(() => { document.documentElement.classList.remove("resizing"); sync(); }, 140);
+  });
   sync();
 })();

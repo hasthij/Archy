@@ -81,7 +81,7 @@ html[data-theme="light"] .app .rail { background: var(--p1); }
 .star.on svg { fill: #ffc857; }
 .star.inl { position: static; opacity: 1; background: var(--hov); color: var(--mu); width: 34px; height: 34px; }
 .star.inl.on { color: #ffc857; }
-.hero .star.inl { background: #0007; color: #fff; }
+.hero .star.inl { background: #262b35; color: #fff; border: 1px solid #fff3; }
 .hero .star.inl.on { color: #ffc857; }
 
 /* ---------- Home ---------- */
@@ -98,7 +98,9 @@ html[data-theme="light"] .app .rail { background: var(--p1); }
 .hero .ttl { font-size: 30px; font-weight: 700; letter-spacing: -.02em; margin: 10px 0 6px; color: #fff; }
 .hero .hm { color: #ffffffcc; margin-bottom: 14px; }
 .hero .btns { display: flex; gap: 8px; align-items: center; }
-.hero .btn.edit { background: #0007; color: #fff; border-color: #fff3; }
+.hero .btns .btn { background: #262b35; color: #fff; border-color: #fff3; }
+.hero .btns .btn:hover { background: #313845; }
+.hero .btns .btn:first-child { background: var(--acc); border-color: var(--acc); color: #fff; }
 .shelf h3 { font-size: 15px; font-weight: 600; margin: 0 0 10px; display: flex; gap: 10px; align-items: baseline; }
 .row2 { display: grid; grid-template-columns: repeat(auto-fill, minmax(clamp(200px, 17vw, 280px), 1fr)); gap: 16px; margin-bottom: 24px; }
 .row2 .tc { padding: 0; min-width: 0; }
@@ -220,8 +222,8 @@ html[data-theme="light"] .app .rail { background: var(--p1); }
 .ed-box { width: 100%; border: 0; border-radius: 0; background: var(--bg); }
 .ed-box .player-bar { padding: 10px 20px; border-bottom: 1px solid var(--ln2); background: var(--bg); }
 .ed-body { grid-template-columns: 280px minmax(0, 1fr) 320px; gap: 0; padding: 0; }
-.ed-export-btn { margin-left: auto; padding-inline: 22px; background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 700; }
-.ed-export-btn:hover:not(:disabled) { filter: brightness(1.1); }
+.ed-box .player-bar .btn.ed-export-btn { margin-left: auto; padding-inline: 22px; background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 700; }
+.ed-box .player-bar .btn.ed-export-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .ed-pop { position: absolute; top: 52px; right: 20px; z-index: 50; width: 340px; max-height: calc(100% - 70px); overflow-y: auto; padding: 14px 16px; background: var(--p1); border: 1px solid var(--ln2); border-radius: 12px; box-shadow: 0 18px 48px rgba(0,0,0,.55); }
 .ed-pop[hidden] { display: none; }
 .ed-pop h3 { margin: 0 0 10px; }
@@ -330,7 +332,9 @@ html:not([data-motion="reduce"]) .row2 .tc:nth-child(n+6) { animation-delay: .2s
 .titlebar { position: relative; z-index: 10000; height: var(--tb); display: flex; align-items: stretch; justify-content: space-between; background: #000; border-bottom: 1px solid var(--ln2); user-select: none; -webkit-user-select: none; }
 html[data-theme="light"] .titlebar { background: var(--p1); }
 .tb-brand { display: flex; align-items: center; gap: 9px; padding-left: 14px; color: var(--mu); font: 600 12px var(--mono, ui-monospace, Consolas, monospace); letter-spacing: .08em; text-transform: uppercase; flex: 1; }
-.tb-brand svg { width: 14px; height: 14px; color: var(--acc); pointer-events: none; }
+.tb-brand img { width: 18px; height: 18px; border-radius: 5px; pointer-events: none; }
+.logo { background: transparent !important; }
+.logo img { width: 40px; height: 40px; border-radius: 11px; display: block; }
 .tb-brand span { pointer-events: auto; }
 .tb-ctl { display: flex; }
 .tb-btn { width: 46px; border: 0; background: none; color: var(--mu); display: grid; place-items: center; cursor: pointer; border-radius: 0; padding: 0; min-height: 0; }
@@ -341,7 +345,6 @@ html[data-theme="light"] .titlebar { background: var(--p1); }
 .tb-btn .r2 { display: none; }
 #tb-max.on .r1 { display: none; }
 #tb-max.on .r2 { display: block; }
-.devtag { font: 700 9px/1 var(--mono, monospace); letter-spacing: .08em; color: var(--accent); padding: 6px 0 2px; text-align: center; opacity: .9; }
 
 /* ---- Appearance page: ported from design-lab2 (.sec/.set/.tc/.ac) ---- */
 .lsec { background: var(--p1); border: 1px solid var(--ln2); border-radius: var(--radius); margin-bottom: 20px; }

@@ -6,6 +6,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod toast;
 mod clip;
 mod ptt;
 mod hotkey;
@@ -218,7 +219,7 @@ fn end_session_file(recorder: &Arc<Recorder>, window: isize) {
                 sum.problem.as_ref().map(|p| format!("; stopped early: {p}")).unwrap_or_default()
             ));
             if let Some(p) = &sum.problem {
-                notify(window, "Session recording stopped", &format!("{p}. What was recorded is saved."), true);
+                notify(window, "Session recording stopped", &format!("{p}. Everything recorded so far is saved."), true);
             }
         }
     });
@@ -309,7 +310,13 @@ fn set_tooltip(window: HWND, text: &str) {
 }
 
 /// A Windows notification from the tray icon. Safe to call from any thread.
-fn notify(window: isize, title: &str, text: &str, warning: bool) {
+fn notify(_window: isize, title: &str, text: &str, warning: bool) {
+    toast::show(title, text, warning);
+}
+
+/// The old Windows balloon, kept for reference and as a fallback.
+#[allow(dead_code)]
+fn notify_balloon(window: isize, title: &str, text: &str, warning: bool) {
     let mut nid = tray_data(HWND(window as *mut _));
     nid.uFlags = NIF_INFO;
     nid.dwInfoFlags = (if warning { NIIF_WARNING } else { NIIF_INFO }) | NIIF_NOSOUND;
@@ -524,8 +531,8 @@ impl App {
             if taken.contains(&norm) {
                 notify(
                     self.window.0 as isize,
-                    "Archy: hotkey used twice",
-                    &format!("{text} is set for two Archy actions; only the first works. Pick another key for one of them."),
+                    "Two actions share one hotkey",
+                    &format!("{text} is set for two things, so only the first one works. Change one of them in Settings."),
                     true,
                 );
                 continue;
@@ -534,8 +541,8 @@ impl App {
             let Some(hk) = hotkey::parse(text) else {
                 notify(
                     self.window.0 as isize,
-                    "Archy: hotkey not recognized",
-                    &format!("\"{text}\" in settings.json"),
+                    "Hotkey not recognized",
+                    &format!("Archy doesn't know the key \"{text}\". Pick another one in Settings."),
                     true,
                 );
                 continue;
@@ -543,8 +550,8 @@ impl App {
             if unsafe { RegisterHotKey(Some(self.window), id, hk.modifiers, hk.vk) }.is_err() {
                 notify(
                     self.window.0 as isize,
-                    "Archy: hotkey unavailable",
-                    &format!("{text} is already used by another app. Pick another in settings."),
+                    "Hotkey already taken",
+                    &format!("Another app is using {text}. Pick a different key in Settings."),
                     true,
                 );
             }
@@ -610,7 +617,7 @@ impl App {
         self.settings_modified = modified;
         let (s, err) = Settings::load();
         if let Some(err) = err {
-            notify(self.window.0 as isize, "Archy settings", &err, true);
+            notify(self.window.0 as isize, "Settings not saved", &err, true);
             return;
         }
         let restart = recording_changed(&self.settings, &s);
@@ -674,7 +681,7 @@ impl App {
             let recent = self.voice_warned.get().is_some_and(|t| t.elapsed().as_secs() < 300);
             if !recent {
                 self.voice_warned.set(Some(std::time::Instant::now()));
-                notify(self.window.0 as isize, "Voice clipping paused", &format!("{why} Archy keeps retrying."), true);
+                notify(self.window.0 as isize, "Saying your clip phrase will not work right now", &format!("{why} Archy keeps trying. The hotkey still works."), true);
             }
             return;
         }
@@ -753,8 +760,8 @@ impl App {
         let other = if s.window_target { "Desktop Duplication" } else { "Windows capture" };
         notify(
             self.window.0 as isize,
-            "Clips look frozen?",
-            &format!("This game isn't sending a moving picture. If your clips look stuck, open Archy and switch the capture method (top bar) to {other}."),
+            "Clips may look frozen",
+            &format!("This game is not giving Archy a moving picture. If clips look stuck, open Archy and change Capture (top bar) to {other}."),
             true,
         );
     }
@@ -823,7 +830,7 @@ impl App {
                 self.fps_cap = Some((s.exe.clone(), 60));
                 notify(
                     self.window.0 as isize,
-                    "Recording at 60 fps",
+                    "Dropped to 60 fps",
                     &format!("Your graphics chip couldn't keep up with {fps} fps in this game, so Archy switched to 60 to keep clips smooth."),
                     true,
                 );
@@ -944,8 +951,8 @@ impl App {
             notify(
                 self.window.0 as isize,
                 "Mouse cursor may disappear",
-                "This game is in exclusive fullscreen. Windows can hide the cursor while \
-                 recording. Switch the game to Borderless / Windowed Fullscreen to fix it.",
+                "This game is in exclusive fullscreen, and Windows can hide the cursor in the recording. \
+                 Switch the game to Borderless or Windowed Fullscreen to fix it.",
                 true,
             );
         }
@@ -1079,8 +1086,8 @@ impl App {
                 if done.fps < self.settings.fps && !done.notes.is_empty() {
                     notify(
                         self.window.0 as isize,
-                        &format!("Recording at {} fps", done.fps),
-                        &format!("Your graphics chip couldn't record {} fps, so Archy uses {} for this game.", self.settings.fps, done.fps),
+                        &format!("Dropped to {} fps", done.fps),
+                        &format!("Your graphics chip could not keep up with {} fps in this game, so Archy records at {} fps here.", self.settings.fps, done.fps),
                         true,
                     );
                 }
@@ -1091,8 +1098,8 @@ impl App {
                     log("HDR is on for the game's screen: clips are recorded in SDR");
                     notify(
                         self.window.0 as isize,
-                        "HDR is on",
-                        "Clips are recorded in standard colour, so they can look a little washed out. For exact colours, turn HDR off in Windows display settings while you play.",
+                        "Clips may look washed out",
+                        "HDR is on, and Archy records in standard colour. For exact colours, turn HDR off in Windows display settings while you play.",
                         true,
                     );
                 }
@@ -1177,7 +1184,7 @@ impl App {
             log(&format!("recording {game} failed 3 times in 5 minutes ({why}); retrying in 5 minutes"));
             notify(
                 self.window.0 as isize,
-                &format!("Archy paused recording {game}"),
+                &format!("Paused recording {game}"),
                 &format!("It failed 3 times in a few minutes ({why}). Archy tries again in 5 minutes."),
                 true,
             );
@@ -1226,7 +1233,7 @@ impl App {
                         log(&format!("push-to-talk on ({})", self.settings.push_to_talk_key));
                         self.ptt = Some(p);
                     }
-                    None => notify(self.window.0 as isize, "Push-to-talk", &format!("\"{}\" isn't a key Archy knows.", self.settings.push_to_talk_key), true),
+                    None => notify(self.window.0 as isize, "Push-to-talk key not recognized", &format!("Archy does not know the key \"{}\". Pick another one in Settings.", self.settings.push_to_talk_key), true),
                 }
             }
             (Some(_), false) => {
@@ -1263,7 +1270,7 @@ impl App {
     /// The session pause hotkey: pauses / resumes writing the session file.
     fn pause_session(&mut self) {
         if !self.session.as_ref().is_some_and(|s| s.recorder.session_active()) {
-            notify(self.window.0 as isize, "Nothing to pause", "No session is recording. Start one with the session key first.", true);
+            notify(self.window.0 as isize, "No session to pause", "Start a session with the session hotkey first.", true);
             return;
         }
         self.session_paused = !self.session_paused;
@@ -1287,7 +1294,7 @@ impl App {
     fn screenshot(&self) {
         let window = self.window.0 as isize;
         let Some(s) = &self.session else {
-            notify(window, "No screenshot", "Archy takes screenshots of the game it's recording.", true);
+            notify(window, "Nothing to screenshot", "Open a game that Archy is recording, then try again.", true);
             return;
         };
         if self.settings.sound_on_hotkey {
@@ -1306,7 +1313,7 @@ impl App {
                     log(&format!("screenshot {} ({} ms)", p.display(), t.elapsed().as_millis()));
                     let copied = copy && archy_core::clipboard::copy_file(&p);
                     if show {
-                        notify(window, "Screenshot saved", if copied { "Copied, paste it anywhere" } else { "In your clips folder" }, false);
+                        notify(window, "Screenshot saved", if copied { "Copied to your clipboard. Paste it anywhere." } else { "Saved in your clips folder." }, false);
                     }
                 }
                 Err(e) => {
@@ -1345,11 +1352,11 @@ impl App {
         }
         if parts.is_empty() {
             let why = if self.paused {
-                "Archy is paused."
+                "Archy is paused, so nothing is being recorded."
             } else {
-                "Archy records while a game is open."
+                "Archy only records while a game is open."
             };
-            notify(window, "No clip saved", why, true);
+            notify(window, "Nothing to save yet", why, true);
             return;
         }
         let folder = self.settings.save_folder.clone();
@@ -1429,15 +1436,15 @@ impl App {
                             String::new()
                         };
                         if saved.len() > 1 {
-                            extra.push_str(" · plus the part before Archy restarted recording");
+                            extra.push_str(" · includes the part before Archy restarted");
                         }
                         if mb > 10.0 {
-                            extra.push_str(" · over Discord's 10 MB: use Discord copy in Archy");
+                            extra.push_str(" · too big for Discord (10 MB): open it in Archy and use Compress and copy");
                         }
                         notify(
                             window,
-                            &format!("Clip saved · last {:.0} s", c.seconds),
-                            &format!("{mb:.1} MB{extra}"),
+                            "Clip saved",
+                            &format!("Last {:.0} seconds · {mb:.1} MB{extra}", c.seconds),
                             false,
                         );
                     }
@@ -1954,6 +1961,13 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--voice-calibrate") {
         voice::calibrate_main(&args[1..]);
+        return;
+    }
+    // `archy --toast "Title" "text" [warn]`: shows one notification card (for checking its look).
+    if args.first().map(String::as_str) == Some("--toast") {
+        unsafe { let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2); }
+        toast::show(args.get(1).map_or("Clip saved", |s| s), args.get(2).map_or("", |s| s), args.get(3).is_some());
+        std::thread::sleep(std::time::Duration::from_secs(7));
         return;
     }
     if args.first().map(String::as_str) == Some("--captions") {

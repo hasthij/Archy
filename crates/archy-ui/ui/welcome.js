@@ -112,7 +112,6 @@
     if (i >= TOUR.length) { finish(); return; }
     if (i < 0) { clearSpot(); step = 2; show(); return; }
     const t = TOUR[i];
-    if (i === 0) show_("clips");
     const target = document.querySelector(t.target);
     const r = target.getBoundingClientRect();
     if (!tour?.tip.isConnected) {
@@ -177,5 +176,6 @@
       else if (e.key === "ArrowLeft") startTour(tour.i - 1, -1);
     } else if (e.key === "Escape" && $("#welcome") && !paused) close(true);
   });
-  addEventListener("resize", () => { if (tour?.tip.isConnected) startTour(tour.i); });
+  let rt = 0;
+  addEventListener("resize", () => { if (tour?.tip.isConnected) { clearTimeout(rt); rt = setTimeout(() => startTour(tour.i), 120); } });
 })();
