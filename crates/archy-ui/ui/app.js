@@ -325,9 +325,14 @@ function renderFilters() {
 }
 
 // Game's real app icon when Archy has one saved; otherwise a gradient monogram tile.
+const gameIcons = new Map(); // name -> icon url, or null when there is none
 function gameIco(name) {
   const g = GR[gIdx(name)];
-  return el("i", { class: "gmono", style: `background:linear-gradient(135deg,${g[0]},${g[1]})`, text: (name.trim()[0] || "?").toUpperCase() });
+  const tile = el("i", { class: "gmono", style: `background:linear-gradient(135deg,${g[0]},${g[1]})`, text: (name.trim()[0] || "?").toUpperCase() });
+  const show = (u) => { tile.textContent = ""; tile.style.background = "none"; tile.append(el("img", { src: u, alt: "", draggable: "false" })); };
+  if (gameIcons.get(name)) show(gameIcons.get(name));
+  else if (!gameIcons.has(name)) invoke("game_icon", { name }).then((u) => { gameIcons.set(name, u || null); if (u) show(u); }).catch(() => gameIcons.set(name, null));
+  return tile;
 }
 
 /// Clip cards by clip + size + featured, reused across renders.
@@ -591,7 +596,7 @@ $("#clip-search").addEventListener("input", (e) => { search = e.target.value; re
 
 /// A screenshot in the library: the picture is its own thumbnail.
 const ICON_D = {'copy': 'M9 9h10v10H9zM5 15V5h10', 'edit': 'M6 6a2.5 2.5 0 1 0 0 .01M6 18a2.5 2.5 0 1 0 0 .01M8 7.5L20 18M8 16.5L20 6',
-  'pencil': 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4', 'gif': 'M4 5h16v14H4zM8 15l3-4 3 3 2-2 2 3', 'folder': 'M3 7h6l2 2h10v10H3z', 'trash': 'M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13', 'discord': 'M12 4v11M7 10l5 5 5-5M5 20h14', 'compress': 'M12 4v11M7 10l5 5 5-5M5 20h14', 'rename': 'M9 4h6M9 20h6M12 4v16M16 9h4v6h-4'};
+  'pencil': 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4', 'gif': 'M4 5h16v14H4zM8 15l3-4 3 3 2-2 2 3', 'folder': 'M3 7h6l2 2h10v10H3z', 'trash': 'M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13', 'discord': 'M12 4v11M7 10l5 5 5-5M5 20h14', 'compress': 'M12 4v11M7 10l5 5 5-5M5 20h14', 'rename': 'M9 4h6M9 20h6M12 4v16M16 9h4v6h-4', 'star': 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z'};
 // Turns a text button into icon + label; CSS shows one of them (Appearance > Clip buttons).
 function iconize(btn, key) {
   const t = btn.textContent;
@@ -652,6 +657,17 @@ function closeCtx() { ctxMenu?.remove(); ctxMenu = null; }
 document.addEventListener("click", closeCtx);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCtx(); });
 window.addEventListener("blur", closeCtx);
+/// Sends a clip to the Recycle Bin (recoverable from there).
+async function deleteClip(c) {
+  try { await invoke("recycle_clip", { path: c.path }); toast(`Deleted ${c.name}. It is in the Recycle Bin`); loadClips(); } catch (x) { toast(String(x)); }
+}
+// Delete key on the clip under the mouse or keyboard focus.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Delete" || e.target.closest?.("input,textarea,select") || window.editorOpen?.()) return;
+  const card = document.querySelector(".tc:focus-within, .tc:hover, .lrow:hover, .lrow:focus-within");
+  const c = card && clips.find((x) => x.path === card.dataset.path);
+  if (c) { e.preventDefault(); deleteClip(c); }
+});
 function clipMenu(e, card, c) {
   e.preventDefault();
   closeCtx();
@@ -661,7 +677,8 @@ function clipMenu(e, card, c) {
     item("rename", "Rename", () => nameEl?.dispatchEvent(new Event("rename"))),
     c.kind === "shot" ? null : item("edit", "Edit", () => openEditor(c)),
     item("folder", "Show in folder", () => invoke("reveal_clip", { path: c.path }).catch((x) => toast(String(x)))),
-    item("trash", "Move to Recycle Bin", async () => { try { await invoke("recycle_clip", { path: c.path }); toast("Moved to Recycle Bin"); loadClips(); } catch (x) { toast(String(x)); } }));
+    item("star", stars.has(c.path) ? "Unstar" : "Star", () => toggleStar(c)),
+    (() => { const b = item("trash", "Delete (Recycle Bin)", () => deleteClip(c)); b.classList.add("danger"); return b; })());
   document.body.append(ctxMenu);
   const r = ctxMenu.getBoundingClientRect();
   ctxMenu.style.left = Math.max(4, Math.min(e.clientX, innerWidth - r.width - 4)) + "px";
@@ -2421,9 +2438,10 @@ function renderSounds() {
 (function typer() {
   const out = document.getElementById("typer-text");
   if (!out) return;
-  const Q = ["archy clip that", "holy clip", "that was INSANE. clip it.", "clip that. clip that NOW.", "no way that just happened",
-    "your best plays, saved locally", "press the hotkey, thank yourself later", "zero lag, all clips", "ctrl+shift+C and chill",
-    "was that a world record? clipped.", "the replay buffer never blinks", "gg. clipped.", "everything stays on this PC", "one more clip..."];
+  const Q = ["Archy, clip that.", "Holy clip!", "That was INSANE. Clip it.", "Clip that. Clip that NOW.", "No way that just happened!",
+    "Your best plays, saved locally.", "Press the hotkey, thank yourself later.", "Zero lag, all clips.", "Ctrl+Shift+C, and chill.",
+    "Was that a world record? Clipped.", "The replay buffer never blinks.", "GG. Clipped.", "Everything stays on this PC.", "One more clip…"];
+  const quote = (s) => (s ? `“${s}”` : "");
   let last = -1, i = 0, text = "", dir = 1, wait = 0;
   const pick = () => { let n; do n = Math.floor(Math.random() * Q.length); while (n === last); last = n; text = Q[n]; i = 0; dir = 1; };
   pick();
@@ -2431,11 +2449,24 @@ function renderSounds() {
   (function tick() {
     const home = view === "home" && !document.hidden;
     if (!home) { setTimeout(tick, 600); return; }
-    if (rm()) { out.textContent = text; setTimeout(() => { pick(); tick(); }, 4000); return; }
+    if (rm()) { out.textContent = quote(text); setTimeout(() => { pick(); tick(); }, 4000); return; }
     if (wait > 0) { wait--; setTimeout(tick, 60); return; }
-    i += dir; out.textContent = text.slice(0, i);
+    i += dir; out.textContent = quote(text.slice(0, i));
     if (dir === 1 && i >= text.length) { dir = -1; wait = 35; }
     else if (dir === -1 && i <= 0) { pick(); wait = 6; }
     setTimeout(tick, dir === 1 ? 55 + Math.random() * 50 : 22);
   })();
+})();
+
+// ---------- Custom title bar buttons ----------
+(function titlebar() {
+  const win = tauri?.window?.getCurrentWindow?.();
+  const min = document.getElementById("tb-min"), max = document.getElementById("tb-max"), close = document.getElementById("tb-close");
+  if (!win || !min) return;
+  min.onclick = () => win.minimize();
+  max.onclick = () => win.toggleMaximize();
+  close.onclick = () => win.close();
+  const sync = () => win.isMaximized().then((m) => { max.classList.toggle("on", m); max.title = max.ariaLabel = m ? "Restore" : "Maximize"; }).catch(() => {});
+  window.addEventListener("resize", sync);
+  sync();
 })();

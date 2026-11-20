@@ -559,7 +559,7 @@ fn captions(args: &[String]) -> Result<(), String> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;
     use windows::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS};
-    let [ffmpeg, clip, track, start, len, whisper, seg, emb] = args else {
+    let [ffmpeg, clip, track, start, len, whisper, seg, emb, rest @ ..] = args else {
         return Err("captions: wrong arguments".into());
     };
     unsafe {
@@ -568,17 +568,41 @@ fn captions(args: &[String]) -> Result<(), String> {
     let dir = archy_voice::find_dir().ok_or("the speech engine files are missing (reinstall Archy to get them)")?;
     let start: f32 = start.parse().map_err(|_| "captions: bad start")?;
     emit(serde_json::json!({ "step": "progress", "frac": 0.0, "stage": "Reading the audio" }));
-    let mut child = std::process::Command::new(ffmpeg)
-        .args(["-v", "error", "-ss", start.to_string().as_str(), "-t", len, "-i", clip, "-map", &format!("0:a:{track}"), "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(0x0800_0000)
-        .spawn()
-        .map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
-    let mut bytes = Vec::new();
-    child.stdout.take().ok_or("no audio from ffmpeg")?.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    let _ = child.wait();
-    let samples: Vec<f32> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    // `track` is a list of choices split by '|', best first. Each choice is audio track numbers joined by ',' (mixed).
+    // A choice that turns out silent (a muted mic, an empty Discord track) is skipped for the next one.
+    let decode = |spec: &str, norm: bool| -> Result<Vec<f32>, String> {
+        let ids: Vec<&str> = spec.split(',').filter(|t| !t.is_empty()).collect();
+        let mut cmd = std::process::Command::new(ffmpeg);
+        cmd.args(["-v", "error", "-ss", start.to_string().as_str(), "-t", len, "-i", clip]);
+        let tail = if norm { ",dynaudnorm=f=150:g=15:p=0.9" } else { "" };
+        if ids.len() > 1 {
+            let ins: String = ids.iter().map(|t| format!("[0:a:{t}]")).collect();
+            cmd.args(["-filter_complex", &format!("{ins}amix=inputs={}:normalize=0{tail}[a]", ids.len()), "-map", "[a]"]);
+        } else {
+            cmd.args(["-map", &format!("0:a:{}", ids.first().copied().unwrap_or("0"))]);
+            if norm { cmd.args(["-af", "dynaudnorm=f=150:g=15:p=0.9"]); }
+        }
+        let mut child = cmd
+            .args(["-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
+        let mut bytes = Vec::new();
+        child.stdout.take().ok_or("no audio from ffmpeg")?.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        let _ = child.wait();
+        Ok(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
+    };
+    let mut samples: Vec<f32> = Vec::new();
+    for spec in track.split('|') {
+        let raw = decode(spec, false)?;
+        let rms = (raw.iter().map(|v| v * v).sum::<f32>() / raw.len().max(1) as f32).sqrt();
+        if raw.len() >= 16_000 / 3 && rms > 0.002 {
+            samples = decode(spec, true)?;
+            break;
+        }
+    }
     if samples.len() < 16_000 / 3 {
         return Err("this clip has no sound to caption".into());
     }
@@ -588,6 +612,7 @@ fn captions(args: &[String]) -> Result<(), String> {
         whisper_dir: std::path::Path::new(whisper),
         segmentation: seg.as_deref().filter(|_| emb.is_some()),
         embedding: emb.as_deref().filter(|_| seg.is_some()),
+        people: rest.first().and_then(|v| v.parse().ok()).unwrap_or(0),
     };
     let mut last = -1.0_f32;
     let lines = archy_voice::captions::generate(&dir, &models, &samples, 2, &mut |p| {

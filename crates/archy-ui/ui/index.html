@@ -49,6 +49,17 @@ html[data-motion="reduce"] #splash .name span,html[data-motion="reduce"] #splash
     <div class="tip">Everything stays on this PC</div>
   </div>
 </div>
+<header class="titlebar" data-tauri-drag-region>
+  <div class="tb-brand" data-tauri-drag-region>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 L21 20 H3 Z" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round"/></svg>
+    <span data-tauri-drag-region>Archy</span>
+  </div>
+  <div class="tb-ctl">
+    <button class="tb-btn" id="tb-min" aria-label="Minimize" title="Minimize"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 5h8"/></svg></button>
+    <button class="tb-btn" id="tb-max" aria-label="Maximize" title="Maximize"><svg viewBox="0 0 10 10" aria-hidden="true"><rect class="r1" x="1.5" y="1.5" width="7" height="7"/><path class="r2" d="M3 1.5V1h6v6h-.5M1.5 3h5.5v5.5H1.5z"/></svg></button>
+    <button class="tb-btn tb-close" id="tb-close" aria-label="Close" title="Close"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg></button>
+  </div>
+</header>
 <div class="app">
   <nav class="rail" aria-label="Main">
     <div class="logo" aria-hidden="true">

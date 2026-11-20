@@ -972,6 +972,8 @@ impl App {
             Target::Window(fg.hwnd)
         };
         let game = watch::game_name(&fg.exe);
+        // Save the game's real icon under its clip name, for the clip list in the app.
+        archy_audio::cache_icon(&archy_core::settings::app_dir().join("icons"), &game, fg.pid);
         // Fallbacks, in order: some hardware encoders (or their drivers) refuse
         // 120/144 fps, so try 60 on the same window; some refuse sizes above
         // 1080p; some games can't be captured as a window at all (exclusive

@@ -905,6 +905,26 @@ fn app_icon(name: String) -> Option<String> {
     icon_url(archy_audio::cached_icon(&archy_core::settings::app_dir().join("icons"), &name))
 }
 
+/// A game's icon by its clip name: the one saved when it was recorded, else from the game if it is open now.
+#[tauri::command]
+async fn game_icon(name: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = archy_core::settings::app_dir().join("icons");
+        if let Some(b) = archy_audio::cached_icon(&dir, &name) {
+            return icon_url(Some(b));
+        }
+        let key: String = name.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+        if key.len() < 3 {
+            return None;
+        }
+        let pid = archy_audio::find_process_matching(&key)?;
+        icon_url(archy_audio::cache_icon(&dir, &name, pid))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Starts the tray recorder if it isn't running.
 #[tauri::command]
 fn start_recorder() -> Result<(), String> {
@@ -1049,7 +1069,7 @@ async fn voice_child(
 fn captions_status() -> serde_json::Value {
     serde_json::json!({
         "engine": captions::engine_present(),
-        "tiny": captions::installed("tiny"), "base": captions::installed("base"), "small": captions::installed("small"),
+        "tiny": captions::installed("tiny"), "base": captions::installed("base"), "small": captions::installed("small"), "parakeet": captions::installed("parakeet"),
         "speakers": captions::installed("speaker_seg") && captions::installed("speaker_emb"),
         "mb": { "tiny": 100, "base": 200, "small": 600, "speakers": 45 },
     })
@@ -1088,11 +1108,12 @@ fn captions_cancel() {
 #[tauri::command]
 async fn captions_generate(
     clip: String,
-    track: u32,
+    track: String,
     start: f64,
     len: f64,
     model: String,
     speakers: bool,
+    people: Option<u32>,
     progress: tauri::ipc::Channel<serde_json::Value>,
 ) -> Result<(), String> {
     if get_status().state == "recording" {
@@ -1102,8 +1123,8 @@ async fn captions_generate(
     let (seg, emb) = if speakers { captions::speaker_models().map(|(a, b)| (a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned())).unwrap_or(("-".into(), "-".into())) } else { ("-".into(), "-".into()) };
     let ffmpeg = editor::tools_dir().ok_or("The video tools aren't installed. Update or reinstall Archy.")?.join("ffmpeg.exe");
     let args = vec![
-        "--captions".to_string(), ffmpeg.to_string_lossy().into_owned(), clip, track.to_string(),
-        format!("{start:.3}"), format!("{len:.3}"), whisper.to_string_lossy().into_owned(), seg, emb,
+        "--captions".to_string(), ffmpeg.to_string_lossy().into_owned(), clip, track,
+        format!("{start:.3}"), format!("{len:.3}"), whisper.to_string_lossy().into_owned(), seg, emb, people.unwrap_or(0).to_string(),
     ];
     voice_child(args, progress, "the caption job").await
 }
@@ -1189,6 +1210,7 @@ fn main() {
             audio_devices,
             playing_apps,
             app_icon,
+            game_icon,
             running_apps,
             start_recorder,
             calibrate_voice,

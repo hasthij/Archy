@@ -38,7 +38,7 @@ struct RecognizerConfig {
     feat: Feature, model: OfflineModel, lm: Lm, decoding_method: P, max_active_paths: i32,
     hotwords_file: P, hotwords_score: f32, rule_fsts: P, rule_fars: P, blank_penalty: f32, hr: Homophone,
 }
-#[repr(C)] struct RecResult { text: P }
+#[repr(C)] struct RecResult { text: P, timestamps: *const f32, count: i32, tokens: P, tokens_arr: *const P }
 
 #[repr(C)] struct Pyannote { model: P, window_shift_ratio: f32 }
 #[repr(C)] struct Segmentation { pyannote: Pyannote, num_threads: i32, debug: i32, provider: P }
@@ -118,6 +118,8 @@ pub struct Models<'a> {
     pub whisper_dir: &'a Path,
     pub segmentation: Option<&'a Path>,
     pub embedding: Option<&'a Path>,
+    /// How many people talk, when the user knows; 0 = work it out.
+    pub people: i32,
 }
 
 fn cstr(p: &Path) -> CString {
@@ -161,7 +163,7 @@ pub fn generate(dll_dir: &Path, m: &Models, samples: &[f32], threads: i32, progr
         let cfg = DiarConfig {
             segmentation: Segmentation { pyannote: Pyannote { model: seg_c.as_ptr(), window_shift_ratio: 0.0 }, num_threads: threads, debug: 0, provider: cpu.as_ptr() },
             embedding: Embedding { model: emb_c.as_ptr(), num_threads: threads, debug: 0, provider: cpu.as_ptr() },
-            clustering: Clustering { num_clusters: -1, threshold: std::env::var("ARCHY_SPK_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0), compute_confidence: 0 },
+            clustering: Clustering { num_clusters: if m.people > 0 { m.people } else { -1 }, threshold: std::env::var("ARCHY_SPK_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0), compute_confidence: 0 },
             min_on: 0.3,
             min_off: 0.5,
         };
@@ -211,14 +213,22 @@ pub fn generate(dll_dir: &Path, m: &Models, samples: &[f32], threads: i32, progr
     }
 
     // 2. What was said.
-    let encoder = pick(m.whisper_dir, "encoder", ".onnx").ok_or("the Whisper encoder file is missing")?;
-    let decoder = pick(m.whisper_dir, "decoder", ".onnx").ok_or("the Whisper decoder file is missing")?;
-    let tokens = pick(m.whisper_dir, "tokens", ".txt").ok_or("the Whisper tokens file is missing")?;
-    let (enc_c, dec_c, tok_c) = (cstr(&encoder), cstr(&decoder), cstr(&tokens));
+    let encoder = pick(m.whisper_dir, "encoder", ".onnx").ok_or("the model's encoder file is missing")?;
+    let decoder = pick(m.whisper_dir, "decoder", ".onnx").ok_or("the model's decoder file is missing")?;
+    let tokens = pick(m.whisper_dir, "tokens", ".txt").ok_or("the model's tokens file is missing")?;
+    // A folder with a joiner is a Parakeet (transducer) model; otherwise it's Whisper.
+    let joiner = pick(m.whisper_dir, "joiner", ".onnx");
+    let (enc_c, dec_c, tok_c, join_c) = (cstr(&encoder), cstr(&decoder), cstr(&tokens), joiner.as_deref().map(cstr));
     let (lang, task, cpu, greedy) = (CString::new("en").unwrap(), CString::new("transcribe").unwrap(), CString::new("cpu").unwrap(), CString::new("greedy_search").unwrap());
+    let nemo = CString::new("nemo_transducer").unwrap();
     let mut cfg: RecognizerConfig = unsafe { std::mem::zeroed() };
     cfg.feat = Feature { sample_rate: 16_000, feature_dim: 80 };
-    cfg.model.whisper = Whisper { encoder: enc_c.as_ptr(), decoder: dec_c.as_ptr(), language: lang.as_ptr(), task: task.as_ptr(), tail_paddings: -1, token_ts: 0, segment_ts: 0 };
+    if let Some(j) = &join_c {
+        cfg.model.transducer = Transducer { encoder: enc_c.as_ptr(), decoder: dec_c.as_ptr(), joiner: j.as_ptr() };
+        cfg.model.model_type = nemo.as_ptr();
+    } else {
+        cfg.model.whisper = Whisper { encoder: enc_c.as_ptr(), decoder: dec_c.as_ptr(), language: lang.as_ptr(), task: task.as_ptr(), tail_paddings: -1, token_ts: 0, segment_ts: 0 };
+    }
     cfg.model.tokens = tok_c.as_ptr();
     cfg.model.num_threads = threads;
     cfg.model.provider = cpu.as_ptr();
@@ -247,7 +257,23 @@ pub fn generate(dll_dir: &Path, m: &Models, samples: &[f32], threads: i32, progr
                 let text = unsafe { (*res).text };
                 if !text.is_null() {
                     let t = unsafe { CStr::from_ptr(text) }.to_string_lossy().trim().to_string();
-                    lines.extend(split_lines(&t, s, e, spk));
+                    // Real per-word times when the model reports them (Parakeet); otherwise spread evenly.
+                    let r = unsafe { &*res };
+                    let mut timed = Vec::new();
+                    if !r.timestamps.is_null() && !r.tokens_arr.is_null() && r.count > 0 && !is_noise(&t) {
+                        let n = r.count as usize;
+                        for i in 0..n {
+                            let tok = unsafe { CStr::from_ptr(*r.tokens_arr.add(i)) }.to_string_lossy().into_owned();
+                            let ts = s + unsafe { *r.timestamps.add(i) };
+                            if tok.starts_with(['\u{2581}', ' ']) || timed.is_empty() {
+                                timed.push((ts, ts, tok.trim_start_matches(['\u{2581}', ' ']).to_string()));
+                            } else if let Some(w) = timed.last_mut() {
+                                w.1 = ts;
+                                w.2.push_str(&tok);
+                            }
+                        }
+                    }
+                    if timed.is_empty() { lines.extend(split_lines(&t, s, e, spk)); } else { lines.extend(lines_from_words(timed, e, spk)); }
                 }
                 unsafe { (api.destroy_result)(res) };
             }
@@ -277,6 +303,41 @@ fn is_noise(t: &str) -> bool {
     let t = t.trim();
     let bracketed = matches!(t.chars().next(), Some('[' | '(' | '*')) && matches!(t.chars().last(), Some(']' | ')' | '*'));
     t.is_empty() || (bracketed && t.len() < 40)
+}
+
+/// Readable lines from words with their own start times: a line breaks at a sentence end, a pause or ~7 words.
+fn lines_from_words(mut words: Vec<(f32, f32, String)>, limit: f32, speaker: i32) -> Vec<Line> {
+    words.retain(|w| w.2.chars().any(|c| c.is_alphanumeric()));
+    let n = words.len();
+    // A word lasts until its last piece plus a short tail, or until the next word starts.
+    for i in 0..n {
+        let next = if i + 1 < n { words[i + 1].0 } else { limit };
+        words[i].1 = (words[i].1 + 0.3).min(next).max(words[i].0 + 0.08);
+    }
+    let mut out: Vec<Line> = Vec::new();
+    let mut cur: Option<Line> = None;
+    let mut count = 0;
+    let flush = |out: &mut Vec<Line>, cur: &mut Option<Line>, count: &mut i32| {
+        if let Some(l) = cur.take() { out.push(l); }
+        *count = 0;
+    };
+    for (i, (st, en, w)) in words.iter().enumerate() {
+        if let Some(l) = &cur {
+            if count >= 7 || l.text.len() + w.len() > 42 || *st - l.end > 0.7 {
+                flush(&mut out, &mut cur, &mut count);
+            }
+        }
+        match &mut cur {
+            Some(l) => { l.text.push(' '); l.text.push_str(w); l.end = *en; }
+            None => cur = Some(Line { start: *st, end: *en, text: w.clone(), speaker }),
+        }
+        count += 1;
+        if w.ends_with(['.', '?', '!']) && count >= 3 && i + 1 < n {
+            flush(&mut out, &mut cur, &mut count);
+        }
+    }
+    flush(&mut out, &mut cur, &mut count);
+    out
 }
 
 /// Cuts one spoken stretch into readable lines (about 7 words), timed in proportion to their length.

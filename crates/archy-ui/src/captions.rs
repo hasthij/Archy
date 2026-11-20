@@ -21,10 +21,11 @@ pub struct Item {
     pub mb: u32,
 }
 
-pub const ITEMS: [Item; 5] = [
+pub const ITEMS: [Item; 6] = [
     Item { id: "tiny", dir: "sherpa-onnx-whisper-tiny.en", url: "asr-models/sherpa-onnx-whisper-tiny.en.tar.bz2", single_file: false, mb: 118 },
     Item { id: "base", dir: "sherpa-onnx-whisper-base.en", url: "asr-models/sherpa-onnx-whisper-base.en.tar.bz2", single_file: false, mb: 200 },
     Item { id: "small", dir: "sherpa-onnx-whisper-small.en", url: "asr-models/sherpa-onnx-whisper-small.en.tar.bz2", single_file: false, mb: 600 },
+    Item { id: "parakeet", dir: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", url: "asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2", single_file: false, mb: 482 },
     Item { id: "speaker_seg", dir: "sherpa-onnx-pyannote-segmentation-3-0", url: "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2", single_file: false, mb: 7 },
     Item { id: "speaker_emb", dir: "speakers", url: "speaker-recongition-models/nemo_en_titanet_small.onnx", single_file: true, mb: 40 },
 ];
@@ -46,7 +47,14 @@ fn has_onnx(dir: &std::path::Path) -> bool {
 }
 
 pub fn installed(id: &str) -> bool {
-    item(id).is_some_and(|i| has_onnx(&root().join(i.dir)))
+    let Some(i) = item(id) else { return false };
+    let d = root().join(i.dir);
+    // A Whisper model is only usable with encoder, decoder and tokens all unpacked (a half-extracted one isn't).
+    if matches!(id, "tiny" | "base" | "small" | "parakeet") {
+        let has = |part: &str| std::fs::read_dir(&d).map(|r| r.flatten().any(|e| e.file_name().to_string_lossy().contains(part))).unwrap_or(false);
+        return has("encoder") && has("decoder") && has("tokens");
+    }
+    has_onnx(&d)
 }
 
 /// The speech engine (sherpa DLL) is installed with Archy; captions can't run without it.
@@ -58,9 +66,8 @@ pub fn engine_present() -> bool {
 }
 
 pub fn whisper_dir(model: &str) -> Option<PathBuf> {
-    let i = item(model).filter(|i| i.id == "tiny" || i.id == "base" || i.id == "small")?;
-    let d = root().join(i.dir);
-    has_onnx(&d).then_some(d)
+    let i = item(model).filter(|i| matches!(i.id, "tiny" | "base" | "small" | "parakeet"))?;
+    installed(model).then(|| root().join(i.dir))
 }
 
 /// (segmentation model, embedding model) when both are installed.

@@ -318,7 +318,23 @@ html:not([data-motion="reduce"]) .row2 .tc:nth-child(5) { animation-delay: .16s;
 html:not([data-motion="reduce"]) .row2 .tc:nth-child(n+6) { animation-delay: .2s; }
 
 /* Zoom-safe height: root zoom scales vh, so divide it back out or the window overflows the screen */
-.app { height: calc(100vh / var(--z, 1)); max-height: calc(100vh / var(--z, 1)); overflow: hidden; }
+.app { height: calc(100vh / var(--z, 1) - var(--tb)); max-height: calc(100vh / var(--z, 1) - var(--tb)); overflow: hidden; }
+/* Custom title bar (the OS frame is off): matches the rail, drag anywhere on it. */
+:root { --tb: 34px; }
+.titlebar { position: relative; z-index: 10000; height: var(--tb); display: flex; align-items: stretch; justify-content: space-between; background: #000; border-bottom: 1px solid var(--ln2); user-select: none; -webkit-user-select: none; }
+html[data-theme="light"] .titlebar { background: var(--p1); }
+.tb-brand { display: flex; align-items: center; gap: 9px; padding-left: 14px; color: var(--mu); font: 600 12px var(--mono, ui-monospace, Consolas, monospace); letter-spacing: .08em; text-transform: uppercase; flex: 1; }
+.tb-brand svg { width: 14px; height: 14px; color: var(--acc); pointer-events: none; }
+.tb-brand span { pointer-events: auto; }
+.tb-ctl { display: flex; }
+.tb-btn { width: 46px; border: 0; background: none; color: var(--mu); display: grid; place-items: center; cursor: pointer; border-radius: 0; padding: 0; min-height: 0; }
+.tb-btn svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.1; }
+.tb-btn:hover { background: var(--hov); color: var(--tx); }
+.tb-btn:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
+.tb-close:hover { background: #e5484d; color: #fff; }
+.tb-btn .r2 { display: none; }
+#tb-max.on .r1 { display: none; }
+#tb-max.on .r2 { display: block; }
 .devtag { font: 700 9px/1 var(--mono, monospace); letter-spacing: .08em; color: var(--accent); padding: 6px 0 2px; text-align: center; opacity: .9; }
 
 /* ---- Appearance page: ported from design-lab2 (.sec/.set/.tc/.ac) ---- */
@@ -432,3 +448,19 @@ html:root[data-theme="dark"][data-oled="1"] {
 .cap-opt .ed-progress i { display: block; height: 100%; width: 0; background: var(--acc); transition: width .3s; }
 .cap-spk { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--ln2); background: var(--p1); }
 .cap-spk .ed-lane-title { width: 100%; }
+.ed-lane-clear { width: 20px; height: 20px; margin-left: 4px; padding: 0; display: inline-grid; place-items: center; border: 0; border-radius: var(--radius, 0); background: none; color: var(--mu); cursor: pointer; vertical-align: middle; }
+.ed-lane-clear svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.ed-lane-clear:hover { background: #e5484d33; color: #ff6b6b; }
+.cap-list { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow-y: auto; margin: 6px 0 8px; padding-right: 2px; }
+.cap-row { display: grid; gap: 4px; padding: 6px; border: 1px solid var(--ln2); background: var(--surface-2); }
+.cap-row.on { border-color: var(--acc); }
+.cap-go { justify-self: start; border: 0; background: none; color: var(--acc); font: 600 11px var(--mono, monospace); cursor: pointer; padding: 0; }
+.cap-text { width: 100%; resize: none; overflow: hidden; background: var(--bg); color: var(--tx); border: 1px solid var(--ln2); padding: 5px 7px; font: 13px/1.35 var(--font); box-sizing: border-box; }
+.cap-text:focus { outline: 2px solid var(--acc); outline-offset: -1px; }
+.cap-times { display: flex; align-items: center; gap: 6px; color: var(--mu); font-size: 11px; }
+.cap-t { width: 58px; padding: 3px 5px; min-height: 0; }
+.cap-del { margin-left: auto; width: 24px; height: 24px; display: grid; place-items: center; padding: 0; border: 0; background: none; color: var(--mu); cursor: pointer; }
+.cap-del svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.cap-del:hover { background: #e5484d33; color: #ff6b6b; }
+.ctx-item.danger, .ctx-item.danger svg { color: #ff6b6b; }
+.tree .nav i.gmono img { width: 100%; height: 100%; object-fit: contain; display: block; border-radius: inherit; }

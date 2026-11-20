@@ -102,6 +102,23 @@ pub fn playing_apps(idle: bool) -> Vec<(u32, String)> {
     out
 }
 
+/// A running process whose exe name (letters and digits, lower case) contains ; the root of its tree.
+pub fn find_process_matching(key: &str) -> Option<u32> {
+    let procs = snapshot();
+    let norm = |n: &str| n.trim_end_matches(".exe").to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+    let hit = procs.iter().find(|p| norm(&p.2).contains(key))?;
+    let mut root = hit.0;
+    let mut parent = hit.1;
+    while let Some(pp) = procs.iter().find(|p| p.0 == parent) {
+        if !pp.2.eq_ignore_ascii_case(&hit.2) {
+            break;
+        }
+        root = pp.0;
+        parent = pp.1;
+    }
+    Some(root)
+}
+
 fn snapshot() -> Vec<(u32, u32, String)> {
     let mut procs = Vec::new();
     unsafe {

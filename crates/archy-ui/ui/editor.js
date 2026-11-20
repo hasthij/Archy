@@ -14,6 +14,10 @@
 const FONTS = [
   ["Segoe UI", "Clean"], ["Impact", "Meme"], ["Bahnschrift", "Gamer"], ["Arial Black", "Bold"],
   ["Comic Sans MS", "Fun"], ["Georgia", "Classy"], ["Segoe Script", "Handwritten"], ["Consolas", "Code"],
+  ["Segoe UI Black", "Heavy"], ["Trebuchet MS", "Friendly"], ["Verdana", "Wide"], ["Tahoma", "Compact"],
+  ["Calibri", "Soft"], ["Cambria", "Book"], ["Times New Roman", "Serif"], ["Palatino Linotype", "Elegant"],
+  ["Courier New", "Typewriter"], ["Lucida Console", "Terminal"], ["Franklin Gothic Medium", "News"], ["Ink Free", "Marker"],
+  ["Segoe Print", "Pen"], ["Gabriola", "Fancy"], ["Candara", "Light"], ["Constantia", "Warm"],
 ];
 const COLORS = ["#FFFFFF", "#FFE14D", "#4D8DFF", "#FF5C5C", "#5CFF8F", "#000000"];
 const GIF_SIZES = [[320, "Small"], [480, "Medium"], [640, "Large"]];
@@ -46,13 +50,19 @@ const measure = document.createElement("canvas").getContext("2d");
 function textFont(it, H) { return `700 ${Math.round(it.size * H)}px "${it.font}"`; }
 
 /// Size of an item in clip pixels.
+/// What is drawn for a text item: captions can carry the speaker's name.
+function shownText(it) {
+  if (it.cap && ed?.cap.label) { const n = ed.cap.spk[it.speaker]?.name || `User ${it.speaker + 1}`; return `${n}: ${it.text}`; }
+  return it.text;
+}
+
 function itemSize(it, W, H) {
   if (it.kind === "image" || it.kind === "video") {
     const w = it.w * W;
     return [w, w / it.aspect];
   }
   measure.font = textFont(it, H);
-  const lines = it.text.split("\n");
+  const lines = shownText(it).split("\n");
   const px = it.size * H;
   const width = Math.max(...lines.map((l) => measure.measureText(l).width), px * 0.5);
   return [width + px * 0.3, px * 1.15 * lines.length];
@@ -69,7 +79,7 @@ function drawItem(ctx, it, W, H) {
     return;
   }
   const px = it.size * H;
-  const lines = it.text.split("\n");
+  const lines = shownText(it).split("\n");
   const lh = px * 1.15;
   ctx.font = textFont(it, H);
   ctx.textAlign = "center";
@@ -122,7 +132,7 @@ async function openEditor(clip, opts = {}) {
     secs: [{ from: 0, to: info.duration, speed: 1, zoom: 1, keep: true }],
     secIndex: -1, quietSpeed: false, undo: [], redo: [],
     audio: { ctx: null, buffers: null, gains: [], sources: [], t0: 0, at: 0 },
-    cap: { model: "tiny", detect: true, more: false, status: null, run: null, dl: null, spk: [], srt: false },
+    cap: { voices: true, people: 0, label: true, model: "tiny", detect: true, more: false, status: null, run: null, dl: null, spk: [], srt: false },
     busy: false, dirty: true, sig: "", lastT: -1, lastLabel: "", driftAt: 0, dom: {},
   };
   buildEditor();
@@ -381,9 +391,10 @@ function buildEditor() {
 const CAP_MODELS = [
   ["tiny", "Standard", "Whisper tiny: fastest, good with clear speech", 100],
   ["base", "Stronger", "Whisper base: more accurate, about 2x slower", 200],
-  ["small", "Strongest", "Whisper small: best accuracy, about 6x slower", 600],
+  ["small", "Strong", "Whisper small: better accuracy, about 6x slower; can repeat itself on noisy clips", 600],
+  ["parakeet", "Best", "NVIDIA Parakeet: the most accurate here, and faster than Whisper small", 482],
 ];
-const CAP_SPEED = { tiny: 0.3, base: 0.7, small: 2 }; // rough seconds of work per second of clip on a PC without a dedicated GPU
+const CAP_SPEED = { tiny: 0.3, base: 0.7, small: 2, parakeet: 0.4 }; // rough seconds of work per second of clip on a PC without a dedicated GPU
 const CAP_COLORS = ["#FFFFFF", "#FFE14D", "#4DD8FF", "#FF8A5C", "#7CFF8F", "#C78CFF"];
 const mmss = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 
@@ -398,10 +409,12 @@ function capSpeaker(n) {
 function styleCaption(it) {
   const sp = capSpeaker(it.speaker);
   // Lines that overlap in time (people talking over each other) stack upward instead of printing on top of each other.
-  Object.assign(it, { font: sp.font, size: sp.size, color: sp.color, y: clamp(sp.y - (it.rank || 0) * sp.size * 1.3, 0.04, 0.96), x: 0.5, outline: true });
+  Object.assign(it, { font: sp.font, size: sp.size, color: sp.color, outline: true });
+  // A caption dragged by hand stays where it was put until its speaker's position is changed.
+  if (!it.moved) Object.assign(it, { y: clamp(sp.y - (it.rank || 0) * sp.size * 1.3, 0.04, 0.96), x: sp.x ?? 0.5 });
 }
 const capItems = () => ed.items.filter((i) => i.cap);
-function applySpeaker(n) { for (const it of capItems()) if (it.speaker === n) styleCaption(it); ed.dirty = true; }
+function applySpeaker(n, resetPos) { for (const it of capItems()) if (it.speaker === n) { if (resetPos) it.moved = false; styleCaption(it); } ed.dirty = true; }
 
 function addCaption() {
   snap();
@@ -452,6 +465,13 @@ function updateCapBars() {
   }
 }
 
+/// Which audio to listen to, best first: just the voices (Discord and mic) when the clip has them, so game sound can't drown the speech; then everything.
+function capTrackSpec(mine) {
+  const t = mine.info.tracks, all = mine.ev >= 0 ? mine.ev : 0;
+  const voices = [t.indexOf("Discord"), t.indexOf("Microphone")].filter((i) => i >= 0);
+  return (voices.length && mine.cap.voices ? [voices.join(",")] : []).concat([String(all)]).join("|");
+}
+
 async function generateCaptions(scope) {
   const c = ed.cap, mine = ed;
   if (c.run || c.dl) return;
@@ -466,11 +486,12 @@ async function generateCaptions(scope) {
   ch.onmessage = (m) => {
     if (m.step === "progress") { c.run.frac = m.frac; c.run.stage = m.stage || c.run.stage; updateCapBars(); }
     else if (m.step === "done") lines = m.lines;
-    else if (m.step === "error") toast(m.message);
+    else if (m.step === "error") { c.err = m.message; toast(m.message); }
   };
+  c.err = null;
   try {
-    await invoke("captions_generate", { clip: mine.clip.path, track: mine.ev >= 0 ? mine.ev : 0, start: from, len, model: c.model, speakers: c.detect && !!c.status.speakers, progress: ch });
-  } catch (e) { if (String(e) !== "stopped") toast(String(e)); }
+    await invoke("captions_generate", { clip: mine.clip.path, track: capTrackSpec(mine), start: from, len, model: c.model, speakers: c.detect && !!c.status.speakers, people: c.people || null, progress: ch });
+  } catch (e) { if (String(e) !== "stopped") { c.err = String(e); toast(String(e)); } }
   clearInterval(timer);
   c.run = null;
   if (ed !== mine) return;
@@ -490,6 +511,7 @@ async function generateCaptions(scope) {
       mine.items.push(it); n++;
     }
     mine.dirty = true;
+    if (!n) c.err = `No speech was found in that part with the ${c.model} model. Try another model, or check the clip's sound.`;
     toast(n ? `Added ${n} captions. Click one on the Captions track to fix a word.` : "No speech was found in that part");
     renderLanes(); renderProps(); renderExport();
   }
@@ -501,6 +523,7 @@ function renderCaptions() {
   if (!box) return;
   const kids = [el("p", { class: "ed-note", text: "Writes captions from this clip's sound, on this PC. Nothing is uploaded. PCs without a dedicated graphics card are slow at this and can take a few minutes, but your clip is safe and you can keep editing while it works." })];
   d.capBar = d.capNote = null;
+  if (c.err && !c.run && !c.dl) kids.push(el("p", { class: "ed-note", role: "alert", text: c.err }));
   if (!st) kids.push(el("p", { class: "ed-note", text: "Checking…" }));
   else if (!st.engine) kids.push(el("p", { class: "ed-note", text: "The speech engine files are missing. Update or reinstall Archy to get them." }));
   else {
@@ -516,6 +539,14 @@ function renderCaptions() {
       kids.push(el("label", { class: "ed-check" },
         (() => { const b = el("input", { type: "checkbox" }); b.checked = c.detect; b.addEventListener("change", () => { c.detect = b.checked; renderCaptions(); }); return b; })(),
         "Tell different speakers apart (User 1, User 2…)"));
+      if (ed.info.tracks.includes("Discord") || ed.info.tracks.includes("Microphone")) kids.push(el("label", { class: "ed-check" },
+        (() => { const b = el("input", { type: "checkbox" }); b.checked = c.voices; b.addEventListener("change", () => { c.voices = b.checked; }); return b; })(),
+        "Listen to voices only (Discord and mic), so game sound doesn't drown the speech"));
+      if (c.detect) kids.push(el("div", { class: "chips ed-chips", role: "group", "aria-label": "How many people talk" },
+        [[0, "Auto"], [1, "1"], [2, "2"], [3, "3"], [4, "4"], [5, "5"], [6, "6"]].map(([n, label]) => el("button", { class: "chip", "aria-pressed": String(c.people === n),
+          title: n ? `Exactly ${n} ${n === 1 ? "person talks" : "people talk"}` : "Let Archy work it out",
+          onclick: () => { c.people = n; renderCaptions(); } }, label))),
+        el("p", { class: "ed-note", text: "People talking: if one person keeps getting split into two, set the real number. Auto can split a quiet or crackly mic into a second person." }));
       if (c.more) kids.push(el("div", { class: "chips ed-chips", role: "group", "aria-label": "Caption model" },
         CAP_MODELS.map(([id, name, hint, mb]) => el("button", { class: "chip", "aria-pressed": String(c.model === id), title: hint,
           onclick: () => { c.model = id; renderCaptions(); } }, `${name}${st[id] ? "" : ` · ${mb} MB`}`))),
@@ -540,9 +571,21 @@ function renderCaptions() {
       for (const n of used) {
         const sp = capSpeaker(n);
         const name = el("input", { class: "ed-lane-title", value: sp.name, "aria-label": "Speaker name", maxlength: "20" });
-        name.addEventListener("change", () => { sp.name = name.value.trim() || `User ${n + 1}`; });
+        name.addEventListener("change", () => { sp.name = name.value.trim() || `User ${n + 1}`; ed.dirty = true; });
         kids.push(el("div", { class: "cap-spk" },
           name,
+          used.length > 1 ? (() => {
+            const sel = el("select", { class: "ed-select", "aria-label": `Merge ${sp.name} into another speaker` }, el("option", { value: "", text: "Same person as…" }),
+              ...used.filter((o) => o !== n).map((o) => el("option", { value: String(o), text: capSpeaker(o).name })));
+            sel.addEventListener("change", () => {
+              if (sel.value === "") return;
+              snap();
+              const to = Number(sel.value);
+              for (const it of capItems()) if (it.speaker === n) { it.speaker = to; it.moved = false; styleCaption(it); }
+              ed.dirty = true; renderLanes(); renderCaptions(); renderProps();
+            });
+            return sel;
+          })() : null,
           el("div", { class: "ed-row", role: "group", "aria-label": `${sp.name} colour` }, CAP_COLORS.map((col) => el("button", {
             class: "ed-swatch", style: `background:${col}`, "aria-label": col, "aria-pressed": String(sp.color === col),
             onclick: () => { sp.color = col; applySpeaker(n); renderCaptions(); } }))),
@@ -550,9 +593,42 @@ function renderCaptions() {
           sizeSlider("Size", sp.size * 100, 2, 20, (v) => { sp.size = v / 100; applySpeaker(n); }),
           el("div", { class: "chips ed-chips", role: "group", "aria-label": "Position" },
             [["Top", 0.12], ["Middle", 0.5], ["Bottom", 0.88]].map(([label, y]) => el("button", { class: "chip", "aria-pressed": String(Math.abs(sp.y - y) < 0.02),
-              onclick: () => { sp.y = y; applySpeaker(n); renderCaptions(); } }, label))),
-          sizeSlider("Height", sp.y * 100, 5, 95, (v) => { sp.y = v / 100; applySpeaker(n); })));
+              onclick: () => { sp.y = y; applySpeaker(n, true); renderCaptions(); } }, label))),
+          sizeSlider("Height", sp.y * 100, 5, 95, (v) => { sp.y = v / 100; applySpeaker(n, true); }),
+          sizeSlider("Left / right", (sp.x ?? 0.5) * 100, 5, 95, (v) => { sp.x = v / 100; applySpeaker(n, true); })));
       }
+      // Every line: click the time to jump there, rewrite the words, nudge the times, or remove it.
+      const num = (it, key) => {
+        const i = el("input", { class: "input cap-t", type: "number", step: "0.1", min: "0", max: ed.info.duration.toFixed(1), value: it[key].toFixed(1), "aria-label": key === "start" ? "Starts at (seconds)" : "Ends at (seconds)" });
+        i.addEventListener("change", () => {
+          const v = clamp(Number(i.value) || 0, 0, ed.info.duration);
+          if (key === "start") it.start = Math.min(v, it.end - 0.1); else it.end = Math.max(v, it.start + 0.1);
+          i.value = it[key].toFixed(1); ed.dirty = true; renderLanes();
+        });
+        return i;
+      };
+      const rows = capItems().sort((a, b) => a.start - b.start).map((it) => {
+        const t = el("textarea", { class: "cap-text", rows: "1", "aria-label": "Caption words" });
+        t.value = it.text;
+        const grow = () => { t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; };
+        t.addEventListener("input", () => { it.text = t.value; ed.dirty = true; grow(); });
+        t.addEventListener("change", renderLanes);
+        t.addEventListener("focus", () => { select(it.id); });
+        queueMicrotask(grow);
+        return el("div", { class: "cap-row" + (it.id === ed.selected ? " on" : ""), "data-id": String(it.id) },
+          el("button", { class: "cap-go", title: "Jump to this line", "aria-label": `Jump to ${fmt(it.start)}`, onclick: () => { ed.dom.video.currentTime = it.start; } },
+            capSpeaker(it.speaker).name),
+          t,
+          el("div", { class: "cap-times" }, num(it, "start"), el("span", { text: "to" }), num(it, "end"),
+            el("button", { class: "cap-del", title: "Delete this line", "aria-label": "Delete this caption line",
+              onclick: () => { snap(); ed.items = ed.items.filter((x) => x.id !== it.id); if (ed.selected === it.id) ed.selected = null; ed.dirty = true; renderLanes(); renderProps(); renderCaptions(); renderExport(); } }, svgEl(ICON_D.trash))));
+      });
+      kids.push(el("div", { class: "t2", text: "Caption lines" }), el("div", { class: "cap-list" }, ...rows),
+        el("button", { class: "btn", text: "Add a line at the playhead", onclick: addCaption }));
+      kids.push(el("label", { class: "ed-check" },
+        (() => { const b = el("input", { type: "checkbox" }); b.checked = c.label; b.addEventListener("change", () => { c.label = b.checked; ed.dirty = true; }); return b; })(),
+        "Show who is speaking on the video (the name above)"),
+        el("p", { class: "ed-note", text: "To put a caption anywhere, drag it on the video. The sliders move all of one speaker's captions at once." }));
       kids.push(el("p", { class: "ed-note", text: "Click a caption on the Captions track to fix its words, change its font or colour, split it (S), or delete it." }),
         el("button", { class: "btn danger", text: "Delete all captions", onclick: () => {
           snap(); ed.items = ed.items.filter((i) => !i.cap); ed.selected = null; ed.dirty = true;
@@ -710,6 +786,7 @@ function stagePointer(canvas) {
     if (drag.mode === "move") {
       it.x = clamp((px - drag.dx) / W, 0, 1);
       it.y = clamp((py - drag.dy) / H, 0, 1);
+      if (it.cap) it.moved = true;
     } else {
       const f = Math.hypot(px - drag.cx, py - drag.cy) / Math.max(1, drag.d0);
       if (it.kind !== "text") it.w = clamp(drag.w0 * f, 0.03, 1.5);
@@ -1265,6 +1342,17 @@ function renderLanes() {
         if (m) place(m, n, ed.dom.video.currentTime);
         else toast(`Add ${KIND_HINT[kind]} on the left first`);
       } });
+    // Clear the whole track in one click (Ctrl+Z brings it back).
+    const have = ed.items.filter((x) => own(x, kind, n)).length;
+    const clear = have ? el("button", { class: "ed-lane-clear", title: `Clear this track (${have})`, "aria-label": `Clear all ${have} on this track`,
+      onclick: () => {
+        snap();
+        ed.items = ed.items.filter((x) => !own(x, kind, n));
+        if (!selectedItem()) ed.selected = null;
+        ed.dirty = true;
+        renderLanes(); renderProps(); renderCaptions(); renderExport();
+        toast(`Cleared ${have} from the track. Ctrl+Z undoes it`);
+      } }, svgEl(ICON_D.trash)) : null;
     let head;
     if (kind === "audio") {
       // Like a mixer channel: name, volume and mute for everything on this track.
@@ -1278,10 +1366,10 @@ function renderLanes() {
         onclick: () => { l.mute = !l.mute; mute.setAttribute("aria-pressed", String(l.mute)); track.classList.toggle("muted", l.mute); } });
       track.classList.toggle("muted", l.mute);
       head = el("div", { class: "ed-lane-head-audio" },
-        el("div", { class: "ed-lane-top" }, name, mute, add),
+        el("div", { class: "ed-lane-top" }, name, mute, clear, add),
         el("div", { class: "ed-lane-vol" }, vol, out));
     } else {
-      head = el("span", { class: "ed-lane-name" }, n === -1 ? "Captions" : `${KIND_NAME[kind]} ${n + 1}`, add);
+      head = el("span", { class: "ed-lane-name" }, n === -1 ? "Captions" : `${KIND_NAME[kind]} ${n + 1}`, clear, add);
     }
     // Each clip with sound gets its own volume slider right under its bar (same left/width as the bar).
     const withSound = kind === "audio" || kind === "video";
@@ -1705,6 +1793,9 @@ function renderProps() {
     input.addEventListener("input", () => { it.text = input.value; ed.dirty = true; });
     input.addEventListener("change", renderLanes);
     kids.push(input,
+      ...(it.cap ? [chipGroup("Who says this", [...ed.cap.spk.map((sp, i) => [i, sp.name, ""]), [ed.cap.spk.length, "New person", ""]], it.speaker, (v) => {
+        snap(); it.speaker = v; it.moved = false; styleCaption(it); ed.dirty = true; renderLanes(); renderCaptions(); renderProps();
+      })] : []),
       chipGroup("Font", FONTS.map(([f, label]) => [f, label, `font-family:"${f}"`]), it.font, (v) => (it.font = v)),
       sizeSlider("Size", it.size * 100, 2, 30, (v) => (it.size = v / 100)),
       el("div", { class: "ed-row", role: "group", "aria-label": "Colour" },
