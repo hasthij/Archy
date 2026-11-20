@@ -1195,6 +1195,22 @@ function place(m, lane, t, pos) {
   else addImage(m, lane, t, pos);
 }
 
+/// Right-click an item on a track: Delete (the Delete key and the panel button still work too).
+function itemMenu(e, it) {
+  e.preventDefault();
+  e.stopPropagation();
+  closeCtx();
+  if (ed.selected !== it.id) select(it.id);
+  const del = el("button", { class: "ctx-item danger", role: "menuitem", onclick: () => { closeCtx(); deleteSelected(); } },
+    svgEl(ICON_D.trash), el("span", { text: it.cap ? "Delete this caption" : "Delete" }));
+  ctxMenu = el("div", { class: "ctx-menu", role: "menu" }, del);
+  document.body.append(ctxMenu);
+  const r = ctxMenu.getBoundingClientRect();
+  ctxMenu.style.left = Math.max(4, Math.min(e.clientX, innerWidth - r.width - 4)) + "px";
+  ctxMenu.style.top = Math.max(4, Math.min(e.clientY, innerHeight - r.height - 4)) + "px";
+  del.focus();
+}
+
 function deleteSelected() {
   snap(); // the item's media element stays alive so Undo can bring it back
   ed.items = ed.items.filter((it) => it.id !== ed.selected);
@@ -1320,12 +1336,6 @@ function renderLanes() {
         title: (kind === "text" ? it.text : it.name) + (kind === "text" ? "" : " · drag the ends to trim"),
       }, el("span", { text: kind === "text" ? it.text.split("\n")[0] || "(empty)" : it.name }));
       if (kind === "video" && it.end - it.start > it.media.info.duration - it.offset + 0.05) bar.classList.add("loops");
-      if (it.id === ed.selected) {
-        // A visible way to remove the picked item (also the Delete key or the panel button).
-        const x = el("button", { class: "ed-item-x", text: "×", title: "Delete this (Delete key)", "aria-label": `Delete ${it.name || "item"}`, onclick: (e) => { e.stopPropagation(); deleteSelected(); } });
-        x.addEventListener("pointerdown", (e) => e.stopPropagation());
-        bar.append(x);
-      }
       barDrag(bar, it, track);
       track.append(bar);
     }
@@ -1406,8 +1416,11 @@ function syncClipVol(it) {
 /// left end cuts off its beginning (like trimming a clip in a music app), the
 /// right end its ending. A video dragged past its end loops; a sound stops.
 function barDrag(bar, it, track) {
+  bar.addEventListener("contextmenu", (e) => itemMenu(e, it));
   bar.addEventListener("pointerdown", (e) => {
     e.stopPropagation();
+    if (e.button !== 0) return; // right-click opens the menu instead
+    const wasSelected = ed.selected === it.id;
     const r = track.getBoundingClientRect();
     const secPerPx = ed.info.duration / r.width;
     const br = bar.getBoundingClientRect();
@@ -1465,6 +1478,8 @@ function barDrag(bar, it, track) {
           first.stuck = true;
         }
       }
+      // A plain click on the item that is already picked puts it down again.
+      if (wasSelected && !snapped && mode === "move") { ed.selected = null; ed.dirty = true; }
       renderLanes();
       renderProps();
     };
