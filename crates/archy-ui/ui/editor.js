@@ -315,9 +315,15 @@ function buildEditor() {
     section("Trim", trimPanel()),
     section("Split, speed and zoom", (d.secPanel = el("div"))),
     section("Captions", (d.capBox = el("div", { class: "cap-opt" }))),
-    section("Audio", d.audio),
-    section("Selected", d.props),
-    section("Export", d.export));
+    section("Selected", d.props));
+  d.audioSec = section("Audio", d.audio);
+  d.exportBtn = el("button", { class: "btn primary ed-export-btn", text: "Export", "aria-haspopup": "true", onclick: (e) => { e.stopPropagation(); d.exportPop.hidden = !d.exportPop.hidden; } });
+  d.exportPop = el("div", { class: "ed-pop", hidden: true }, el("h3", { text: "Export" }), d.export);
+  d.exportPop.addEventListener("click", (e) => e.stopPropagation());
+  const closePop = (e) => { if (!ed || !d.exportPop.isConnected) { document.removeEventListener("click", closePop); document.removeEventListener("keydown", popKey, true); return; } d.exportPop.hidden = true; };
+  const popKey = (e) => { if (e.key === "Escape" && !d.exportPop.hidden) { d.exportPop.hidden = true; e.stopPropagation(); } };
+  document.addEventListener("click", closePop);
+  document.addEventListener("keydown", popKey, true);
 
   renderCaptions();
   loadCaptionStatus();
@@ -325,7 +331,9 @@ function buildEditor() {
     el("div", { class: "player-bar" },
       (d.title = el("span", { class: "ed-title", text: `Edit · ${ed.clip.name}`, title: "Click to rename (F2)" })),
       el("button", { class: "btn", text: "Change clip", onclick: () => { closeEditor(); window.openPicker?.(); } }),
+      d.exportBtn,
       (d.close = el("button", { class: "btn", text: "Close", onclick: closeEditor }))),
+    d.exportPop,
     el("div", { class: "ed-body" },
       d.bay,
       el("div", { class: "ed-main" },
@@ -1539,7 +1547,7 @@ function renderBay() {
       m.staged ? el("button", { class: "ed-thumb-trim", text: "Trim…", title: "Pick a different part", onclick: () => openTrimmer(m.staged, m.name) }) : null,
       el("button", { class: "ed-thumb-x", text: "×", "aria-label": `Remove ${m.name}`, onclick: () => { ed.media = ed.media.filter((x) => x !== m); renderBay(); } }));
   }));
-  ed.dom.bay.replaceChildren(zone, list);
+  ed.dom.bay.replaceChildren(zone, list, ed.dom.audioSec);
 }
 
 const SOUND_EXT = /\.(mp3|wav|m4a|aac|ogg|oga|opus|flac|wma|aiff?)$/i;
@@ -2020,6 +2028,7 @@ async function runExport(toClipboard) {
       const p = Math.round(e.payload * 100);
       d.bar.style.width = `${p}%`;
       d.percent.textContent = p >= 100 ? "Finishing…" : `Exporting… ${p}%`;
+      d.exportBtn.textContent = p >= 100 ? "Finishing…" : `Exporting ${p}%`;
     });
   } catch {}
   try {
@@ -2049,6 +2058,7 @@ async function runExport(toClipboard) {
     if (unlisten) unlisten();
     mine.busy = false;
     d.progress.hidden = true;
+    d.exportBtn.textContent = "Export";
     d.save.disabled = d.copy.disabled = d.close.disabled = false;
     d.close.title = "";
   }
