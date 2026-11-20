@@ -1069,7 +1069,7 @@ async fn voice_child(
 fn captions_status() -> serde_json::Value {
     serde_json::json!({
         "engine": captions::engine_present(),
-        "tiny": captions::installed("tiny"), "base": captions::installed("base"), "small": captions::installed("small"), "parakeet": captions::installed("parakeet"),
+        "tiny": captions::installed("tiny"), "base": captions::installed("base"), "small": captions::installed("small"), "parakeet": captions::installed("parakeet"), "parakeet110": captions::installed("parakeet110"),
         "speakers": captions::installed("speaker_seg") && captions::installed("speaker_emb"),
         "mb": { "tiny": 100, "base": 200, "small": 600, "speakers": 45 },
     })

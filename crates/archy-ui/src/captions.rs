@@ -21,10 +21,11 @@ pub struct Item {
     pub mb: u32,
 }
 
-pub const ITEMS: [Item; 6] = [
+pub const ITEMS: [Item; 7] = [
     Item { id: "tiny", dir: "sherpa-onnx-whisper-tiny.en", url: "asr-models/sherpa-onnx-whisper-tiny.en.tar.bz2", single_file: false, mb: 118 },
     Item { id: "base", dir: "sherpa-onnx-whisper-base.en", url: "asr-models/sherpa-onnx-whisper-base.en.tar.bz2", single_file: false, mb: 200 },
     Item { id: "small", dir: "sherpa-onnx-whisper-small.en", url: "asr-models/sherpa-onnx-whisper-small.en.tar.bz2", single_file: false, mb: 600 },
+    Item { id: "parakeet110", dir: "sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8", url: "asr-models/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2", single_file: false, mb: 104 },
     Item { id: "parakeet", dir: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", url: "asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2", single_file: false, mb: 482 },
     Item { id: "speaker_seg", dir: "sherpa-onnx-pyannote-segmentation-3-0", url: "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2", single_file: false, mb: 7 },
     Item { id: "speaker_emb", dir: "speakers2", url: "speaker-recongition-models/wespeaker_en_voxceleb_resnet34.onnx", single_file: true, mb: 27 },
@@ -50,9 +51,10 @@ pub fn installed(id: &str) -> bool {
     let Some(i) = item(id) else { return false };
     let d = root().join(i.dir);
     // A Whisper model is only usable with encoder, decoder and tokens all unpacked (a half-extracted one isn't).
-    if matches!(id, "tiny" | "base" | "small" | "parakeet") {
+    if matches!(id, "tiny" | "base" | "small" | "parakeet" | "parakeet110") {
         let has = |part: &str| std::fs::read_dir(&d).map(|r| r.flatten().any(|e| e.file_name().to_string_lossy().contains(part))).unwrap_or(false);
-        return has("encoder") && has("decoder") && has("tokens");
+        // Whisper and Parakeet: encoder + decoder (+ tokens); the 110M model is one plain model file (+ tokens).
+        return has("tokens") && ((has("encoder") && has("decoder")) || has("model"));
     }
     has_onnx(&d)
 }
@@ -66,7 +68,7 @@ pub fn engine_present() -> bool {
 }
 
 pub fn whisper_dir(model: &str) -> Option<PathBuf> {
-    let i = item(model).filter(|i| matches!(i.id, "tiny" | "base" | "small" | "parakeet"))?;
+    let i = item(model).filter(|i| matches!(i.id, "tiny" | "base" | "small" | "parakeet" | "parakeet110"))?;
     installed(model).then(|| root().join(i.dir))
 }
 

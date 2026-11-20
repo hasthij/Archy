@@ -132,7 +132,7 @@ async function openEditor(clip, opts = {}) {
     secs: [{ from: 0, to: info.duration, speed: 1, zoom: 1, keep: true }],
     secIndex: -1, quietSpeed: false, undo: [], redo: [],
     audio: { ctx: null, buffers: null, gains: [], sources: [], t0: 0, at: 0 },
-    cap: { voices: true, people: 0, label: true, model: "tiny", detect: true, more: false, status: null, run: null, dl: null, spk: [], srt: false },
+    cap: { voices: true, people: 0, label: true, model: "parakeet110", detect: true, more: false, status: null, run: null, dl: null, spk: [], srt: false },
     busy: false, dirty: true, sig: "", lastT: -1, lastLabel: "", driftAt: 0, dom: {},
   };
   buildEditor();
@@ -389,12 +389,12 @@ function buildEditor() {
 // style shared by the lines of one voice (User 1, User 2...). Generating runs in a separate
 // low-priority process (see src/captions.rs) and never while a game is being recorded.
 const CAP_MODELS = [
-  ["tiny", "Standard", "Whisper tiny: fastest, good with clear speech", 100],
-  ["base", "Stronger", "Whisper base: more accurate, about 2x slower", 200],
-  ["small", "Strong", "Whisper small: better accuracy, about 6x slower; can repeat itself on noisy clips", 600],
-  ["parakeet", "Best", "NVIDIA Parakeet: the most accurate here, and faster than Whisper small", 482],
+  ["parakeet110", "Fast", "NVIDIA Parakeet 110M: small and quick, a big step up from Whisper tiny", 104],
+  ["parakeet", "Best", "NVIDIA Parakeet 0.6B: the most accurate option here", 482],
+  ["tiny", "Lightest", "Whisper tiny: smallest and simplest, misses more words", 118],
+  ["base", "Light", "Whisper base: a bit better than tiny, still misses words", 209],
 ];
-const CAP_SPEED = { tiny: 0.3, base: 0.7, small: 2, parakeet: 0.4 }; // rough seconds of work per second of clip on a PC without a dedicated GPU
+const CAP_SPEED = { tiny: 0.3, base: 0.7, small: 2, parakeet: 0.4, parakeet110: 0.15 }; // rough seconds of work per second of clip on a PC without a dedicated GPU
 const CAP_COLORS = ["#FFFFFF", "#FFE14D", "#4DD8FF", "#FF8A5C", "#7CFF8F", "#C78CFF"];
 const mmss = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 
@@ -402,7 +402,7 @@ function capSpeaker(n) {
   const c = ed.cap;
   while (c.spk.length <= n) {
     const i = c.spk.length;
-    c.spk.push({ name: `User ${i + 1}`, color: CAP_COLORS[i % CAP_COLORS.length], font: "Segoe UI", size: 0.06, y: 0.88 });
+    c.spk.push({ name: c.youFirst ? (i === 0 ? "You" : `User ${i}`) : `User ${i + 1}`, color: CAP_COLORS[i % CAP_COLORS.length], font: "Segoe UI", size: 0.06, y: 0.88 });
   }
   return c.spk[n];
 }
@@ -465,13 +465,6 @@ function updateCapBars() {
   }
 }
 
-/// Which audio to listen to, best first: just the voices (Discord and mic) when the clip has them, so game sound can't drown the speech; then everything.
-function capTrackSpec(mine) {
-  const t = mine.info.tracks, all = mine.ev >= 0 ? mine.ev : 0;
-  const voices = [t.indexOf("Discord"), t.indexOf("Microphone")].filter((i) => i >= 0);
-  return (voices.length && mine.cap.voices ? [voices.join(",")] : []).concat([String(all)]).join("|");
-}
-
 async function generateCaptions(scope) {
   const c = ed.cap, mine = ed;
   if (c.run || c.dl) return;
@@ -481,27 +474,57 @@ async function generateCaptions(scope) {
   c.run = { t0: performance.now(), frac: 0, stage: "Starting", est: len * CAP_SPEED[c.model] };
   renderCaptions();
   const timer = setInterval(updateCapBars, 500);
-  let lines = null;
-  const ch = new tauri.core.Channel();
-  ch.onmessage = (m) => {
-    if (m.step === "progress") { c.run.frac = m.frac; c.run.stage = m.stage || c.run.stage; updateCapBars(); }
-    else if (m.step === "done") lines = m.lines;
-    else if (m.step === "error") { c.err = m.message; toast(m.message); }
-  };
   c.err = null;
-  try {
-    await invoke("captions_generate", { clip: mine.clip.path, track: capTrackSpec(mine), start: from, len, model: c.model, speakers: c.detect && !!c.status.speakers, people: c.people || null, progress: ch });
-  } catch (e) { if (String(e) !== "stopped") { c.err = String(e); toast(String(e)); } }
+  const tr = mine.info.tracks, mic = tr.indexOf("Microphone"), dis = tr.indexOf("Discord"), all = mine.ev >= 0 ? mine.ev : 0;
+  const detect = c.detect && !!c.status.speakers;
+  // With separate tracks the answer to "who is talking" is partly known: your mic is you, Discord is everyone else.
+  // Listening to each alone also keeps game sound out. Tracks that turn out silent are skipped; if nothing is left, use the full mix.
+  const jobs = [];
+  if (c.voices && mic >= 0) jobs.push({ track: String(mic), who: "you", speakers: false, people: null });
+  if (c.voices && dis >= 0) jobs.push({ track: String(dis), who: "others", speakers: detect, people: c.people ? (mic >= 0 ? Math.max(1, c.people - 1) : c.people) : null });
+  const mix = { track: String(all), who: "mix", speakers: detect, people: c.people || null };
+  const runJob = async (job, k, n) => {
+    let lines = null, err = null;
+    const ch = new tauri.core.Channel();
+    ch.onmessage = (m) => {
+      if (m.step === "progress") { c.run.frac = (k + m.frac) / n; c.run.stage = m.stage || c.run.stage; updateCapBars(); }
+      else if (m.step === "done") lines = m.lines;
+      else if (m.step === "error") err = m.message;
+    };
+    try {
+      await invoke("captions_generate", { clip: mine.clip.path, track: job.track, start: from, len, model: c.model, speakers: job.speakers, people: job.people, progress: ch });
+    } catch (e) { err = String(e); }
+    return { lines, err };
+  };
+  let results = [];
+  let stopped = false;
+  for (let k = 0; k < jobs.length; k++) {
+    const r = await runJob(jobs[k], k, jobs.length + 0.001);
+    if (r.err === "stopped") { stopped = true; break; }
+    if (r.lines?.length) results.push({ job: jobs[k], lines: r.lines });
+    else if (r.err && !/no sound/i.test(r.err)) { c.err = r.err; toast(r.err); }
+  }
+  if (!stopped && !results.length) {
+    const r = await runJob(mix, 0, 1);
+    if (r.err && r.err !== "stopped") { c.err = r.err; toast(r.err); }
+    if (r.lines) results.push({ job: mix, lines: r.lines });
+  }
   clearInterval(timer);
   c.run = null;
   if (ed !== mine) return;
-  if (lines) {
+  if (results.length) {
     snap();
+    const hasYou = results.some((r) => r.job.who === "you");
+    // Fresh start (no captions left): numbering and names follow this run.
+    if (!capItems().some((i) => i.end > 0)) c.spk = [];
+    c.youFirst = hasYou;
+    const merged = [];
+    for (const r of results) for (const l of r.lines) merged.push({ ...l, speaker: r.job.who === "you" ? 0 : l.speaker + (hasYou ? 1 : 0) });
     // New captions replace old ones in the stretch they cover.
     mine.items = mine.items.filter((i) => !(i.cap && i.end > from && i.start < to));
     let n = 0;
     const ends = []; // end time of the last line on each stack level
-    for (const l of lines.sort((p, q) => p.start - q.start)) {
+    for (const l of merged.sort((p, q) => p.start - q.start)) {
       if (capItems().length >= 300) break;
       let rank = ends.findIndex((e) => e <= l.start + 0.05);
       if (rank < 0) rank = ends.length;

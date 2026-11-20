@@ -185,7 +185,7 @@ pub fn generate(dll_dir: &Path, m: &Models, samples: &[f32], threads: i32, progr
         let cfg = DiarConfig {
             segmentation: Segmentation { pyannote: Pyannote { model: seg_c.as_ptr(), window_shift_ratio: 0.0 }, num_threads: threads, debug: 0, provider: cpu.as_ptr() },
             embedding: Embedding { model: emb_c.as_ptr(), num_threads: threads, debug: 0, provider: cpu.as_ptr() },
-            clustering: Clustering { num_clusters: if m.people > 0 { m.people } else { -1 }, threshold: std::env::var("ARCHY_SPK_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(0.7), compute_confidence: 0 },
+            clustering: Clustering { num_clusters: if m.people > 0 { m.people } else { -1 }, threshold: std::env::var("ARCHY_SPK_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(0.45), compute_confidence: 0 },
             min_on: 0.3,
             min_off: 0.5,
         };
@@ -235,9 +235,11 @@ pub fn generate(dll_dir: &Path, m: &Models, samples: &[f32], threads: i32, progr
     }
 
     // 2. What was said.
-    let encoder = pick(m.whisper_dir, "encoder", ".onnx").ok_or("the model's encoder file is missing")?;
-    let decoder = pick(m.whisper_dir, "decoder", ".onnx").ok_or("the model's decoder file is missing")?;
     let tokens = pick(m.whisper_dir, "tokens", ".txt").ok_or("the model's tokens file is missing")?;
+    // A folder with one plain model file (no encoder/decoder) is a NeMo CTC model (Parakeet 110M).
+    let ctc = if pick(m.whisper_dir, "encoder", ".onnx").is_none() { pick(m.whisper_dir, "model", ".onnx") } else { None };
+    let encoder = pick(m.whisper_dir, "encoder", ".onnx").or_else(|| ctc.clone()).ok_or("the model's encoder file is missing")?;
+    let decoder = pick(m.whisper_dir, "decoder", ".onnx").or_else(|| ctc.clone()).ok_or("the model's decoder file is missing")?;
     // A folder with a joiner is a Parakeet (transducer) model; otherwise it's Whisper.
     let joiner = pick(m.whisper_dir, "joiner", ".onnx");
     let (enc_c, dec_c, tok_c, join_c) = (cstr(&encoder), cstr(&decoder), cstr(&tokens), joiner.as_deref().map(cstr));
@@ -245,7 +247,9 @@ pub fn generate(dll_dir: &Path, m: &Models, samples: &[f32], threads: i32, progr
     let nemo = CString::new("nemo_transducer").unwrap();
     let mut cfg: RecognizerConfig = unsafe { std::mem::zeroed() };
     cfg.feat = Feature { sample_rate: 16_000, feature_dim: 80 };
-    if let Some(j) = &join_c {
+    if ctc.is_some() {
+        cfg.model.nemo_ctc = OneModel { model: enc_c.as_ptr() };
+    } else if let Some(j) = &join_c {
         cfg.model.transducer = Transducer { encoder: enc_c.as_ptr(), decoder: dec_c.as_ptr(), joiner: j.as_ptr() };
         cfg.model.model_type = nemo.as_ptr();
     } else {
@@ -306,7 +310,9 @@ pub fn generate(dll_dir: &Path, m: &Models, samples: &[f32], threads: i32, progr
     }
     unsafe { (api.destroy_rec)(rec) };
     // Second opinion on who speaks: a voice fingerprint per caption line, clustered (exact count when the user gave one).
-    if m.segmentation.is_some() {
+    // Only when the user says how many people talk: on mixed game audio an automatic count is not reliable
+    // (a single voice gets cut into several "users"), but forcing a known count works well.
+    if m.segmentation.is_some() && (m.people > 0 || std::env::var("ARCHY_RELABEL").is_ok()) {
         if let Some(emb) = m.embedding {
             relabel(&api, emb, samples, &mut lines, m.people, threads);
         }
@@ -444,7 +450,9 @@ fn relabel(api: &Api, model: &Path, samples: &[f32], lines: &mut [Line], people:
     if people <= 0 {
         // One short line on its own is noise more often than a person.
         while cl.len() > 1 {
-            let Some(k) = (0..cl.len()).filter(|&k| cl[k].members.len() < 2 && cl[k].dur < 2.0).min_by(|&a, &b| cl[a].dur.total_cmp(&cl[b].dur)) else { break };
+            // A person needs a real share of the talking: a few lines and several seconds (a lone voice
+            // doesn't get cut into "users" by background noise).
+            let Some(k) = (0..cl.len()).filter(|&k| cl[k].members.len() < 3 || cl[k].dur < 5.0).min_by(|&a, &b| cl[a].dur.total_cmp(&cl[b].dur)) else { break };
             let best = (0..cl.len()).filter(|&o| o != k).max_by(|&a, &b| dot(&cl[k].cen, &cl[a].cen).total_cmp(&dot(&cl[k].cen, &cl[b].cen))).unwrap();
             let (lo, hi) = (k.min(best), k.max(best));
             merge(&mut cl, lo, hi);
