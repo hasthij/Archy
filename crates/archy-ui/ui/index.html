@@ -12,6 +12,43 @@
 <script src="welcome.js" defer></script>
 </head>
 <body>
+<!-- Splash: inline styles so it paints before app.css; removed by hideSplash() in app.js -->
+<style>
+#splash{position:fixed;inset:0;z-index:9999;display:grid;place-items:center;background:#000;color:#e8ebf1;font:600 13px "Space Grotesk",Bahnschrift,"Segoe UI",system-ui,sans-serif;transition:opacity .45s ease,transform .45s ease;overflow:hidden}
+#splash.out{opacity:0;transform:scale(1.04);pointer-events:none}
+#splash .sp{display:flex;flex-direction:column;align-items:center;gap:22px}
+#splash .glow{position:absolute;width:420px;height:420px;border-radius:50%;background:radial-gradient(circle,#4d8dff33,transparent 65%);animation:spGlow 2.4s ease-in-out infinite}
+#splash .mark{position:relative;width:86px;height:86px;display:grid;place-items:center}
+#splash .mark svg{width:56px;height:56px;overflow:visible}
+#splash .mark path{fill:none;stroke:#4d8dff;stroke-width:2.4;stroke-linejoin:round;stroke-linecap:round;stroke-dasharray:64;stroke-dashoffset:64;animation:spDraw .9s .1s cubic-bezier(.4,0,.2,1) forwards,spFill .5s .85s ease forwards}
+#splash .ring{position:absolute;inset:0;border-radius:50%;border:1.5px solid #4d8dff55;animation:spRing 1.8s ease-out infinite}
+#splash .ring.r2{animation-delay:.6s}
+#splash .name{display:flex;gap:.34em;letter-spacing:.34em;font-size:15px;text-transform:uppercase}
+#splash .name span{opacity:0;transform:translateY(8px);animation:spLetter .5s cubic-bezier(.2,.8,.2,1) forwards}
+#splash .name span:nth-child(1){animation-delay:.45s}#splash .name span:nth-child(2){animation-delay:.51s}#splash .name span:nth-child(3){animation-delay:.57s}#splash .name span:nth-child(4){animation-delay:.63s}#splash .name span:nth-child(5){animation-delay:.69s}
+#splash .bar{width:150px;height:2px;border-radius:2px;background:#ffffff14;overflow:hidden;opacity:0;animation:spIn .3s .8s forwards}
+#splash .bar i{display:block;height:100%;width:40%;border-radius:2px;background:linear-gradient(90deg,transparent,#4d8dff,transparent);animation:spBar 1.1s ease-in-out infinite}
+#splash .tip{color:#8b93a3;font-weight:500;font-size:12px;opacity:0;animation:spIn .4s 1s forwards}
+@keyframes spDraw{to{stroke-dashoffset:0}}
+@keyframes spFill{to{fill:#4d8dff22}}
+@keyframes spRing{0%{transform:scale(.55);opacity:.9}100%{transform:scale(1.5);opacity:0}}
+@keyframes spGlow{50%{transform:scale(1.15);opacity:.6}}
+@keyframes spLetter{to{opacity:1;transform:none}}
+@keyframes spBar{0%{transform:translateX(-120%)}100%{transform:translateX(380%)}}
+@keyframes spIn{to{opacity:1}}
+html[data-motion="reduce"] #splash *,html[data-motion="reduce"] #splash{animation:none!important;transition:none!important}
+html[data-motion="reduce"] #splash .mark path{stroke-dashoffset:0}
+html[data-motion="reduce"] #splash .name span,html[data-motion="reduce"] #splash .bar,html[data-motion="reduce"] #splash .tip{opacity:1;transform:none}
+</style>
+<div id="splash" role="status" aria-label="Loading Archy">
+  <div class="glow"></div>
+  <div class="sp">
+    <div class="mark"><i class="ring"></i><i class="ring r2"></i><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 L21 20 H3 Z"/></svg></div>
+    <div class="name" aria-hidden="true"><span>A</span><span>R</span><span>C</span><span>H</span><span>Y</span></div>
+    <div class="bar"><i></i></div>
+    <div class="tip">Everything stays on this PC</div>
+  </div>
+</div>
 <div class="app">
   <nav class="rail" aria-label="Main">
     <div class="logo" aria-hidden="true">

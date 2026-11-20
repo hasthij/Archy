@@ -6,6 +6,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod captions;
 mod editor;
 
 use std::path::{Path, PathBuf};
@@ -1040,6 +1041,82 @@ async fn voice_child(
     .map_err(|e| e.to_string())?
 }
 
+
+// ---------- auto captions ----------
+
+/// Which caption models are installed, and whether the speech engine is here.
+#[tauri::command]
+fn captions_status() -> serde_json::Value {
+    serde_json::json!({
+        "engine": captions::engine_present(),
+        "tiny": captions::installed("tiny"), "base": captions::installed("base"), "small": captions::installed("small"),
+        "speakers": captions::installed("speaker_seg") && captions::installed("speaker_emb"),
+        "mb": { "tiny": 100, "base": 200, "small": 600, "speakers": 45 },
+    })
+}
+
+/// Downloads one model set (`tiny`, `base`, `small` or `speakers`) after the user asked for it.
+#[tauri::command]
+async fn captions_download(id: String, progress: tauri::ipc::Channel<serde_json::Value>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let ids: Vec<&str> = if id == "speakers" { vec!["speaker_seg", "speaker_emb"] } else { vec![id.as_str()] };
+        let n = ids.len() as f64;
+        for (k, one) in ids.iter().enumerate() {
+            if captions::installed(one) {
+                continue;
+            }
+            captions::download(one, &|p| {
+                let _ = progress.send(serde_json::json!({ "step": "progress", "frac": (k as f64 + p) / n }));
+            })?;
+        }
+        let _ = progress.send(serde_json::json!({ "step": "done" }));
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Stops a model download or a running caption job.
+#[tauri::command]
+fn captions_cancel() {
+    captions::cancel_download();
+    stop_calibration();
+}
+
+/// Writes captions for part of a clip (`archy.exe --captions`, low priority, its own process).
+/// Refused while a game is being recorded so a recording is never slowed.
+#[tauri::command]
+async fn captions_generate(
+    clip: String,
+    track: u32,
+    start: f64,
+    len: f64,
+    model: String,
+    speakers: bool,
+    progress: tauri::ipc::Channel<serde_json::Value>,
+) -> Result<(), String> {
+    if get_status().state == "recording" {
+        return Err("Captions can't run while a game is being recorded. Try again once the game is closed.".into());
+    }
+    let whisper = captions::whisper_dir(&model).ok_or("that caption model isn't downloaded yet")?;
+    let (seg, emb) = if speakers { captions::speaker_models().map(|(a, b)| (a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned())).unwrap_or(("-".into(), "-".into())) } else { ("-".into(), "-".into()) };
+    let ffmpeg = editor::tools_dir().ok_or("The video tools aren't installed. Update or reinstall Archy.")?.join("ffmpeg.exe");
+    let args = vec![
+        "--captions".to_string(), ffmpeg.to_string_lossy().into_owned(), clip, track.to_string(),
+        format!("{start:.3}"), format!("{len:.3}"), whisper.to_string_lossy().into_owned(), seg, emb,
+    ];
+    voice_child(args, progress, "the caption job").await
+}
+
+/// Saves captions as a subtitle file next to an export (only .srt paths).
+#[tauri::command]
+fn save_srt(path: String, text: String) -> Result<(), String> {
+    if !path.to_ascii_lowercase().ends_with(".srt") {
+        return Err("not a subtitle file path".into());
+    }
+    std::fs::write(&path, text).map_err(|e| e.to_string())
+}
+
 fn main() {
     unsafe {
         // One window at a time: a second launch just brings the first one forward.
@@ -1116,6 +1193,11 @@ fn main() {
             start_recorder,
             calibrate_voice,
             test_voice,
+            captions_status,
+            captions_download,
+            captions_cancel,
+            captions_generate,
+            save_srt,
             self_test,
             clip_bookmarks,
             mic_test,

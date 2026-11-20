@@ -1954,6 +1954,10 @@ fn main() {
         voice::calibrate_main(&args[1..]);
         return;
     }
+    if args.first().map(String::as_str) == Some("--captions") {
+        voice::captions_main(&args[1..]);
+        return;
+    }
     if args.first().map(String::as_str) == Some("--voice-test") {
         voice::test_main();
         return;

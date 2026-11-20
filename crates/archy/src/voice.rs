@@ -541,3 +541,65 @@ mod tests {
         assert_eq!(g.feed(&[0.0; 160]).len(), 1);
     }
 }
+
+// ---- Captions (`archy.exe --captions <ffmpeg> <clip> <audio track> <start s> <length s> <whisper dir> <speaker segmentation|-> <speaker embedding|->`) ----
+//
+// Auto captions for the editor: decodes the clip's audio with ffmpeg, finds who speaks
+// when, transcribes each stretch with Whisper, and prints JSON lines:
+// {"step":"progress","frac":0..1} then {"step":"done","lines":[{start,end,text,speaker}]}
+// or {"step":"error","message":...}. Runs at low priority so a game is never slowed.
+
+pub fn captions_main(args: &[String]) {
+    if let Err(e) = captions(args) {
+        emit(serde_json::json!({ "step": "error", "message": e }));
+    }
+}
+
+fn captions(args: &[String]) -> Result<(), String> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    use windows::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS};
+    let [ffmpeg, clip, track, start, len, whisper, seg, emb] = args else {
+        return Err("captions: wrong arguments".into());
+    };
+    unsafe {
+        let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+    }
+    let dir = archy_voice::find_dir().ok_or("the speech engine files are missing (reinstall Archy to get them)")?;
+    let start: f32 = start.parse().map_err(|_| "captions: bad start")?;
+    emit(serde_json::json!({ "step": "progress", "frac": 0.0, "stage": "Reading the audio" }));
+    let mut child = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-ss", start.to_string().as_str(), "-t", len, "-i", clip, "-map", &format!("0:a:{track}"), "-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(0x0800_0000)
+        .spawn()
+        .map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
+    let mut bytes = Vec::new();
+    child.stdout.take().ok_or("no audio from ffmpeg")?.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let _ = child.wait();
+    let samples: Vec<f32> = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    if samples.len() < 16_000 / 3 {
+        return Err("this clip has no sound to caption".into());
+    }
+    let opt = |s: &String| (s != "-").then(|| std::path::PathBuf::from(s));
+    let (seg, emb) = (opt(seg), opt(emb));
+    let models = archy_voice::captions::Models {
+        whisper_dir: std::path::Path::new(whisper),
+        segmentation: seg.as_deref().filter(|_| emb.is_some()),
+        embedding: emb.as_deref().filter(|_| seg.is_some()),
+    };
+    let mut last = -1.0_f32;
+    let lines = archy_voice::captions::generate(&dir, &models, &samples, 2, &mut |p| {
+        if p - last >= 0.01 {
+            last = p;
+            emit(serde_json::json!({ "step": "progress", "frac": p, "stage": if p < 0.3 { "Finding who is speaking" } else { "Writing the captions" } }));
+        }
+    })?;
+    let out: Vec<_> = lines
+        .iter()
+        .map(|l| serde_json::json!({ "start": l.start + start, "end": l.end + start, "text": l.text, "speaker": l.speaker }))
+        .collect();
+    emit(serde_json::json!({ "step": "done", "lines": out }));
+    Ok(())
+}

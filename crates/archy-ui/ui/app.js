@@ -90,6 +90,7 @@ function show(name) {
 // Icons (24x24 paths) shared by the new Hybrid UI.
 const ICO = {
   clips: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4-2.5z"/>',
+  library: '<rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/>',
   star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/>',
   play: '<path d="M8 5v14l11-7z"/>',
   scissors: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.1 15.9M14.5 14.5 20 20M8.1 8.1 12 12"/>',
@@ -127,9 +128,15 @@ document.querySelectorAll(".nav").forEach((b) => b.addEventListener("click", () 
 window.showView = show; // for welcome.js
 
 // ---------- status ----------
+let statusSig = "";
 async function refreshStatus() {
+  if (document.hidden) return;
   let s;
   try { s = await invoke("get_status"); } catch { return; }
+  // Same state as last time: leave the DOM alone (no rebuild, no repaint).
+  const sig = JSON.stringify([s, gameLabel(), captureLabel(), settings?.hotkey_save, settings?.hotkey_save_long, settings?.clip_seconds, settings?.long_clip_seconds, settings?.voice_enabled, settings?.voice_phrases?.[0]?.text]);
+  if (sig === statusSig) return;
+  statusSig = sig;
   const box = $("#status");
   box.className = "status";
   box.replaceChildren();
@@ -298,7 +305,7 @@ function renderFilters() {
   const counts = new Map();
   for (const c of clips) counts.set(gameOf(c), (counts.get(gameOf(c)) || 0) + 1);
   const lib = [
-    ["all", "All clips", clips.length, ico("clips", 16)],
+    ["all", "All clips", clips.length, ico("library", 16)],
     ["starred", "Starred", clips.filter((c) => stars.has(c.path)).length, ico("star", 16)]];
   const games = [...counts].map(([g, n]) => [`game:${g}`, g, n]);
   if (![...lib, ...games].some(([v]) => v === filter)) filter = "all";
@@ -320,7 +327,7 @@ function renderFilters() {
 // Game's real app icon when Archy has one saved; otherwise a gradient monogram tile.
 function gameIco(name) {
   const g = GR[gIdx(name)];
-  return el("i", { class: "dot", style: `background:${g[0]}` });
+  return el("i", { class: "gmono", style: `background:linear-gradient(135deg,${g[0]},${g[1]})`, text: (name.trim()[0] || "?").toUpperCase() });
 }
 
 /// Clip cards by clip + size + featured, reused across renders.
@@ -356,7 +363,7 @@ function renderClips() {
   const next = new Map();
   grid.replaceChildren(...shown.map((c) => {
     const id = `${c.path}|${c.bytes}|${lay}`;
-    const card = cardCache.get(id) || (lay === "list" ? listRow(c) : thCard(c));
+    const card = cardCache.get(id) || (lay === "list" ? listRow(c) : thCard(c, undefined, true));
     card.classList.toggle("sel", c.path === selected);
     next.set(id, card);
     return card;
@@ -422,13 +429,15 @@ function hoverPreview(card, c) {
 }
 function listRow(c) {
   const s = starBtn(c); s.classList.add("inl");
-  return el("div", { class: "lrow", tabindex: "0", "data-path": c.path,
+  const row = el("div", { class: "lrow", tabindex: "0", "data-path": c.path,
     onclick: () => select(c), ondblclick: () => (c.kind === "shot" ? viewShot(c) : play(c)),
     oncontextmenu: (e) => clipMenu(e, e.currentTarget, c) },
     s, thumbBox(c, false), renameable(el("b", { class: "clip-name", text: c.name }), c),
     el("span", { class: "mono", text: c.kind === "shot" ? "Shot" : "Clip" }),
     el("span", { class: "sm", text: when(c.modified) }),
     el("span", { class: "mono", text: MB(c.bytes) }));
+  if (c.kind !== "shot") hoverPreview(row, c);
+  return row;
 }
 
 const starBtn = (c) => el("button", { class: "star" + (stars.has(c.path) ? " on" : ""), "data-path": c.path, title: "Star", "aria-label": `Star ${c.name}`,
@@ -503,7 +512,7 @@ function renderHome() {
   const box = $("#home-body");
   const all = clips.filter((c) => stars.has(c.path) && c.kind !== "shot").sort((a, b) => b.modified - a.modified);
   const list = all.filter((c) => !homeQ || c.name.toLowerCase().includes(homeQ));
-  const head = el("div", { class: "hd" }, el("h1", { text: "Starred" }),
+  const head = el("div", { class: "hd" }, el("h1", { text: "Latest starred" }),
     el("div", { class: "tools" }, searchBox("Search starred", (e) => { homeQ = e.target.value.trim().toLowerCase(); renderHome(); $("#home-body input")?.focus(); }), folderBtn()));
   if (homeQ) head.querySelector("input").value = homeQ;
   let body;
@@ -518,7 +527,7 @@ function renderHome() {
     const hs = starBtn(h); hs.classList.add("inl");
     const hero = el("div", { class: "hero" }, img,
       el("div", { class: "in" },
-        el("span", { class: "chip on", text: "★ Starred" }),
+        el("span", { class: "chip on", text: "★ Latest" }),
         el("div", { class: "ttl", text: h.name }),
         el("div", { class: "hm", text: `${gameOf(h)} · ${MB(h.bytes)} · ${when(h.modified)}` }),
         el("div", { class: "btns" },
@@ -540,7 +549,7 @@ function renderHome() {
 function renderEdRecent() {
   const recent = clips.filter((c) => c.kind !== "shot").slice(0, 3);
   $("#ed-recent").hidden = !recent.length;
-  $("#ed-recent-row").replaceChildren(...recent.map((c) => thCard(c, (x) => openEditor(x))));
+  $("#ed-recent-row").replaceChildren(...recent.map((c) => thCard(c, (x) => openEditor(x), true)));
 }
 
 /// Editor page actions: pick from the library (popup) or any mp4 on disk.
@@ -553,7 +562,7 @@ function openPicker() {
   const grid = el("div", { class: "mgrid" });
   const fill = (q) => {
     const m = vids.filter((c) => c.name.toLowerCase().includes(q.toLowerCase()));
-    grid.replaceChildren(...(m.length ? m.map((c) => thCard(c, (x) => { close(); openEditor(x); })) : [el("p", { class: "sm", text: "No clips match." })]));
+    grid.replaceChildren(...(m.length ? m.map((c) => thCard(c, (x) => { close(); openEditor(x); }, true)) : [el("p", { class: "sm", text: "No clips match." })]));
   };
   const inp = el("input", { type: "search", placeholder: "Search your clips", "aria-label": "Search your clips", oninput: (e) => fill(e.target.value) });
   const browse = el("button", { class: "btn", onclick: () => { close(); $("#ed-browse").click(); } }, el("span", { text: "Browse files…" }));
@@ -2197,6 +2206,14 @@ const thumbObserver = new IntersectionObserver((entries) => {
   pumpThumbs();
 }, { rootMargin: "300px" });
 
+// ---------- splash: covers the first render, fades out once Home is drawn (min 800 ms so the intro reads) ----------
+function hideSplash() {
+  const s = document.getElementById("splash");
+  if (!s) return;
+  const quiet = document.documentElement.dataset.motion === "reduce";
+  setTimeout(() => { s.classList.add("out"); setTimeout(() => s.remove(), quiet ? 0 : 500); }, quiet ? 0 : Math.max(0, 800 - performance.now()));
+}
+
 // ---------- start ----------
 (async function start() {
   const firstClips = invoke("list_clips").catch(() => []); // starts now, in parallel with settings
@@ -2204,6 +2221,7 @@ const thumbObserver = new IntersectionObserver((entries) => {
     [settings, presets] = await Promise.all([invoke("get_settings"), invoke("presets")]);
   } catch (e) {
     document.body.prepend(el("p", { class: "empty", text: "Open this page from the Archy app. " + e }));
+    hideSplash();
     return;
   }
   applySettingsLook();
@@ -2217,6 +2235,7 @@ const thumbObserver = new IntersectionObserver((entries) => {
   clipsSig = clips.map((c) => `${c.path}|${c.bytes}|${c.modified}`).join("\n");
   renderClips();
   renderHome();
+  hideSplash();
   window.maybeWelcome?.();
   loadDevices();
   checkUpdate();

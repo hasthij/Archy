@@ -394,3 +394,41 @@ body.idle *, body.idle *::before, body.idle *::after { animation-play-state: pau
 /* Inspector star button reflects the current state: starred = filled star + accent */
 .btn.on[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
 .btn.on[aria-pressed="true"] svg { fill: currentColor; }
+
+/* ---------- OLED vs Dark: Dark is the soft charcoal, OLED is true black ---------- */
+html:root[data-theme="dark"][data-oled="1"] {
+  --bg: #000; --rail: #000; --surface: #0a0b0e; --surface-2: #111318; --raised: #111318;
+  --line: #1c2028; --line-soft: #14171d50; --line-strong: #1c2028; --ln: #14171d50; --thumb: #0d1118;
+}
+
+/* ---------- Clips sidebar icons: outline icons + game monogram tiles ---------- */
+.tree .nav svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.tree .nav[aria-pressed="true"] svg { stroke: var(--acc); }
+.tree .nav i.gmono { width: 22px; height: 22px; border-radius: var(--radius, 0); flex: none; display: grid; place-items: center; font: 700 11px var(--font); color: #fff; text-shadow: 0 1px 2px #0006; font-style: normal; }
+
+/* hover preview works on list rows too */
+.lrow .th { position: relative; overflow: hidden; }
+.lrow.previewing .pv-vid { opacity: 1; }
+.lrow.previewing .pl { opacity: 0; }
+
+/* ---------- Perf: keep each page's layout/paint work to itself ---------- */
+.filmstrip, .HM { contain: layout; }
+
+/* Clip picker: pin the single grid row to the window so a long library can't push the box off-screen */
+.picker .modal { grid-template-rows: minmax(0, 1fr); }
+.picker .mbox { min-height: 0; max-height: 86%; align-self: center; }
+.picker .mgrid { min-height: 0; }
+
+/* Hero "Starred" chip: accent tint, not a white block */
+.hero .chip.on { background: var(--acc-t); border-color: var(--acc); color: var(--acc); }
+
+/* ---------- Captions: own lane + speaker rows ---------- */
+.ed-item.cap { background: color-mix(in srgb, var(--acc) 28%, var(--p2)); border-color: var(--acc); }
+.ed-item.cap.on { background: var(--acc); }
+.ed-item.cap span { font-size: 11.5px; }
+.cap-opt { display: flex; flex-direction: column; gap: 10px; }
+.cap-opt .ed-progress-box { display: flex; flex-direction: column; gap: 8px; }
+.cap-opt .ed-progress { height: 6px; background: var(--p2); border-radius: 99px; overflow: hidden; }
+.cap-opt .ed-progress i { display: block; height: 100%; width: 0; background: var(--acc); transition: width .3s; }
+.cap-spk { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--ln2); background: var(--p1); }
+.cap-spk .ed-lane-title { width: 100%; }

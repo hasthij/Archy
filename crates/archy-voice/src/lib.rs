@@ -7,6 +7,7 @@
 //! never sends audio anywhere.
 
 mod bpe;
+pub mod captions;
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};

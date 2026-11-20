@@ -32,10 +32,14 @@ pub fn find_root_process(exe: &str) -> Option<u32> {
         let _ = CloseHandle(snap);
     }
     let named = |pid: u32| procs.iter().find(|p| p.0 == pid).map(|p| p.2.as_str());
+    // Apps can have several roots (Discord's crashpad-handler is one, and makes no sound).
+    // The real app is the root with the biggest tree of same-named children.
+    let kids = |root: u32| procs.iter().filter(|p| p.1 == root && p.2.eq_ignore_ascii_case(exe)).count();
     procs
         .iter()
         .filter(|p| p.2.eq_ignore_ascii_case(exe))
-        .find(|p| !named(p.1).is_some_and(|n| n.eq_ignore_ascii_case(exe)))
+        .filter(|p| !named(p.1).is_some_and(|n| n.eq_ignore_ascii_case(exe)))
+        .max_by_key(|p| kids(p.0))
         .map(|p| p.0)
 }
 

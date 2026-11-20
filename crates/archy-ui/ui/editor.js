@@ -122,6 +122,7 @@ async function openEditor(clip, opts = {}) {
     secs: [{ from: 0, to: info.duration, speed: 1, zoom: 1, keep: true }],
     secIndex: -1, quietSpeed: false, undo: [], redo: [],
     audio: { ctx: null, buffers: null, gains: [], sources: [], t0: 0, at: 0 },
+    cap: { model: "tiny", detect: true, more: false, status: null, run: null, dl: null, spk: [], srt: false },
     busy: false, dirty: true, sig: "", lastT: -1, lastLabel: "", driftAt: 0, dom: {},
   };
   buildEditor();
@@ -139,7 +140,7 @@ function closeEditor() {
   for (const it of ed.items) if (it.el) { it.el.pause(); it.el.removeAttribute("src"); it.el.load(); }
   if (ed.audio.ctx) ed.audio.ctx.close().catch(() => {});
   cancelAnimationFrame(ed.raf);
-  ed.resize?.disconnect();
+  ed.resize?.disconnect(); ed.dom.fit?.disconnect();
   const v = ed.dom.video;
   v.pause(); v.removeAttribute("src"); v.load();
   ed = null;
@@ -275,7 +276,7 @@ function buildEditor() {
   d.canvas = el("canvas", { class: "ed-canvas" });
   d.cropGrip = el("div", { class: "ed-crop-grip", text: "Drag to move", role: "slider", "aria-label": "Move the crop frame", tabindex: "0" });
   d.crop = el("div", { class: "ed-crop", hidden: true }, d.cropGrip);
-  d.stage = el("div", { class: "ed-stage", style: `aspect-ratio:${info.width}/${info.height};width:min(100%, calc(56vh * ${info.width} / ${info.height}))` }, d.video, d.canvas, d.crop);
+  d.stage = el("div", { class: "ed-stage" }, d.video, d.canvas, d.crop);
   cropDrag(d.cropGrip);
   stagePointer(d.canvas);
   dropTarget(d.stage, (m, e) => {
@@ -303,16 +304,13 @@ function buildEditor() {
   const side = el("div", { class: "ed-side" },
     section("Trim", trimPanel()),
     section("Split, speed and zoom", (d.secPanel = el("div"))),
-    section("Captions", el("div", { class: "cap-opt" },
-      ico("wand", 22),
-      el("div", { class: "t2", text: "Auto-generate captions" }),
-      el("div", { class: "sm", text: "Runs on this PC. Nothing is uploaded." }),
-      el("button", { class: "btn primary full", text: "Generate", onclick: () => toast("Auto-captions are coming soon") }),
-      el("div", { class: "cap-style" }, el("span", { class: "sm", text: "Style" }), el("select", { class: "input", "aria-label": "Caption style" }, el("option", { text: "Bold white" }))))),
+    section("Captions", (d.capBox = el("div", { class: "cap-opt" }))),
     section("Audio", d.audio),
     section("Selected", d.props),
     section("Export", d.export));
 
+  renderCaptions();
+  loadCaptionStatus();
   const box = el("div", { class: "ed-box", role: "dialog", "aria-modal": "true", "aria-label": "Clip editor" },
     el("div", { class: "player-bar" },
       (d.title = el("span", { class: "ed-title", text: `Edit · ${ed.clip.name}`, title: "Click to rename (F2)" })),
@@ -329,6 +327,16 @@ function buildEditor() {
       side));
   $("#editor").replaceChildren(box);
   $("#editor").hidden = false;
+  // Size the preview in pixels (a % width inside the flex column could resolve to 0 and hide the video).
+  const fitStage = () => {
+    const m = d.stage.parentElement; if (!m) return;
+    const cs = getComputedStyle(m), avail = m.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const w = Math.max(160, Math.min(avail, innerHeight * 0.56 * info.width / info.height));
+    d.stage.style.width = `${w}px`;
+    d.stage.style.height = `${Math.round(w * info.height / Math.max(1, info.width))}px`;
+  };
+  fitStage();
+  d.fit = new ResizeObserver(fitStage); d.fit.observe(d.stage.parentElement);
   dropAllSetup(box);
   // Rename from the header: click the title or press F2. The file moves on disk, so keep ed.clip in step.
   const renameHere = () => {
@@ -363,6 +371,212 @@ function buildEditor() {
 
   ed.raf = requestAnimationFrame(tick);
   renderBay(); renderAudio(); renderLanes(); renderProps(); renderExport(); updateTrim(); renderSections();
+}
+
+// ---------- auto captions ----------
+// Captions are ordinary text items flagged `cap`, on their own lane (-1), so trimming, splitting,
+// editing, deleting, preview and export all work on them like any text. A "speaker" is just a
+// style shared by the lines of one voice (User 1, User 2...). Generating runs in a separate
+// low-priority process (see src/captions.rs) and never while a game is being recorded.
+const CAP_MODELS = [
+  ["tiny", "Standard", "Whisper tiny: fastest, good with clear speech", 100],
+  ["base", "Stronger", "Whisper base: more accurate, about 2x slower", 200],
+  ["small", "Strongest", "Whisper small: best accuracy, about 6x slower", 600],
+];
+const CAP_SPEED = { tiny: 0.3, base: 0.7, small: 2 }; // rough seconds of work per second of clip on a PC without a dedicated GPU
+const CAP_COLORS = ["#FFFFFF", "#FFE14D", "#4DD8FF", "#FF8A5C", "#7CFF8F", "#C78CFF"];
+const mmss = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+
+function capSpeaker(n) {
+  const c = ed.cap;
+  while (c.spk.length <= n) {
+    const i = c.spk.length;
+    c.spk.push({ name: `User ${i + 1}`, color: CAP_COLORS[i % CAP_COLORS.length], font: "Segoe UI", size: 0.06, y: 0.88 });
+  }
+  return c.spk[n];
+}
+function styleCaption(it) {
+  const sp = capSpeaker(it.speaker);
+  // Lines that overlap in time (people talking over each other) stack upward instead of printing on top of each other.
+  Object.assign(it, { font: sp.font, size: sp.size, color: sp.color, y: clamp(sp.y - (it.rank || 0) * sp.size * 1.3, 0.04, 0.96), x: 0.5, outline: true });
+}
+const capItems = () => ed.items.filter((i) => i.cap);
+function applySpeaker(n) { for (const it of capItems()) if (it.speaker === n) styleCaption(it); ed.dirty = true; }
+
+function addCaption() {
+  snap();
+  const start = clamp(ed.dom.video.currentTime, ed.start, ed.end - 0.5);
+  const it = { id: nextId++, kind: "text", cap: true, lane: -1, speaker: 0, start, end: Math.min(ed.end, start + 2), text: "Caption" };
+  styleCaption(it);
+  ed.items.push(it);
+  select(it.id);
+  renderCaptions(); renderExport();
+}
+
+async function loadCaptionStatus() {
+  const mine = ed;
+  try { mine.cap.status = await invoke("captions_status"); } catch { mine.cap.status = { engine: false }; }
+  if (ed === mine) renderCaptions();
+}
+
+/// Downloads the chosen model (plus the speaker models the first time), only after the user pressed the button.
+async function downloadCaptionModels() {
+  const c = ed.cap, mine = ed;
+  if (c.dl) return;
+  const want = [];
+  if (!c.status[c.model]) want.push(c.model);
+  if (c.detect && !c.status.speakers) want.push("speakers");
+  c.dl = { frac: 0 };
+  renderCaptions();
+  try {
+    for (let k = 0; k < want.length; k++) {
+      const ch = new tauri.core.Channel();
+      ch.onmessage = (m) => { if (m.step === "progress") { c.dl.frac = (k + m.frac) / want.length; updateCapBars(); } };
+      await invoke("captions_download", { id: want[k], progress: ch });
+    }
+    toast("Caption models ready");
+  } catch (e) { toast(String(e)); }
+  c.dl = null;
+  if (ed === mine) loadCaptionStatus();
+}
+
+function updateCapBars() {
+  const c = ed?.cap, d = ed?.dom;
+  if (!c || !d.capBar) return;
+  if (c.dl) { d.capBar.style.width = `${Math.round(c.dl.frac * 100)}%`; d.capNote.textContent = `Downloading… ${Math.round(c.dl.frac * 100)}%`; }
+  else if (c.run) {
+    const r = c.run, spent = (performance.now() - r.t0) / 1000;
+    const left = r.frac > 0.06 ? spent / r.frac - spent : Math.max(0, r.est - spent);
+    d.capBar.style.width = `${Math.round(r.frac * 100)}%`;
+    d.capNote.textContent = `${r.stage} · about ${mmss(left)} left (${mmss(spent)} so far)`;
+  }
+}
+
+async function generateCaptions(scope) {
+  const c = ed.cap, mine = ed;
+  if (c.run || c.dl) return;
+  if (!mine.info.tracks.length) { toast("This clip has no sound to caption"); return; }
+  const from = scope === "part" ? mine.start : 0, to = scope === "part" ? mine.end : mine.info.duration, len = to - from;
+  if (len < 0.5) { toast("That part is too short to caption"); return; }
+  c.run = { t0: performance.now(), frac: 0, stage: "Starting", est: len * CAP_SPEED[c.model] };
+  renderCaptions();
+  const timer = setInterval(updateCapBars, 500);
+  let lines = null;
+  const ch = new tauri.core.Channel();
+  ch.onmessage = (m) => {
+    if (m.step === "progress") { c.run.frac = m.frac; c.run.stage = m.stage || c.run.stage; updateCapBars(); }
+    else if (m.step === "done") lines = m.lines;
+    else if (m.step === "error") toast(m.message);
+  };
+  try {
+    await invoke("captions_generate", { clip: mine.clip.path, track: mine.ev >= 0 ? mine.ev : 0, start: from, len, model: c.model, speakers: c.detect && !!c.status.speakers, progress: ch });
+  } catch (e) { if (String(e) !== "stopped") toast(String(e)); }
+  clearInterval(timer);
+  c.run = null;
+  if (ed !== mine) return;
+  if (lines) {
+    snap();
+    // New captions replace old ones in the stretch they cover.
+    mine.items = mine.items.filter((i) => !(i.cap && i.end > from && i.start < to));
+    let n = 0;
+    const ends = []; // end time of the last line on each stack level
+    for (const l of lines.sort((p, q) => p.start - q.start)) {
+      if (capItems().length >= 300) break;
+      let rank = ends.findIndex((e) => e <= l.start + 0.05);
+      if (rank < 0) rank = ends.length;
+      ends[rank] = Math.max(l.end, l.start + 0.3);
+      const it = { id: nextId++, kind: "text", cap: true, lane: -1, rank, speaker: l.speaker, start: l.start, end: Math.max(l.end, l.start + 0.3), text: l.text };
+      styleCaption(it);
+      mine.items.push(it); n++;
+    }
+    mine.dirty = true;
+    toast(n ? `Added ${n} captions. Click one on the Captions track to fix a word.` : "No speech was found in that part");
+    renderLanes(); renderProps(); renderExport();
+  }
+  renderCaptions();
+}
+
+function renderCaptions() {
+  const d = ed.dom, box = d.capBox, c = ed.cap, st = c.status;
+  if (!box) return;
+  const kids = [el("p", { class: "ed-note", text: "Writes captions from this clip's sound, on this PC. Nothing is uploaded. PCs without a dedicated graphics card are slow at this and can take a few minutes, but your clip is safe and you can keep editing while it works." })];
+  d.capBar = d.capNote = null;
+  if (!st) kids.push(el("p", { class: "ed-note", text: "Checking…" }));
+  else if (!st.engine) kids.push(el("p", { class: "ed-note", text: "The speech engine files are missing. Update or reinstall Archy to get them." }));
+  else {
+    const have = !!st[c.model] && (!c.detect || st.speakers);
+    if (c.dl || c.run) {
+      d.capBar = el("i");
+      d.capNote = el("span", { class: "sm" });
+      kids.push(el("div", { class: "ed-progress-box" },
+        el("div", { class: "ed-progress" }, d.capBar), d.capNote,
+        el("button", { class: "btn danger", text: c.dl ? "Cancel download" : "Cancel", onclick: () => invoke("captions_cancel").catch(() => {}) })));
+    } else {
+      const model = CAP_MODELS.find((m) => m[0] === c.model);
+      kids.push(el("label", { class: "ed-check" },
+        (() => { const b = el("input", { type: "checkbox" }); b.checked = c.detect; b.addEventListener("change", () => { c.detect = b.checked; renderCaptions(); }); return b; })(),
+        "Tell different speakers apart (User 1, User 2…)"));
+      if (c.more) kids.push(el("div", { class: "chips ed-chips", role: "group", "aria-label": "Caption model" },
+        CAP_MODELS.map(([id, name, hint, mb]) => el("button", { class: "chip", "aria-pressed": String(c.model === id), title: hint,
+          onclick: () => { c.model = id; renderCaptions(); } }, `${name}${st[id] ? "" : ` · ${mb} MB`}`))),
+        el("p", { class: "ed-note", text: model[2] + ". Stronger models read more words correctly but take longer on this PC." }));
+      else kids.push(el("button", { class: "btn", text: "Try a stronger model", onclick: () => { c.more = true; renderCaptions(); } }));
+      if (!have) {
+        const mb = (st[c.model] ? 0 : model[3]) + (c.detect && !st.speakers ? 45 : 0);
+        kids.push(el("button", { class: "btn primary full", text: `Get captions ready (about ${mb} MB, once)`, onclick: downloadCaptionModels }),
+          el("p", { class: "ed-note", text: "Downloaded once from GitHub and kept on this PC. Nothing from your clips is sent." }));
+      } else {
+        const part = !(ed.start < 0.05 && ed.end > ed.info.duration - 0.05);
+        kids.push(el("div", { class: "ed-row" },
+          el("button", { class: "btn primary", text: "Generate whole clip", onclick: () => generateCaptions("all") }),
+          el("button", { class: "btn", text: part ? `Generate selected part (${mmss(ed.start)}-${mmss(ed.end)})` : "Generate selected part", disabled: part ? null : "", title: "The part between the blue trim handles on the Clip track", onclick: () => generateCaptions("part") })),
+          el("p", { class: "ed-note", text: `Estimated about ${mmss(ed.info.duration * CAP_SPEED[c.model])} for the whole clip on a PC without a dedicated graphics card; a faster PC takes less.` }));
+      }
+    }
+    // Speakers found: name, colour, font, size and where their captions sit.
+    const used = [...new Set(capItems().map((i) => i.speaker))].sort();
+    if (used.length) {
+      kids.push(el("div", { class: "t2", text: `${capItems().length} captions · ${used.length} ${used.length === 1 ? "speaker" : "speakers"}` }));
+      for (const n of used) {
+        const sp = capSpeaker(n);
+        const name = el("input", { class: "ed-lane-title", value: sp.name, "aria-label": "Speaker name", maxlength: "20" });
+        name.addEventListener("change", () => { sp.name = name.value.trim() || `User ${n + 1}`; });
+        kids.push(el("div", { class: "cap-spk" },
+          name,
+          el("div", { class: "ed-row", role: "group", "aria-label": `${sp.name} colour` }, CAP_COLORS.map((col) => el("button", {
+            class: "ed-swatch", style: `background:${col}`, "aria-label": col, "aria-pressed": String(sp.color === col),
+            onclick: () => { sp.color = col; applySpeaker(n); renderCaptions(); } }))),
+          chipGroup("Font", FONTS.map(([f, label]) => [f, label, `font-family:"${f}"`]), sp.font, (v) => { sp.font = v; applySpeaker(n); }),
+          sizeSlider("Size", sp.size * 100, 2, 20, (v) => { sp.size = v / 100; applySpeaker(n); }),
+          el("div", { class: "chips ed-chips", role: "group", "aria-label": "Position" },
+            [["Top", 0.12], ["Middle", 0.5], ["Bottom", 0.88]].map(([label, y]) => el("button", { class: "chip", "aria-pressed": String(Math.abs(sp.y - y) < 0.02),
+              onclick: () => { sp.y = y; applySpeaker(n); renderCaptions(); } }, label))),
+          sizeSlider("Height", sp.y * 100, 5, 95, (v) => { sp.y = v / 100; applySpeaker(n); })));
+      }
+      kids.push(el("p", { class: "ed-note", text: "Click a caption on the Captions track to fix its words, change its font or colour, split it (S), or delete it." }),
+        el("button", { class: "btn danger", text: "Delete all captions", onclick: () => {
+          snap(); ed.items = ed.items.filter((i) => !i.cap); ed.selected = null; ed.dirty = true;
+          renderLanes(); renderProps(); renderCaptions(); renderExport();
+        } }));
+    }
+  }
+  box.replaceChildren(...kids);
+  updateCapBars();
+}
+
+const srtTime = (t) => {
+  const ms = Math.round(Math.max(0, t) * 1000), p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${p(Math.floor(ms / 3600000))}:${p(Math.floor(ms / 60000) % 60)}:${p(Math.floor(ms / 1000) % 60)},${p(ms % 1000, 3)}`;
+};
+
+/// Writes the captions next to an export as .srt (times follow the trim; the name shows when several people speak).
+async function saveSrt(mine, saveTo) {
+  const caps = mine.items.filter((i) => i.cap && i.text.trim() && i.end > mine.start && i.start < mine.end).sort((a, b) => a.start - b.start);
+  if (!caps.length) return;
+  const many = new Set(caps.map((i) => i.speaker)).size > 1;
+  const text = caps.map((i, k) => `${k + 1}\n${srtTime(Math.max(i.start, mine.start) - mine.start)} --> ${srtTime(Math.min(i.end, mine.end) - mine.start)}\n${many ? `${mine.cap.spk[i.speaker]?.name || `User ${i.speaker + 1}`}: ` : ""}${i.text.trim()}\n`).join("\n");
+  try { await invoke("save_srt", { path: saveTo.replace(/\.[^.\\/]+$/, "") + ".srt", text }); toast("Subtitle file saved next to the video"); }
+  catch (e) { toast(String(e)); }
 }
 
 function section(title, body) {
@@ -840,7 +1054,7 @@ function select(id) {
 
 /// B10: at most MAX_ITEMS things on one clip, so the editor and export stay fast.
 function full() {
-  if (ed.items.length < MAX_ITEMS) return false;
+  if (ed.items.filter((i) => !i.cap).length < MAX_ITEMS) return false;
   toast(`That's the most one clip can hold (${MAX_ITEMS} items). Remove one to add another.`);
   return true;
 }
@@ -1013,14 +1227,17 @@ function effectiveVolume(it) {
 const KIND_NAME = { text: "Text", image: "Image", video: "Video", audio: "Audio" };
 const KIND_HINT = { image: "an image", video: "a video or GIF", audio: "a sound" };
 
+/// Captions live on their own lane (-1); ordinary text lanes never show them.
+const own = (x, kind, n) => x.kind === kind && x.lane === n && (n === -1) === !!x.cap;
+
 function renderLanes() {
   const d = ed.dom;
   const rows = [];
   const lane = (kind, n) => {
     const track = el("div", { class: "ed-lane-track" + (kind === "audio" ? " audio" : "") });
-    for (const it of ed.items.filter((x) => x.kind === kind && x.lane === n)) {
+    for (const it of ed.items.filter((x) => own(x, kind, n))) {
       const bar = el("div", {
-        class: `ed-item ${kind}` + (it.id === ed.selected ? " on" : "") + (it.stuck ? " stuck" : ""),
+        class: `ed-item ${kind}` + (it.cap ? " cap" : "") + (it.id === ed.selected ? " on" : "") + (it.stuck ? " stuck" : ""),
         "data-id": String(it.id),
         style: `left:${pct(it.start)};width:${pct(it.end - it.start)}`,
         title: (kind === "text" ? it.text : it.name) + (kind === "text" ? "" : " · drag the ends to trim"),
@@ -1041,9 +1258,9 @@ function renderLanes() {
       place(m, n, (e.clientX - r.left) / r.width * ed.info.duration);
     });
     const newest = () => [...ed.media].reverse().find((m) => (m.kind || "image") === kind);
-    const add = el("button", { class: "ed-lane-plus", text: "+", title: kind === "text" ? "Add text here" : `Add the newest ${KIND_HINT[kind]} here`,
+    const add = el("button", { class: "ed-lane-plus", text: "+", title: n === -1 ? "Add a caption line here" : kind === "text" ? "Add text here" : `Add the newest ${KIND_HINT[kind]} here`,
       onclick: () => {
-        if (kind === "text") return addText(n);
+        if (kind === "text") return n === -1 ? addCaption() : addText(n);
         const m = newest();
         if (m) place(m, n, ed.dom.video.currentTime);
         else toast(`Add ${KIND_HINT[kind]} on the left first`);
@@ -1064,12 +1281,12 @@ function renderLanes() {
         el("div", { class: "ed-lane-top" }, name, mute, add),
         el("div", { class: "ed-lane-vol" }, vol, out));
     } else {
-      head = el("span", { class: "ed-lane-name" }, `${KIND_NAME[kind]} ${n + 1}`, add);
+      head = el("span", { class: "ed-lane-name" }, n === -1 ? "Captions" : `${KIND_NAME[kind]} ${n + 1}`, add);
     }
     // Each clip with sound gets its own volume slider right under its bar (same left/width as the bar).
     const withSound = kind === "audio" || kind === "video";
     const vols = withSound ? el("div", { class: "ed-clipvols" }) : null;
-    if (vols) for (const it of ed.items.filter((x) => x.kind === kind && x.lane === n)) {
+    if (vols) for (const it of ed.items.filter((x) => own(x, kind, n))) {
       const out = el("span", { class: "ed-vol", text: `${it.volume}%` });
       const r = el("input", { type: "range", min: "0", max: "200", step: "5", value: String(it.volume), "aria-label": `${it.name} volume`, title: `${it.name}: ${it.volume}%` });
       r.addEventListener("pointerdown", (e) => e.stopPropagation());
@@ -1078,6 +1295,7 @@ function renderLanes() {
     }
     rows.push(el("div", { class: "ed-tl" + (kind === "audio" ? " tall" : "") }, head, track, ...(vols && vols.children.length ? [vols] : [])));
   };
+  lane("text", -1); // the captions get their own timeline
   for (let n = 0; n < ed.lanes.video; n++) lane("video", n);
   for (let n = 0; n < ed.lanes.image; n++) lane("image", n);
   for (let n = 0; n < ed.lanes.text; n++) lane("text", n);
@@ -1624,7 +1842,11 @@ function renderExport() {
     ed.aspect === "original" ? null
       : el("p", { class: "ed-note", text: "Drag the frame on the video to choose what's in shot. Put text inside the frame; anything outside is cut off." }));
   showCrop();
-  ed.dom.export.replaceChildren(fmtSeg, shape, gifOpts, el("div", { class: "ed-row" }, ed.dom.save, ed.dom.copy), ed.dom.progress);
+  const capCount = ed.items.filter((i) => i.cap).length;
+  const srtOpt = capCount && ed.format !== "mp3" ? el("label", { class: "ed-check" },
+    (() => { const b = el("input", { type: "checkbox" }); b.checked = ed.cap.srt; b.addEventListener("change", () => { ed.cap.srt = b.checked; }); return b; })(),
+    "Also save the captions as a .srt subtitle file") : null;
+  ed.dom.export.replaceChildren(fmtSeg, shape, gifOpts, srtOpt, el("div", { class: "ed-row" }, ed.dom.save, ed.dom.copy), ed.dom.progress);
 }
 
 function untouched() {
@@ -1688,7 +1910,10 @@ async function runExport(toClipboard) {
     } });
     const kind = mine.format === "gif" ? "GIF" : mine.format === "mp3" ? "MP3" : "Video";
     if (toClipboard) toast(`${kind} copied. Paste it into Discord or any chat`);
-    else { toast(`${kind} saved`); loadClips(); }
+    else {
+      toast(`${kind} saved`); loadClips();
+      if (mine.cap.srt && saveTo && mine.format !== "mp3") saveSrt(mine, saveTo);
+    }
   } catch (e) {
     toast(String(e) === "cancelled" ? "Export cancelled. Nothing was saved" : String(e));
   } finally {
