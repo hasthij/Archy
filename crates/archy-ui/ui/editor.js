@@ -129,6 +129,9 @@ async function openEditor(clip, opts = {}) {
   loadBookmarks();
 }
 
+window.editorOpen = () => !!ed;
+window.editorBusy = () => !!ed?.busy;
+window.closeEditor = () => closeEditor();
 function closeEditor() {
   if (!ed) return;
   if (ed.busy) { toast("Exporting: wait for it to finish, or press Cancel export"); return; }
@@ -300,6 +303,12 @@ function buildEditor() {
   const side = el("div", { class: "ed-side" },
     section("Trim", trimPanel()),
     section("Split, speed and zoom", (d.secPanel = el("div"))),
+    section("Captions", el("div", { class: "cap-opt" },
+      ico("wand", 22),
+      el("div", { class: "t2", text: "Auto-generate captions" }),
+      el("div", { class: "sm", text: "Runs on this PC. Nothing is uploaded." }),
+      el("button", { class: "btn primary full", text: "Generate", onclick: () => toast("Auto-captions are coming soon") }),
+      el("div", { class: "cap-style" }, el("span", { class: "sm", text: "Style" }), el("select", { class: "input", "aria-label": "Caption style" }, el("option", { text: "Bold white" }))))),
     section("Audio", d.audio),
     section("Selected", d.props),
     section("Export", d.export));
@@ -307,6 +316,7 @@ function buildEditor() {
   const box = el("div", { class: "ed-box", role: "dialog", "aria-modal": "true", "aria-label": "Clip editor" },
     el("div", { class: "player-bar" },
       (d.title = el("span", { class: "ed-title", text: `Edit · ${ed.clip.name}`, title: "Click to rename (F2)" })),
+      el("button", { class: "btn", text: "Change clip", onclick: () => { closeEditor(); window.openPicker?.(); } }),
       (d.close = el("button", { class: "btn", text: "Close", onclick: closeEditor }))),
     el("div", { class: "ed-body" },
       d.bay,
@@ -1056,7 +1066,17 @@ function renderLanes() {
     } else {
       head = el("span", { class: "ed-lane-name" }, `${KIND_NAME[kind]} ${n + 1}`, add);
     }
-    rows.push(el("div", { class: "ed-tl" + (kind === "audio" ? " tall" : "") }, head, track));
+    // Each clip with sound gets its own volume slider right under its bar (same left/width as the bar).
+    const withSound = kind === "audio" || kind === "video";
+    const vols = withSound ? el("div", { class: "ed-clipvols" }) : null;
+    if (vols) for (const it of ed.items.filter((x) => x.kind === kind && x.lane === n)) {
+      const out = el("span", { class: "ed-vol", text: `${it.volume}%` });
+      const r = el("input", { type: "range", min: "0", max: "200", step: "5", value: String(it.volume), "aria-label": `${it.name} volume`, title: `${it.name}: ${it.volume}%` });
+      r.addEventListener("pointerdown", (e) => e.stopPropagation());
+      r.addEventListener("input", () => { it.volume = Number(r.value); out.textContent = `${it.volume}%`; r.title = `${it.name}: ${it.volume}%`; ed.dirty = true; });
+      vols.append(el("div", { class: "ed-clipvol", "data-vid": String(it.id), style: `left:${pct(it.start)};width:${pct(it.end - it.start)}` }, r, out));
+    }
+    rows.push(el("div", { class: "ed-tl" + (kind === "audio" ? " tall" : "") }, head, track, ...(vols && vols.children.length ? [vols] : [])));
   };
   for (let n = 0; n < ed.lanes.video; n++) lane("video", n);
   for (let n = 0; n < ed.lanes.image; n++) lane("image", n);
@@ -1069,6 +1089,11 @@ function renderLanes() {
   const more = (kind, label) => el("button", { class: "btn", text: `+ ${label} track`, disabled: ed.lanes[kind] >= MAX_LANES ? "" : null,
     onclick: () => { ed.lanes[kind]++; renderLanes(); } });
   d.laneButtons.replaceChildren(more("text", "Text"), more("image", "Image"), more("video", "Video"), more("audio", "Audio"));
+}
+
+function syncClipVol(it) {
+  const v = ed.dom.lanes.querySelector(`[data-vid="${it.id}"]`);
+  if (v) { v.style.left = pct(it.start); v.style.width = pct(it.end - it.start); }
 }
 
 /// Drag a bar to move it in time. Its ends trim it: for a video or sound the
@@ -1105,6 +1130,7 @@ function barDrag(bar, it, track) {
         for (const x of group) {
           const b = ed.dom.lanes.querySelector(`[data-id="${x.id}"]`);
           if (b) { b.style.left = pct(x.start); b.style.width = pct(x.end - x.start); }
+          syncClipVol(x);
         }
       } else if (mode === "start") {
         // Media: moving the start trims the front, so it can't go before the file's start.
@@ -1117,6 +1143,7 @@ function barDrag(bar, it, track) {
       }
       bar.style.left = pct(it.start);
       bar.style.width = pct(it.end - it.start);
+      syncClipVol(it);
       ed.dirty = true;
     };
     const up = () => {
@@ -1588,7 +1615,7 @@ function renderExport() {
       el("button", { class: "btn danger", text: "Cancel export", onclick: () => invoke("cancel_export").catch(() => {}) })),
     el("div", { class: "ed-progress" }, ed.dom.bar),
     el("p", { class: "ed-note", text: "Keep the editor open until it's done. Your original clip is never changed." }));
-  ed.dom.save = el("button", { class: "btn primary", text: "Save as…", onclick: () => runExport(false) });
+  ed.dom.save = el("button", { class: "btn primary full", text: "Export clip", onclick: () => runExport(false) });
   ed.dom.copy = el("button", { class: "btn", text: "Copy to clipboard", onclick: () => runExport(true) });
   const shape = el("div", {},
     el("div", { class: "chips ed-chips", role: "group", "aria-label": "Shape" },

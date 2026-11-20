@@ -31,12 +31,12 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Shell::{
     FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, IShellItem, SHCreateItemFromParsingName,
-    FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+    FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowW, GetWindow, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, ShowWindow, GW_OWNER,
-    SW_RESTORE,
+    SW_RESTORE, SW_SHOWNORMAL,
 };
 
 #[derive(Serialize)]
@@ -297,7 +297,7 @@ fn stop_mic_monitor() {
 /// Bookmark times (seconds) saved with a session recording (empty for clips).
 #[tauri::command]
 fn clip_bookmarks(path: String) -> Vec<f64> {
-    clip_path(&path).map(|p| archy_core::session::read_bookmarks(&p)).unwrap_or_default()
+    edit_path(&path).map(|p| archy_core::session::read_bookmarks(&p)).unwrap_or_default()
 }
 
 /// Only paths inside the clips folder are accepted from the page.
@@ -316,6 +316,50 @@ fn clip_path(path: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// Files the user picked with "Browse files" to edit from outside the clips folder.
+/// Only the editor commands accept these; delete/rename/compress still need a real clip.
+static EXTERNAL: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn edit_path(path: &str) -> Result<PathBuf, String> {
+    clip_path(path).or_else(|e| {
+        let p = PathBuf::from(path);
+        let ok = EXTERNAL.lock().map(|l| l.contains(&p)).unwrap_or(false);
+        if ok { Ok(p) } else { Err(e) }
+    })
+}
+
+/// Windows' file picker for an .mp4 to edit. `None` if cancelled.
+#[tauri::command]
+async fn pick_video(window: tauri::WebviewWindow) -> Option<String> {
+    let owner = window.hwnd().ok().map(|h| h.0 as isize);
+    let chosen = tauri::async_runtime::spawn_blocking(move || unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let options = dialog.GetOptions().ok()?;
+        let _ = dialog.SetOptions(options | FOS_FORCEFILESYSTEM);
+        let wide = |t: &str| t.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let (label, pattern) = (wide("MP4 video"), wide("*.mp4"));
+        let types = [windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC {
+            pszName: PCWSTR(label.as_ptr()),
+            pszSpec: PCWSTR(pattern.as_ptr()),
+        }];
+        let _ = dialog.SetFileTypes(&types);
+        let _ = dialog.SetTitle(w!("Choose a video to edit"));
+        dialog.Show(owner.map(|h| HWND(h as *mut _))).ok()?;
+        let item = dialog.GetResult().ok()?;
+        let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok();
+        CoTaskMemFree(Some(name.0 as *const _));
+        path
+    })
+    .await
+    .ok()
+    .flatten()?;
+    if !chosen.to_lowercase().ends_with(".mp4") { return None; }
+    if let Ok(mut l) = EXTERNAL.lock() { l.push(PathBuf::from(&chosen)); }
+    Some(chosen)
+}
+
 #[tauri::command]
 fn copy_clip(path: String) -> Result<(), String> {
     let p = clip_path(&path)?;
@@ -326,14 +370,20 @@ fn copy_clip(path: String) -> Result<(), String> {
     }
 }
 
+/// Opens Explorer with `args` through the shell (ShellExecute), which works when a bare spawn doesn't.
+fn explorer(args: &str) -> Result<(), String> {
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let (verb, file, params) = (wide("open"), wide("explorer.exe"), wide(args));
+    let r = unsafe {
+        ShellExecuteW(None, PCWSTR(verb.as_ptr()), PCWSTR(file.as_ptr()), PCWSTR(params.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL)
+    };
+    if r.0 as usize > 32 { Ok(()) } else { Err(format!("Windows could not open Explorer (code {})", r.0 as usize)) }
+}
+
 #[tauri::command]
 fn reveal_clip(path: String) -> Result<(), String> {
     let p = clip_path(&path)?;
-    std::process::Command::new("explorer")
-        .arg(format!("/select,{}", p.display()))
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    explorer(&format!("/select,\"{}\"", p.display()))
 }
 
 /// Moves a clip to the Recycle Bin (recoverable), never deletes it outright.
@@ -401,11 +451,7 @@ fn rename_clip(path: String, name: String) -> Result<String, String> {
 fn open_clips_folder() -> Result<(), String> {
     let folder = Settings::load().0.save_folder;
     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-    std::process::Command::new("explorer")
-        .arg(&folder)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    explorer(&format!("\"{}\"", folder.display()))
 }
 
 /// The last `lines` lines of Archy's log (%APPDATA%\Archy\archy.log), newest last.
@@ -509,14 +555,11 @@ fn monitors() -> Vec<archy_core::monitors::Monitor> {
 fn open_log_folder() -> Result<(), String> {
     let dir = archy_core::settings::app_dir();
     let log = dir.join("archy.log");
-    let mut cmd = std::process::Command::new("explorer");
     if log.exists() {
-        cmd.arg(format!("/select,{}", log.display()));
+        explorer(&format!("/select,\"{}\"", log.display()))
     } else {
-        cmd.arg(&dir);
+        explorer(&format!("\"{}\"", dir.display()))
     }
-    cmd.spawn().map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 /// Windows' own folder picker, owned by the Archy window. `None` if cancelled.
@@ -579,14 +622,14 @@ async fn compress_clip(app: AppHandle, path: String, target_mb: f64, copy: bool)
 /// Length, size and audio track names of a clip, for the editor.
 #[tauri::command]
 async fn clip_info(path: String) -> Result<editor::ClipInfo, String> {
-    let src = clip_path(&path)?;
+    let src = edit_path(&path)?;
     tauri::async_runtime::spawn_blocking(move || editor::info(&src)).await.map_err(|_| "couldn't read the clip".to_string())?
 }
 
 /// Each audio track as its own file, for the editor's live volume preview.
 #[tauri::command]
 async fn editor_tracks(app: AppHandle, path: String, count: usize, from: f64, len: f64) -> Result<Vec<(String, f64)>, String> {
-    let src = clip_path(&path)?;
+    let src = edit_path(&path)?;
     let tracks = tauri::async_runtime::spawn_blocking(move || editor::preview_tracks(&src, count, from, len))
         .await
         .map_err(|_| "couldn't prepare the audio tracks".to_string())??;
@@ -610,7 +653,7 @@ static EXPORT_TARGET: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(
 /// suggested name). `None` if the user cancels.
 #[tauri::command]
 async fn choose_export_path(window: tauri::WebviewWindow, path: String, format: String) -> Option<String> {
-    let src = clip_path(&path).ok()?;
+    let src = edit_path(&path).ok()?;
     let owner = window.hwnd().ok().map(|h| h.0 as isize);
     let gif = format == "gif";
     let mp3 = format == "mp3";
@@ -655,7 +698,7 @@ async fn choose_export_path(window: tauri::WebviewWindow, path: String, format: 
 /// or copied to the clipboard. Returns the new file's path.
 #[tauri::command]
 async fn export_clip(app: AppHandle, mut request: editor::ExportRequest) -> Result<String, String> {
-    let src = clip_path(&request.path)?;
+    let src = edit_path(&request.path)?;
     if !request.to_clipboard {
         let picked = EXPORT_TARGET.lock().ok().and_then(|mut t| t.take());
         match (&request.save_to, picked) {
@@ -742,7 +785,7 @@ fn app_version() -> &'static str {
 /// A clip's cached thumbnail (made the first time it's asked for).
 #[tauri::command]
 async fn clip_thumb(app: AppHandle, path: String) -> Result<String, String> {
-    let src = clip_path(&path)?;
+    let src = edit_path(&path)?;
     let thumb = tauri::async_runtime::spawn_blocking(move || editor::thumbnail(&src))
         .await
         .map_err(|_| "no thumbnail".to_string())??;
@@ -1053,6 +1096,7 @@ fn main() {
             rename_clip,
             open_clips_folder,
             pick_folder,
+            pick_video,
             clip_info,
             editor_tracks,
             editor_ready,

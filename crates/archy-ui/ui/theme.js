@@ -14,22 +14,30 @@ function resolveTheme(theme) {
 // the window's own storage, never in settings.json, so the recorder is untouched.
 const ARCHY_UI_KEY = "archy-ui-prefs";
 const UI_DEFAULTS = {
-  oled: true, surface: "raised", selected: "tint", accent_hex: "", radius: 14, density: "roomy",
-  icons: 1.6, motion: "subtle", font: "system", library: "grid", nav: "sidebar", tone: "neutral", actions: "icons", scale: 100, thumb: 240, meta: "on",
+  oled: true, surface: "raised", selected: "tint", accent_hex: "", radius: 0, density: "roomy",
+  icons: 1.6, motion: "subtle", font: "grotesk", library: "grid", nav: "rail", tone: "neutral", actions: "icons", scale: 100, thumb: 240, meta: "on", hover_preview: "on",
 };
 let uiPrefs = (() => {
-  try { return { ...UI_DEFAULTS, ...JSON.parse(localStorage.getItem(ARCHY_UI_KEY)) }; } catch { return { ...UI_DEFAULTS }; }
+  try {
+    const s = JSON.parse(localStorage.getItem(ARCHY_UI_KEY)) || {};
+    // v2 (0.8.0): Grotesk + Sharp are the new defaults; older saved choices of those two reset once.
+    if (s.ver !== 2) { delete s.font; delete s.radius; s.ver = 2; }
+    return { ...UI_DEFAULTS, ...s };
+  } catch { return { ...UI_DEFAULTS, ver: 2 }; }
 })();
 
 function applyUi() {
   const root = document.documentElement, p = uiPrefs, d = root.dataset;
   d.oled = p.oled ? "1" : "0";
   d.sl = "glow"; d.tg = "switch"; d.dd = "filled"; d.bt = "outline"; // 0.6.3 look kit
-  d.surface = p.surface; d.selected = p.selected; d.font = p.font; d.nav = p.nav; d.tone = p.tone; d.actions = p.actions; d.density = p.density;
-  if (d.motion !== "reduce") d.motion = p.motion === "none" ? "reduce" : p.motion;
+  // Hybrid Rail fixes nav/surface/tone/selected; old saved values are ignored.
+  d.surface = "raised"; d.selected = "tint"; d.nav = "rail"; d.tone = "neutral";
+  d.font = p.font; d.actions = p.actions; d.density = p.density;
+  d.motion = (p.motion === "none" || d.rm === "1") ? "reduce" : (p.motion || "subtle");
   d.meta = p.meta;
   root.style.setProperty("--thumb-min", `${Number(p.thumb) || 240}px`);
-  root.style.zoom = String((Number(p.scale) || 100) / 100);
+  const z = (Number(p.scale) || 100) / 100;
+  root.style.zoom = String(z); root.style.setProperty("--z", String(z));
   root.style.setProperty("--radius", `${Number(p.radius) || 0}px`);
   root.style.setProperty("--icon-stroke", String(p.icons));
   if (/^#[0-9a-f]{6}$/i.test(p.accent_hex)) {
@@ -53,7 +61,7 @@ function applyLook(look) {
   root.dataset.theme = resolveTheme(look.theme);
   root.dataset.accent = look.accent || "blue";
   root.dataset.density = look.density || "comfortable";
-  root.dataset.motion = look.reduce_motion ? "reduce" : "full";
+  root.dataset.rm = look.reduce_motion ? "1" : "0";
   try { localStorage.setItem(ARCHY_LOOK_KEY, JSON.stringify(look)); } catch {}
   applyUi();
 }

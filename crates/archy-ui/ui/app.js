@@ -8,7 +8,18 @@ let settings = null;
 let presets = [];
 let clips = [];
 let filter = "all";
-let view = "clips";
+let view = "home";
+
+// Starred clips (window-only, by path) feed the Home page.
+let stars = new Set((() => { try { return JSON.parse(localStorage.getItem("archy-stars")) || []; } catch { return []; } })());
+let selected = null; // path of the clip shown in the Clips inspector
+function toggleStar(c) {
+  if (!stars.delete(c.path)) stars.add(c.path);
+  try { localStorage.setItem("archy-stars", JSON.stringify([...stars])); } catch {}
+  document.querySelectorAll(".star").forEach((b) => b.classList.toggle("on", stars.has(b.dataset.path)));
+  if (view === "home") renderHome();
+  else if (view === "clips") { $("#clips").dataset.key = ""; renderClips(); }
+}
 
 // ---------- small DOM helpers (never innerHTML with data) ----------
 function el(tag, attrs = {}, ...kids) {
@@ -38,7 +49,28 @@ function toast(msg) {
 // Pages under Settings (the rail's gear); Games and Voice also have rail buttons.
 const SETTINGS_PAGES = ["recording", "games", "audio", "hotkeys", "sounds", "storage", "appearance", "general"];
 
+/// In-app confirm window (replaces the browser's native confirm box).
+function askConfirm(title, text, okLabel, onOk) {
+  const prev = document.activeElement;
+  const close = () => { wrap.remove(); document.removeEventListener("keydown", key, true); prev?.focus?.(); };
+  const key = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+  const ok = el("button", { class: "btn pri primary", onclick: () => { close(); onOk(); } }, el("span", { text: okLabel }));
+  const wrap = el("div", { class: "modal confirm", role: "dialog", "aria-modal": "true", "aria-label": title, onclick: (e) => { if (e.target === wrap) close(); } },
+    el("div", { class: "cbox" },
+      el("h2", { text: title }), el("p", { text }),
+      el("div", { class: "cact" }, el("button", { class: "btn", onclick: close }, el("span", { text: "Stay" })), ok)));
+  document.addEventListener("keydown", key, true);
+  document.body.append(wrap);
+  ok.focus();
+}
+
 function show(name) {
+  // Editing a clip: stay put unless the user agrees to drop their unsaved work.
+  if (window.editorOpen?.() && name !== "editor") {
+    if (window.editorBusy?.()) { toast("Exporting: wait for it to finish first"); return; }
+    askConfirm("Leave the editor?", "Your unsaved edits will be lost.", "Leave editor", () => { window.closeEditor(); show(name); });
+    return;
+  }
   view = name;
   if (name !== "audio") stopMonitor();
   const inSettings = SETTINGS_PAGES.includes(name);
@@ -48,27 +80,49 @@ function show(name) {
   document.querySelectorAll(".rail-btn").forEach((b) => b.setAttribute("aria-current",
     b.dataset.view === name || (!railHit && inSettings && b.dataset.group === "settings") ? "page" : "false"));
   $("#settings-nav").hidden = !inSettings;
-  document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== `view-${name}`));
-  $("#layout-switch").hidden = name !== "clips";
+  stopPreview();
+  document.querySelectorAll(".view").forEach((v) => { v.hidden = v.id !== `view-${name}`; if (!v.hidden) { v.classList.remove("pg-in"); void v.offsetWidth; v.classList.add("pg-in"); } });
   if (name === "clips") loadClips();
+  if (name === "home") loadClips().then(renderHome);
+  if (name === "editor") renderEdRecent();
 }
 
-// Bottom-right layout switcher for the Clips page (window-only pref, like the Appearance picker).
-const LAYOUTS = [
-  ["grid", "Grid", '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>'],
-  ["list", "List", '<rect x="4" y="5" width="4" height="4" rx="1"/><rect x="4" y="15" width="4" height="4" rx="1"/><path d="M11 7h9M11 17h9"/>'],
-  ["table", "Table", '<path d="M4 6h16M4 10.5h16M4 15h16M4 19.5h16"/>'],
-  ["latest", "Latest + grid", '<rect x="4" y="4" width="16" height="8" rx="1.5"/><rect x="4" y="14" width="4.5" height="6" rx="1"/><rect x="9.75" y="14" width="4.5" height="6" rx="1"/><rect x="15.5" y="14" width="4.5" height="6" rx="1"/>']];
+// Icons (24x24 paths) shared by the new Hybrid UI.
+const ICO = {
+  clips: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4-2.5z"/>',
+  star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/>',
+  play: '<path d="M8 5v14l11-7z"/>',
+  scissors: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.1 15.9M14.5 14.5 20 20M8.1 8.1 12 12"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  share: '<path d="M12 3v12M7 8l5-5 5 5M5 14v5h14v-5"/>',
+  x: '<path d="M6 6l12 12M18 6 6 18"/>',
+  compress: '<path d="M4 9h16M4 15h16M12 3v4m0-4-2 2m2-2 2 2M12 21v-4m0 4-2-2m2 2 2-2"/>',
+  download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
+  check: '<path d="m5 12 5 5 9-10"/>',
+  wand: '<path d="m5 19 11-11M14 4l1-2 1 2 2 1-2 1-1 2-1-2-2-1zM19 12l.7-1.4.7 1.4 1.4.7-1.4.7-.7 1.4-.7-1.4-1.4-.7z"/>',
+  trash: '<path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13"/>',
+};
+const GR = [["#ff7a45","#7a1f5c"],["#4d8dff","#10205a"],["#3ddc97","#0b3b3a"],["#ffc857","#6a2a12"],["#b58cff","#1d1450"],["#ff5468","#3a0f26"],["#58d3ff","#0b2a4a"],["#9be15d","#1c3a14"]];
+function ico(k, size) {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("aria-hidden", "true");
+  if (size) { s.setAttribute("width", size); s.setAttribute("height", size); }
+  s.innerHTML = ICO[k];
+  return s;
+}
+
+// Grid / Large / List segment in the Clips toolbar (window-only pref).
+const LAYOUTS = [["grid", "Grid"], ["lg", "Large"], ["list", "List"]];
+const layoutNow = () => (uiPrefs.library === "lg" || uiPrefs.library === "list" ? uiPrefs.library : (uiPrefs.library === "table" ? "list" : "grid"));
 function renderLayoutSwitch() {
-  const box = $("#layout-switch");
-  box.replaceChildren(...LAYOUTS.map(([v, name, svg]) => {
-    const b = el("button", { title: name, "aria-label": name, "aria-pressed": String(uiPrefs.library === v),
-      onclick: () => { setUi({ library: v }); $("#clips").dataset.key = ""; renderClips(); renderLayoutSwitch(); if (typeof renderAppearance === "function" && settings) renderAppearance(); } });
-    b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${svg}</svg>`;
-    return b;
-  }));
+  const box = $("#clip-view");
+  box.replaceChildren(...LAYOUTS.map(([v, name]) => el("button", { text: name, "aria-pressed": String(layoutNow() === v),
+    onclick: () => { setUi({ library: v }); $("#clips").dataset.key = ""; renderClips(); renderLayoutSwitch(); } })));
 }
 renderLayoutSwitch();
+
 document.querySelectorAll(".nav").forEach((b) => b.addEventListener("click", () => show(b.dataset.view)));
 window.showView = show; // for welcome.js
 
@@ -224,9 +278,15 @@ function when(ms) {
   return d.toLocaleDateString([], { month: "short", day: "numeric" }) + ` ${time}`;
 }
 
+let clipsSig = "";
+/// Reloads the list; re-renders only when it really changed (keeps thumbnails and hover state). Returns true if changed.
 async function loadClips() {
-  try { clips = await invoke("list_clips"); } catch { clips = []; }
+  let next; try { next = await invoke("list_clips"); } catch { next = []; }
+  const sig = next.map((c) => `${c.path}|${c.bytes}|${c.modified}`).join("\n");
+  if (sig === clipsSig) return false;
+  clipsSig = sig; clips = next;
   renderClips();
+  return true;
 }
 
 /// "Roblox 2026-10-11 09-29-33 (edit)" -> "Roblox".
@@ -234,17 +294,33 @@ const gameOf = (c) => c.name.replace(/\s+\d{4}-\d\d-\d\d.*$/, "") || "Other";
 let search = "";
 
 function renderFilters() {
-  const games = [...new Set(clips.map(gameOf))].slice(0, 6);
-  const options = [["all", "All"], ["today", "Today"], ...games.map((g) => [`game:${g}`, g])];
-  if (!options.some(([v]) => v === filter)) filter = "all";
-  const key = options.map(([v]) => v).join("|") + "#" + filter;
+  const todayStr = new Date().toDateString();
+  const counts = new Map();
+  for (const c of clips) counts.set(gameOf(c), (counts.get(gameOf(c)) || 0) + 1);
+  const lib = [
+    ["all", "All clips", clips.length, ico("clips", 16)],
+    ["starred", "Starred", clips.filter((c) => stars.has(c.path)).length, ico("star", 16)]];
+  const games = [...counts].map(([g, n]) => [`game:${g}`, g, n]);
+  if (![...lib, ...games].some(([v]) => v === filter)) filter = "all";
+  const key = [...lib, ...games].map(([v, , n]) => v + n).join("|") + "#" + filter;
   const box = $("#clip-filters");
   if (box.dataset.key === key) return;
   box.dataset.key = key;
-  box.replaceChildren(...options.map(([v, label]) => el("button", {
-    "aria-pressed": String(v === filter), text: label,
+  const nav = (v, label, n, icon) => el("button", {
+    class: "nav", "aria-pressed": String(v === filter),
     onclick: () => { filter = v; renderClips(); },
-  })));
+  }, icon, el("span", { text: label }), el("span", { class: "n", text: String(n) }));
+  box.replaceChildren(
+    el("div", { class: "grp first", text: "Library" }),
+    ...lib.map(([v, l, n, i]) => nav(v, l, n, i)),
+    el("div", { class: "grp", text: "Games" }),
+    ...games.map(([v, l, n]) => nav(v, l, n, gameIco(l))));
+}
+
+// Game's real app icon when Archy has one saved; otherwise a gradient monogram tile.
+function gameIco(name) {
+  const g = GR[gIdx(name)];
+  return el("i", { class: "dot", style: `background:${g[0]}` });
 }
 
 /// Clip cards by clip + size + featured, reused across renders.
@@ -252,48 +328,257 @@ let cardCache = new Map();
 
 function renderClips() {
   const grid = $("#clips");
-  const todayStr = new Date().toDateString();
   const q = search.trim().toLowerCase();
   const shown = clips.filter((c) =>
-    (filter === "all" || (filter === "today" ? new Date(c.modified).toDateString() === todayStr : gameOf(c) === filter.slice(5)))
+    (filter === "all" || (filter === "starred" ? stars.has(c.path) : gameOf(c) === filter.slice(5)))
     && (!q || c.name.toLowerCase().includes(q)));
   const total = clips.reduce((n, c) => n + c.bytes, 0);
-  $("#clips-meta").textContent = `${clips.length} clip${clips.length === 1 ? "" : "s"} · ${(total / 1e9).toFixed(1)} GB · everything stays on this PC`;
+  $("#clips-ft").textContent = `${clips.length} clip${clips.length === 1 ? "" : "s"} · ${(total / 1e9).toFixed(1)} GB · everything stays on this PC`;
   renderFilters();
-  $("#clips-empty").hidden = shown.length > 0;
-  $("#clips-empty").textContent = clips.length
-    ? "No clips match. Try another filter or search."
-    : "No clips yet. While a game is open, press your save hotkey and the last seconds land here.";
+  const empty = $("#clips-empty");
+  empty.hidden = shown.length > 0;
+  const noClips = !clips.length;
+  empty.querySelector(".t1").textContent = noClips ? "No clips yet" : "No clips here";
+  empty.querySelector(".sub").textContent = noClips
+    ? "While a game is open, press your save hotkey and the last seconds land here."
+    : "Try another game or clear the search.";
+  const lay = layoutNow();
+  grid.classList.toggle("lg", lay === "lg");
+  grid.classList.toggle("list", lay === "list");
   // Keep existing cards (and their loaded thumbnails) when nothing changed.
-  const key = shown.map((c) => c.path + c.bytes).join("|") + (q || filter);
+  const key = shown.map((c) => c.path + c.bytes).join("|") + (q || filter) + lay;
+  if (!shown.some((c) => c.path === selected)) selected = null;
+  renderInspector();
   if (grid.dataset.key === key) return;
   grid.dataset.key = key;
-  grid.dataset.view = uiPrefs.library === "latest" ? "grid" : uiPrefs.library;
-  // The newest clip gets the big card when you're looking at everything. Cards
-  // that are still the same clip are reused (moving a node keeps its loaded
-  // thumbnail), so a new clip adds one card instead of rebuilding them all.
+  // Cards that are still the same clip are reused (moving a node keeps its
+  // loaded thumbnail), so a new clip adds one card instead of rebuilding all.
   const next = new Map();
-  grid.replaceChildren(...shown.map((c, i) => {
-    const featured = uiPrefs.library === "latest" && i === 0 && filter === "all" && !q && c.kind !== "shot";
-    const id = `${c.path}|${c.bytes}|${featured}`;
-    const card = cardCache.get(id) || clipCard(c, featured);
+  grid.replaceChildren(...shown.map((c) => {
+    const id = `${c.path}|${c.bytes}|${lay}`;
+    const card = cardCache.get(id) || (lay === "list" ? listRow(c) : thCard(c));
+    card.classList.toggle("sel", c.path === selected);
     next.set(id, card);
     return card;
   }));
   cardCache = next;
 }
-$("#clip-search").addEventListener("input", (e) => { search = e.target.value; renderClips(); });
 
-const playIcon = () => {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  const c = document.createElementNS(svg.namespaceURI, "circle");
-  c.setAttribute("cx", "12"); c.setAttribute("cy", "12"); c.setAttribute("r", "11"); c.setAttribute("fill", "rgba(13,14,16,.8)");
-  const p = document.createElementNS(svg.namespaceURI, "path");
-  p.setAttribute("d", "M10 8l6 4-6 4z"); p.setAttribute("fill", "#fff");
-  svg.append(c, p);
-  return svg;
+function select(c) {
+  selected = c.path;
+  document.querySelectorAll("#clips .tc, #clips .lrow").forEach((n) => n.classList.toggle("sel", n.dataset.path === selected));
+  renderInspector();
+}
+
+const gIdx = (g) => { let h = 0; for (const ch of g) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h % 8; };
+const clipSub = (c) => `${gameOf(c)} · ${when(c.modified)} · ${MB(c.bytes)}`;
+function thumbBox(c, dur) {
+  const g = GR[gIdx(gameOf(c))];
+  const img = el("img", { alt: "", class: "thumb-img", decoding: "async" });
+  if (c.kind === "shot") { img.src = fileSrc(c.path); img.onload = () => img.classList.add("ready"); }
+  else { img.dataset.clip = c.path; thumbObserver.observe(img); }
+  const pl = el("span", { class: "pl" }, el("i", {}, ico("play", 16)));
+  return el("div", { class: "th" }, img, dur ? pl : null,
+    dur ? el("span", { class: "dur", text: c.kind === "shot" ? "Screenshot" : MB(c.bytes) }) : null);
+}
+/// One design-lab card. `pick(c)` runs on click; default = select, double-click plays.
+function thCard(c, pick, preview) {
+  const act = () => (c.kind === "shot" ? viewShot(c) : play(c));
+  const card = el("div", { class: "tc", tabindex: "0", "data-path": c.path,
+    onclick: () => (pick ? pick(c) : select(c)),
+    ondblclick: () => { if (!pick) act(); },
+    onkeydown: (e) => { if (e.key === "Enter" && !e.target.closest("input,button")) (pick ? pick(c) : act()); },
+    oncontextmenu: (e) => clipMenu(e, e.currentTarget, c) },
+    starBtn(c), thumbBox(c, true),
+    el("div", { class: "meta" }, renameable(el("b", { class: "clip-name", text: c.name }), c), el("span", { class: "sm", text: clipSub(c) })));
+  if (preview && c.kind !== "shot") hoverPreview(card, c);
+  return card;
+}
+/// Hover preview: after a short pause a muted loop of the clip plays inside its thumbnail.
+/// Nothing is loaded until then, one video at a time, and it is torn down on leave.
+/// Window-only, so the recorder is never touched. Off in Settings > Appearance or with Motion: None.
+let pvLive = null, pvTimer = 0;
+function stopPreview() {
+  clearTimeout(pvTimer);
+  if (pvLive) { pvLive.v.removeAttribute("src"); pvLive.v.load(); pvLive.v.remove(); pvLive.card.classList.remove("previewing"); pvLive = null; }
+}
+function hoverPreview(card, c) {
+  card.addEventListener("pointerenter", () => {
+    if (uiPrefs.hover_preview !== "on" || document.documentElement.dataset.motion === "reduce") return;
+    stopPreview();
+    pvTimer = setTimeout(() => {
+      const th = card.querySelector(".th"); if (!th) return;
+      const v = el("video", { class: "pv-vid", muted: "", loop: "", playsinline: "", preload: "auto", "aria-hidden": "true", tabindex: "-1" });
+      v.muted = true; v.disablePictureInPicture = true;
+      v.addEventListener("loadedmetadata", () => { if (v.duration > 6) v.currentTime = v.duration * 0.3; });
+      v.addEventListener("playing", () => card.classList.add("previewing"), { once: true });
+      v.src = fileSrc(c.path);
+      th.prepend(v); pvLive = { v, card };
+      v.play().catch(stopPreview);
+    }, 380);
+  });
+  card.addEventListener("pointerleave", stopPreview);
+  card.addEventListener("click", stopPreview);
+}
+function listRow(c) {
+  const s = starBtn(c); s.classList.add("inl");
+  return el("div", { class: "lrow", tabindex: "0", "data-path": c.path,
+    onclick: () => select(c), ondblclick: () => (c.kind === "shot" ? viewShot(c) : play(c)),
+    oncontextmenu: (e) => clipMenu(e, e.currentTarget, c) },
+    s, thumbBox(c, false), renameable(el("b", { class: "clip-name", text: c.name }), c),
+    el("span", { class: "mono", text: c.kind === "shot" ? "Shot" : "Clip" }),
+    el("span", { class: "sm", text: when(c.modified) }),
+    el("span", { class: "mono", text: MB(c.bytes) }));
+}
+
+const starBtn = (c) => el("button", { class: "star" + (stars.has(c.path) ? " on" : ""), "data-path": c.path, title: "Star", "aria-label": `Star ${c.name}`,
+  onclick: (e) => { e.stopPropagation(); toggleStar(c); } }, svgEl("M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z", true));
+
+/// Right panel on the Clips page: details and every action for the selected clip.
+let inspectedKey = "";
+function renderInspector() {
+  const box = $("#clip-inspector");
+  const c = clips.find((x) => x.path === selected);
+  const key = c ? c.path + c.bytes + stars.has(c.path) : "";
+  if (key === inspectedKey) return;
+  inspectedKey = key;
+  if (!c) { box.replaceChildren(el("div", { class: "empty" }, ico("clips"), el("div", { class: "sub", text: "Select a clip to see its details." }))); return; }
+  const isShot = c.kind === "shot";
+  const g = GR[gIdx(gameOf(c))];
+  const thumb = thumbBox(c, false);
+  thumb.style.borderRadius = "10px";
+  const fb = (text, icon, fn, cls = "btn") => el("button", { class: cls, onclick: fn }, ico(icon), el("span", { text }));
+  const on = stars.has(c.path);
+  const starB = fb("", "star", () => { toggleStar(c); syncStarB(); });
+  const syncStarB = () => {
+    const now = stars.has(c.path);
+    starB.querySelector("span").textContent = now ? "Starred · shows on Home" : "Star to show on Home";
+    starB.title = now ? "Click to unstar" : "Click to star";
+    starB.setAttribute("aria-pressed", String(now));
+    starB.classList.toggle("on", now);
+  };
+  syncStarB();
+  const kv = (k, v) => [el("span", { text: k }), el("span", { text: v })];
+  const compress = fb("Compress", "compress", () => compressDialog(c));
+  if (c.bytes < MIN_MB * 1e6) { compress.disabled = true; compress.title = "This clip is already under 10 MB, so there is nothing to shrink"; }
+  box.replaceChildren(
+    thumb,
+    el("div", { class: "t2", text: c.name }),
+    el("div", { class: "kv" }, ...kv("Game", gameOf(c)), ...kv("Format", (c.path.split(".").pop() || "").toUpperCase()), ...kv("Size", MB(c.bytes)), ...kv("Saved", when(c.modified))),
+    isShot ? null : fb("Open in editor", "scissors", () => openEditor(c), "btn primary"),
+    starB,
+    fb("Copy to clipboard", "share", async () => { try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); } catch (e) { toast(String(e)); } }),
+    isShot ? null : compress,
+    fb("Show in folder", "folder", () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e)))));
+}
+
+const openFolder = () => invoke("open_clips_folder").catch((e) => toast(String(e)));
+const searchBox = (ph, oninput, label) => {
+  const i = el("input", { type: "search", placeholder: ph, "aria-label": label || ph, oninput });
+  return el("label", { class: "search" }, ico("search"), i);
 };
+const folderBtn = () => el("button", { class: "btn", onclick: openFolder }, ico("folder"), el("span", { text: "Open folder" }));
+
+/// Home click: pulse the card, switch to Clips, then select, scroll to and flash that exact clip.
+let revealing = false;
+async function revealInClips(c, from) {
+  if (revealing) return;
+  revealing = true;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (from && !reduce) { from.classList.add("launch"); await new Promise((r) => setTimeout(r, 360)); }
+  filter = "all"; search = ""; $("#clip-search").value = "";
+  selected = c.path;
+  show("clips");
+  await loadClips();
+  select(c);
+  const card = [...document.querySelectorAll("#clips .tc, #clips .lrow")].find((n) => n.dataset.path === c.path);
+  if (card) { card.scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" }); card.classList.add("flash"); setTimeout(() => card.classList.remove("flash"), 2200); }
+  if (from) from.classList.remove("launch");
+  revealing = false;
+}
+
+/// Home: only starred clips. Newest is the hero, the rest sit on shelves by game.
+let homeQ = "";
+function renderHome() {
+  const box = $("#home-body");
+  const all = clips.filter((c) => stars.has(c.path) && c.kind !== "shot").sort((a, b) => b.modified - a.modified);
+  const list = all.filter((c) => !homeQ || c.name.toLowerCase().includes(homeQ));
+  const head = el("div", { class: "hd" }, el("h1", { text: "Starred" }),
+    el("div", { class: "tools" }, searchBox("Search starred", (e) => { homeQ = e.target.value.trim().toLowerCase(); renderHome(); $("#home-body input")?.focus(); }), folderBtn()));
+  if (homeQ) head.querySelector("input").value = homeQ;
+  let body;
+  if (!list.length) {
+    body = el("div", { class: "empty" }, ico("star", 30), el("div", { class: "t1", text: all.length ? "No starred clips match" : "No starred clips yet" }),
+      el("div", { class: "sub", text: all.length ? "Try another word." : "Star a clip in Clips and it shows up here. Home only shows the ones you starred." }),
+      all.length ? null : el("button", { class: "btn pri primary", onclick: () => show("clips") }, ico("clips"), el("span", { text: "Go to Clips" })));
+  } else {
+    const h = list[0], g = GR[gIdx(gameOf(h))];
+    const img = el("img", { alt: "", decoding: "async" });
+    img.dataset.clip = h.path; thumbObserver.observe(img);
+    const hs = starBtn(h); hs.classList.add("inl");
+    const hero = el("div", { class: "hero" }, img,
+      el("div", { class: "in" },
+        el("span", { class: "chip on", text: "★ Starred" }),
+        el("div", { class: "ttl", text: h.name }),
+        el("div", { class: "hm", text: `${gameOf(h)} · ${MB(h.bytes)} · ${when(h.modified)}` }),
+        el("div", { class: "btns" },
+          el("button", { class: "btn pri primary", onclick: () => revealInClips(h, hero) }, ico("clips"), el("span", { text: "Show in Clips" })),
+          el("button", { class: "btn", onclick: () => play(h) }, ico("play"), el("span", { text: "Play" })),
+          el("button", { class: "btn edit", onclick: () => openEditor(h) }, ico("scissors"), el("span", { text: "Edit" })),
+          hs)));
+    const by = new Map();
+    for (const c of list) { const k = gameOf(c); if (!by.has(k)) by.set(k, []); by.get(k).push(c); }
+    const shelves = [...by].map(([k, cs]) => el("div", { class: "shelf" },
+      el("h3", {}, el("span", { text: k }), el("span", { class: "sm", text: `${cs.length} starred` })),
+      el("div", { class: "row2" }, ...cs.map((c) => { const card = thCard(c, () => revealInClips(c, card), true); return card; }))));
+    body = el("div", {}, hero, ...shelves);
+  }
+  box.replaceChildren(...[el("div", { class: "HM" }, head, body)]);
+}
+
+/// Editor empty page: last three clips as quick picks.
+function renderEdRecent() {
+  const recent = clips.filter((c) => c.kind !== "shot").slice(0, 3);
+  $("#ed-recent").hidden = !recent.length;
+  $("#ed-recent-row").replaceChildren(...recent.map((c) => thCard(c, (x) => openEditor(x))));
+}
+
+/// Editor page actions: pick from the library (popup) or any mp4 on disk.
+function openPicker() {
+  const box = $("#picker");
+  const close = () => { box.hidden = true; box.replaceChildren(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  const vids = clips.filter((c) => c.kind !== "shot");
+  const grid = el("div", { class: "mgrid" });
+  const fill = (q) => {
+    const m = vids.filter((c) => c.name.toLowerCase().includes(q.toLowerCase()));
+    grid.replaceChildren(...(m.length ? m.map((c) => thCard(c, (x) => { close(); openEditor(x); })) : [el("p", { class: "sm", text: "No clips match." })]));
+  };
+  const inp = el("input", { type: "search", placeholder: "Search your clips", "aria-label": "Search your clips", oninput: (e) => fill(e.target.value) });
+  const browse = el("button", { class: "btn", onclick: () => { close(); $("#ed-browse").click(); } }, el("span", { text: "Browse files…" }));
+  box.replaceChildren(
+    el("div", { class: "modal" },
+      el("div", { class: "mbk", "data-close": "1", onclick: close }),
+      el("div", { class: "mbox", role: "dialog", "aria-modal": "true", "aria-label": "Choose a clip to edit" },
+        el("div", { class: "mh" },
+          el("div", {}, el("span", { class: "t2", text: "Choose a clip to edit" }), el("span", { class: "sm", text: `From your library · ${vids.length} clips` })),
+          el("button", { class: "btn ghost", "aria-label": "Close", onclick: close }, ico("x"))),
+        el("div", { class: "mtools" }, el("label", { class: "search" }, ico("search"), inp)),
+        grid,
+        el("div", { class: "mf" }, el("span", { class: "sm", text: "Clip in another folder? Drop an .mp4 anywhere in this window, or" }), browse))));
+  fill("");
+  box.hidden = false;
+  inp.focus();
+}
+$("#ed-pick-lib").addEventListener("click", async () => { if (!clips.length) await loadClips(); openPicker(); });
+$("#ed-browse").addEventListener("click", async () => {
+  try {
+    const path = await invoke("pick_video");
+    if (path) openEditor({ path, name: path.split(/[\\/]/).pop().replace(/\.[^.]+$/, "") });
+  } catch (e) { toast(String(e)); }
+});
+$("#clip-search").addEventListener("input", (e) => { search = e.target.value; renderClips(); });
 
 /// A screenshot in the library: the picture is its own thumbnail.
 const ICON_D = {'copy': 'M9 9h10v10H9zM5 15V5h10', 'edit': 'M6 6a2.5 2.5 0 1 0 0 .01M6 18a2.5 2.5 0 1 0 0 .01M8 7.5L20 18M8 16.5L20 6',
@@ -341,7 +626,7 @@ window.startRename = startRename;
 // F2 renames the clip card under the keyboard focus or mouse.
 document.addEventListener("keydown", (e) => {
   if (e.key !== "F2" || e.target.closest?.("input,textarea")) return;
-  const card = document.querySelector(".clip:focus-within, .clip:hover");
+  const card = document.querySelector(".tc:focus-within, .tc:hover, .lrow:hover");
   card?.querySelector(".clip-name")?.dispatchEvent(new Event("rename"));
 });
 function renameable(nameEl, c) {
@@ -366,44 +651,14 @@ function clipMenu(e, card, c) {
   ctxMenu = el("div", { class: "ctx-menu", role: "menu" },
     item("rename", "Rename", () => nameEl?.dispatchEvent(new Event("rename"))),
     c.kind === "shot" ? null : item("edit", "Edit", () => openEditor(c)),
-    item("folder", "Show in folder", () => invoke("reveal_clip", { path: c.path }).catch((x) => toast(String(x)))));
+    item("folder", "Show in folder", () => invoke("reveal_clip", { path: c.path }).catch((x) => toast(String(x)))),
+    item("trash", "Move to Recycle Bin", async () => { try { await invoke("recycle_clip", { path: c.path }); toast("Moved to Recycle Bin"); loadClips(); } catch (x) { toast(String(x)); } }));
   document.body.append(ctxMenu);
   const r = ctxMenu.getBoundingClientRect();
   ctxMenu.style.left = Math.max(4, Math.min(e.clientX, innerWidth - r.width - 4)) + "px";
   ctxMenu.style.top = Math.max(4, Math.min(e.clientY, innerHeight - r.height - 4)) + "px";
   ctxMenu.querySelector("button").focus();
 }
-function setLbl(btn, t) { btn.querySelector(".lbl").textContent = t; btn.classList.toggle("sure", t === "Sure?"); }
-function shotCard(c) {
-  const img = el("img", { alt: "", class: "thumb-img", decoding: "async", loading: "lazy", src: fileSrc(c.path) });
-  img.onload = () => img.classList.add("ready");
-  let confirming = false;
-  const del = iconize(el("button", { class: "btn danger", text: "Delete", "aria-label": `Move ${c.name} to Recycle Bin` }), "trash");
-  del.addEventListener("click", async () => {
-    if (!confirming) {
-      confirming = true;
-      setLbl(del, "Sure?");
-      setTimeout(() => { confirming = false; setLbl(del, "Delete"); }, 3000);
-      return;
-    }
-    try { await invoke("recycle_clip", { path: c.path }); toast("Moved to Recycle Bin"); loadClips(); }
-    catch (e) { toast(String(e)); }
-  });
-  return el("article", { class: "clip shot", oncontextmenu: (e) => clipMenu(e, e.currentTarget, c) },
-    el("button", { class: "thumb", "aria-label": `View ${c.name}`, onclick: () => viewShot(c) },
-      img, el("span", { class: "size-tag", text: "Screenshot" })),
-    el("div", { class: "clip-body" },
-      renameable(el("div", { class: "clip-name", text: c.name }), c),
-      el("div", { class: "clip-meta", text: when(c.modified) }),
-      el("div", { class: "clip-actions" },
-        iconize(el("button", { class: "btn primary", text: "Copy", onclick: async () => {
-          try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); }
-          catch (e) { toast(String(e)); }
-        } }), "copy"),
-        iconize(el("button", { class: "btn", text: "Folder", onclick: () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e))) }), "folder"),
-        del)));
-}
-
 /// Shows a screenshot full size; a click or Escape closes it.
 function viewShot(c) {
   const close = () => { box.remove(); document.removeEventListener("keydown", onKey); };
@@ -414,45 +669,6 @@ function viewShot(c) {
   document.body.append(box);
 }
 
-function clipCard(c, hero = false) {
-  if (c.kind === "shot") return shotCard(c);
-  // A small cached JPEG, fetched when the card scrolls into view (decoding a
-  // video per card to show one frame made the library lag).
-  const video = el("img", { alt: "", class: "thumb-img", decoding: "async" });
-  video.dataset.clip = c.path;
-  thumbObserver.observe(video);
-  let confirming = false;
-  const del = iconize(el("button", { class: "btn danger", text: "Delete", "aria-label": `Move ${c.name} to Recycle Bin` }), "trash");
-  del.addEventListener("click", async () => {
-    if (!confirming) {
-      confirming = true;
-      setLbl(del, "Sure?");
-      setTimeout(() => { confirming = false; setLbl(del, "Delete"); }, 3000);
-      return;
-    }
-    try { await invoke("recycle_clip", { path: c.path }); toast("Moved to Recycle Bin"); loadClips(); }
-    catch (e) { toast(String(e)); }
-  });
-  const fresh = Date.now() - c.modified < 10 * 60 * 1000;
-  return el("article", { class: "clip" + (hero ? " hero" : ""), oncontextmenu: (e) => clipMenu(e, e.currentTarget, c) },
-    el("button", { class: "thumb", "aria-label": `Play ${c.name}`, onclick: () => play(c) },
-      video, el("span", { class: "play" }, playIcon()), el("span", { class: "size-tag", text: MB(c.bytes) }),
-      hero && fresh ? el("span", { class: "new-tag", text: "Just saved" }) : null),
-    el("div", { class: "clip-body" },
-      renameable(el("div", { class: "clip-name", text: c.name }), c),
-      el("div", { class: "clip-meta", text: when(c.modified) }),
-      el("div", { class: "clip-actions" },
-        compressButton(c),
-        iconize(el("button", { class: "btn primary", text: "Copy", onclick: async () => {
-          try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); }
-          catch (e) { toast(String(e)); }
-        } }), "copy"),
-        iconize(el("button", { class: "btn", text: "Rename", onclick: (e) => startRename(e.currentTarget.closest(".clip")?.querySelector(".clip-name"), c) }), "pencil"),
-        iconize(el("button", { class: "btn", text: "Edit", onclick: () => openEditor(c) }), "edit"),
-        iconize(el("button", { class: "btn", text: "GIF", title: "Make a GIF from this clip", onclick: () => openEditor(c, { format: "gif" }) }), "gif"),
-        iconize(el("button", { class: "btn", text: "Folder", onclick: () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e))) }), "folder"),
-        del)));
-}
 
 const MIN_MB = 10, MAX_MB = 10000;
 /** Fmt a size in MB as "850 MB" or "1.5 GB". */
@@ -611,7 +827,7 @@ function settingCard(def) {
         def.options.map((o) => el("button", {
           class: "chip", "aria-pressed": String(o === sel),
           onclick: () => save({ [def.key]: o.value }),
-        }, o.label, o.value === def.rec ? el("span", { class: "star", text: "★", "aria-label": "recommended" }) : null))),
+        }, o.label, o.value === def.rec ? el("span", { class: "rec-star", text: "★", "aria-label": "recommended" }) : null))),
       el("div", { class: "explain" },
         el("div", { class: "best" }, el("b", { text: "Best for: " }), sel.best),
         hasMeters ? el("div", { class: "meters" }, meter("FPS cost", sel.f, FPS_WORD, true), meter("Quality", sel.q, Q_WORD), meter("File size", sel.z, Z_WORD)) : null)));
@@ -1792,78 +2008,60 @@ function renderAppearance() {
   const pick = (patch, msg) => { Object.assign(settings, patch); applySettingsLook(); save(patch, msg); };
   // Window-only choices (never reach the recorder): kept in the window's own storage by theme.js.
   const ui = (patch, msg, redo) => { setUi(patch); if (redo) { $("#clips").dataset.key = ""; renderClips(); } renderAppearance(); toast(msg); };
-  const themeCard = (value, title, about, on, onclick) => el("button", {
-    class: "theme-card", role: "radio", "aria-checked": String(on), onclick,
-  }, el("div", { class: `mini ${value === "oled" ? "dark" : value}`, style: value === "oled" ? "background:#000" : null },
-    value === "system" ? null : [el("div", { class: "r" }), el("div", { class: "c" }, el("i"), el("i"), el("i"), el("u"))]),
-    el("b", { text: title }), el("span", { text: about }));
   const seg = (label, cur, opts, onpick) => el("div", { class: "seg", role: "group", "aria-label": label },
     opts.map(([v, text]) => el("button", { "aria-pressed": String(String(cur) === String(v)), text, onclick: () => onpick(v, text) })));
-  const row = (title, about, ...ctl) => el("div", { class: "card setting" },
-    el("div", { class: "about" }, el("h3", { text: title }), el("p", { text: about })), el("div", { class: "pick" }, ...ctl));
   const u = uiPrefs, dark = settings.theme === "dark";
-  const ACCENTS = [["blue", "Blue", "#4D8DFF"], ["violet", "Violet", "#8B7CFF"], ["teal", "Teal", "#2EC4A6"], ["orange", "Orange", "#FF9F43"]];
-  const EXTRA_ACCENTS = [["Rose", "#FF6B8A"], ["Green", "#4ADE80"], ["Cyan", "#22D3EE"], ["Amber", "#FFC53D"], ["Red", "#FF5C5C"], ["Silver", "#D4D8E0"]];
-  const TONES = [["neutral", "Neutral"], ["midnight", "Midnight"], ["graphite", "Graphite"], ["warm", "Warm"], ["forest", "Forest"]];
+  const AC = [["Core", [["Blue", "#4D8DFF"], ["Sky", "#38BDF8"], ["Cyan", "#22D3EE"], ["Teal", "#2EC4A6"], ["Green", "#3DDC84"], ["Lime", "#A3E635"]]],
+    ["Warm", [["Yellow", "#FACC15"], ["Amber", "#FFB020"], ["Orange", "#FF9F43"], ["Red", "#F25555"], ["Rose", "#FF6B8A"], ["Pink", "#F472B6"]]],
+    ["Cool", [["Violet", "#8B7CFF"], ["Purple", "#A855F7"], ["Fuchsia", "#D946EF"], ["Indigo", "#6366F1"], ["Navy", "#3B6FE0"], ["Ice", "#9CC9FF"]]],
+    ["Soft", [["Mint", "#7EE7C4"], ["Peach", "#FFB48A"], ["Coral", "#FF7F6B"], ["Lilac", "#C4B5FD"], ["Sand", "#D9C7A3"], ["Silver", "#C3CAD6"]]]];
   const customOn = /^#[0-9a-f]{6}$/i.test(u.accent_hex);
-  // Little drawings of each clip layout so the choice is visible, not guessed.
-  const LIB = [
-    ["grid", "Grid", "Even thumbnails, as many as fit. Best for browsing."],
-    ["list", "List", "One clip per row with a small thumbnail. Best for names."],
-    ["table", "Table", "Dense rows, tiny thumbnails. Best for big libraries."],
-    ["latest", "Latest + grid", "Newest clip big at the top, the rest below."]];
-  const libCard = ([v, title, about]) => el("button", { class: "theme-card", role: "radio", "aria-checked": String(u.library === v), onclick: () => ui({ library: v }, `${title} layout`, true) },
-    el("div", { class: `mini lib-${v}` }, Array.from({ length: v === "grid" ? 6 : v === "latest" ? 5 : 4 }, () => el("i"))),
-    el("b", { text: title }), el("span", { text: about }));
+  const curHex = customOn ? u.accent_hex.toUpperCase() : "#4D8DFF";
+  const LIB = [["grid", "Grid"], ["list", "List"], ["table", "Table"], ["latest", "Latest"]];
+  const sec = (t, ...rows) => el("div", { class: "lsec" }, el("h3", { text: t }), ...rows);
+  const set = (t, d, ctl) => el("div", { class: "lset" }, el("div", {}, el("b", { text: t }), el("small", { text: d })), ctl);
+  const tcard = (value, title, on, onclick) => el("button", { class: "tcard", role: "radio", "aria-checked": String(on), onclick },
+    el("i", { style: value === "system" ? "background:linear-gradient(90deg,#f4f5f7 50%,#0d0f13 50%)" : `background:linear-gradient(90deg,${value === "light" ? "#fff" : value === "oled" ? "#08090b" : "#14171d"} 0 22%,${value === "light" ? "#f4f5f7" : value === "oled" ? "#000" : "#0d0f13"} 22%)` }), el("span", { text: title }));
+  const acBtn = ([name, hex]) => el("button", { class: "ac", role: "radio", "aria-checked": String(curHex === hex), title: name, onclick: () => (hex === "#4D8DFF" ? (setUi({ accent_hex: "" }), pick({ accent: "blue" }, "Blue accent"), renderAppearance()) : ui({ accent_hex: hex }, `${name} accent`)) },
+    el("i", { style: `background:${hex}` }), name);
   const panel = [
-    el("div", { class: "card" },
-      el("h3", { text: "Theme" }),
-      el("p", { class: "sub", style: "margin:0 0 16px", text: "OLED is pure black, best on OLED screens. System follows Windows. The sun/moon button on the left switches at any time." }),
-      el("div", { class: "themes", role: "radiogroup", "aria-label": "Theme" },
-        themeCard("dark", "Dark", "Soft charcoal, easy next to a game", dark && !u.oled, () => { setUi({ oled: false }); pick({ theme: "dark" }, "Dark theme"); renderAppearance(); }),
-        themeCard("oled", "OLED", "True black, saves power on OLED", dark && u.oled, () => { setUi({ oled: true }); pick({ theme: "dark" }, "OLED theme"); renderAppearance(); }),
-        themeCard("light", "Light", "Bright rooms and daytime", settings.theme === "light", () => pick({ theme: "light" }, "Light theme")),
-        themeCard("system", "System", "Follows your Windows setting", settings.theme === "system", () => pick({ theme: "system" }, "System theme")))),
-    el("div", { class: "card" },
-      el("h3", { text: "Clip library layout" }),
-      el("p", { class: "sub", style: "margin:0 0 16px", text: "How the Clips page lays out your recordings." }),
-      el("div", { class: "themes", role: "radiogroup", "aria-label": "Clip library layout" }, LIB.map(libCard))),
-    row("Navigation", "Sidebar shows names next to the icons. Icon rail is slimmer and gives clips more room.",
-      seg("Navigation", u.nav, [["sidebar", "Sidebar"], ["rail", "Icon rail"]], (v, t) => ui({ nav: v }, `${t} navigation`))),
-    row("Surface style", "Outlined draws thin borders. Flat drops them for a quieter look. Raised adds a soft shadow.",
-      seg("Surface style", u.surface, [["flat", "Flat"], ["outlined", "Outlined"], ["raised", "Raised"]], (v, t) => ui({ surface: v }, `${t} surfaces`))),
-    row("Dark tone", "Tints the dark theme's greys. Only applies with Dark (not OLED black).",
-      seg("Dark tone", u.tone, TONES, (v, t) => { setUi({ tone: v, oled: v === "neutral" ? u.oled : false }); pick({ theme: "dark" }, `${t} tone`); renderAppearance(); })),
-    row("Accent colour", "Buttons, highlights and progress bars.",
-      el("div", { class: "swatches", role: "radiogroup", "aria-label": "Accent colour" },
-        ACCENTS.map(([v, name, hex]) => el("button", { class: "swatch", role: "radio", "aria-checked": String(!customOn && settings.accent === v), "aria-label": name, title: name, style: `background:${hex}`,
-          onclick: () => { setUi({ accent_hex: "" }); pick({ accent: v }, `${name} accent`); renderAppearance(); } })),
-        EXTRA_ACCENTS.map(([name, hex]) => el("button", { class: "swatch sm", role: "radio", "aria-checked": String(customOn && u.accent_hex.toLowerCase() === hex.toLowerCase()), "aria-label": name, title: name, style: `background:${hex}`,
-          onclick: () => ui({ accent_hex: hex }, `${name} accent`) })),
-        el("input", { type: "color", value: customOn ? u.accent_hex : "#4D8DFF", "aria-label": "Custom accent colour", title: "Custom colour",
-          onchange: (e) => ui({ accent_hex: e.target.value }, "Custom accent") }))),
-    row("Selected state", "How the chosen option in a group is shown. Tint is calmer; solid is louder.",
-      seg("Selected state", u.selected, [["tint", "Tint"], ["solid", "Solid"]], (v, t) => ui({ selected: v }, `${t} selection`))),
-    row("Corner radius", "How round buttons and cards are. 0 is sharp, 16 is soft.",
-      seg("Corner radius", u.radius, [[0, "0"], [4, "4"], [8, "8"], [12, "12"], [16, "16"]], (v) => ui({ radius: Number(v) }, `Corners ${v}px`))),
-    row("Density", "Compact fits more on screen. Roomy gives everything space.",
-      seg("Density", u.density, [["compact", "Compact"], ["cozy", "Cozy"], ["roomy", "Roomy"]],
-        (v, t) => { setUi({ density: v }); pick({ density: v === "compact" ? "compact" : "comfortable" }, `${t} spacing`); renderAppearance(); })),
-    row("Icon weight", "Thickness of the icon lines. Thin looks refined, bold reads faster.",
-      seg("Icon weight", u.icons, [[1.3, "Thin"], [1.6, "Regular"], [2, "Bold"]], (v, t) => ui({ icons: Number(v) }, `${t} icons`))),
-    row("Motion", "None turns animations off. Subtle is quick fades. Full adds hover lift. Recording is never affected.",
-      seg("Motion", u.motion, [["none", "None"], ["subtle", "Subtle"], ["full", "Full"]],
-        (v, t) => { setUi({ motion: v }); pick({ reduce_motion: v === "none" }, `${t} motion`); renderAppearance(); })),
-    row("Clip buttons", "Icons keep each clip tidy (hover for the name). Text shows the full words.",
-      seg("Clip buttons", u.actions, [["icons", "Icons"], ["text", "Text"]], (v, t) => ui({ actions: v }, `${t} on clip buttons`))),
-    row("Font", "Only fonts already on Windows, so nothing is downloaded.",
-      seg("Font", u.font, [["system", "Segoe UI"], ["bahnschrift", "Bahnschrift"], ["calibri", "Calibri"], ["cascadia", "Cascadia Mono"]], (v) => ui({ font: v }, "Font changed"))),
-    row("UI size", "Scales the whole window. Bigger is easier to read from a distance.",
-      seg("UI size", u.scale, [[90, "90%"], [100, "100%"], [115, "115%"], [130, "130%"]], (v) => ui({ scale: Number(v) }, `UI size ${v}%`))),
-    row("Thumbnail size", "How wide clip thumbnails are in Grid layouts.",
-      seg("Thumbnail size", u.thumb, [[180, "Small"], [240, "Medium"], [320, "Large"]], (v, t) => ui({ thumb: Number(v) }, `${t} thumbnails`))),
-    row("Clip details", "Shows the date under each clip. Off gives a cleaner library.",
-      seg("Clip details", u.meta, [["on", "Show"], ["off", "Hide"]], (v, t) => ui({ meta: v }, `${t} clip details`))),
+    sec("Theme", el("div", { class: "lset col" }, el("div", { class: "themes", role: "radiogroup", "aria-label": "Theme" },
+      tcard("dark", "Dark", dark && !u.oled, () => { setUi({ oled: false }); pick({ theme: "dark" }, "Dark theme"); renderAppearance(); }),
+      tcard("oled", "OLED", dark && u.oled, () => { setUi({ oled: true }); pick({ theme: "dark" }, "OLED theme"); renderAppearance(); }),
+      tcard("light", "Light", settings.theme === "light", () => pick({ theme: "light" }, "Light theme")),
+      tcard("system", "System", settings.theme === "system", () => pick({ theme: "system" }, "System theme"))),
+      el("small", { text: "OLED is pure black, best on OLED screens. System follows Windows. The sun/moon button on the left switches any time." }))),
+    sec("Accent colour", el("div", { class: "lset col" },
+      el("div", {}, el("b", { text: "Pick a colour" }), el("small", { text: "Used for buttons, selected items and highlights. 24 presets, or make your own." })),
+      ...AC.map(([g, l]) => el("div", { class: "stack" }, el("div", { class: "gh", text: g }), el("div", { class: "accents", role: "radiogroup", "aria-label": g + " accents" }, l.map(acBtn)))),
+      el("div", { class: "gh", text: "Custom" }),
+      el("div", { class: "cust" }, el("input", { type: "color", value: curHex, "aria-label": "Custom accent colour", onchange: (e) => ui({ accent_hex: e.target.value }, "Custom accent") }), el("span", { class: "pill", text: curHex })))),
+    sec("Layout",
+      set("Clip library layout", "How Clips lists your videos. Grid browses, List shows names, Table fits big libraries, Latest puts the newest clip on top.",
+        seg("Clip library layout", u.library, LIB, (v, t) => ui({ library: v }, `${t} layout`, true))),
+      set("Thumbnail size", "Bigger thumbnails show more detail, smaller fit more per row.",
+        seg("Thumbnail size", u.thumb, [[180, "Small"], [240, "Medium"], [320, "Large"]], (v, t) => ui({ thumb: Number(v) }, `${t} thumbnails`))),
+      set("Clip details", "Show the date under each clip. Off gives a cleaner library.",
+        seg("Clip details", u.meta, [["on", "Show"], ["off", "Hide"]], (v, t) => ui({ meta: v }, `${t} clip details`))),
+      set("Clip buttons", "Icons keep each clip tidy (hover for the name). Words show the full label.",
+        seg("Clip buttons", u.actions, [["icons", "Icons"], ["text", "Words"]], (v, t) => ui({ actions: v }, `${t} on clip buttons`)))),
+    sec("Style",
+      set("Corner radius", "How round cards and buttons are. 0 is sharp, 16 is soft.",
+        seg("Corner radius", u.radius, [[0, "Sharp"], [4, "4"], [8, "8"], [12, "12"], [16, "Soft"]], (v) => ui({ radius: Number(v) }, `Corners ${v}px`))),
+      set("Density", "Roomy has more space. Compact fits more on screen.",
+        seg("Density", u.density, [["compact", "Compact"], ["cozy", "Cozy"], ["roomy", "Roomy"]],
+          (v, t) => { setUi({ density: v }); pick({ density: v === "compact" ? "compact" : "comfortable" }, `${t} spacing`); renderAppearance(); })),
+      set("Icon weight", "Thin looks refined, bold reads faster.",
+        seg("Icon weight", u.icons, [[1.3, "Thin"], [1.6, "Regular"], [2, "Bold"]], (v, t) => ui({ icons: Number(v) }, `${t} icons`))),
+      set("Font", "Only fonts already on Windows, so nothing is downloaded.",
+        seg("Font", u.font, [["grotesk", "Grotesk"], ["inter", "Inter"], ["system", "Segoe UI"], ["bahnschrift", "Bahnschrift"], ["calibri", "Calibri"], ["cascadia", "Cascadia Mono"]], (v) => ui({ font: v }, "Font changed"))),
+      set("UI size", "Scales the whole window.",
+        seg("UI size", u.scale, [[90, "90%"], [100, "100%"], [115, "115%"], [130, "130%"]], (v) => ui({ scale: Number(v) }, `UI size ${v}%`))),
+      set("Motion", "None turns animations off. Subtle is quick fades. Full adds hover lift. Recording is never affected.",
+        seg("Motion", u.motion, [["none", "Off"], ["subtle", "Subtle"], ["full", "Full"]],
+          (v, t) => { setUi({ motion: v }); pick({ reduce_motion: v === "none" }, `${t} motion`); renderAppearance(); })),
+      set("Hover preview", "Home clips play a short silent loop when you rest the mouse on them. Off means zero video decoding in the window.",
+        seg("Hover preview", u.hover_preview, [["on", "On"], ["off", "Off"]], (v, t) => { stopPreview(); ui({ hover_preview: v }, `Hover preview ${t.toLowerCase()}`); }))),
   ];
   $("#appearance-settings").replaceChildren(...panel);
 }
@@ -1900,6 +2098,19 @@ function notesView(md) {
 
 function setUpdateDot(on) { $("#update-btn")?.classList.toggle("has-update", !!on); }
 
+/// Rail update button: idle / checking (pulses) / latest (green check).
+const UPD = { idle: ["Check for updates", "download"], checking: ["Checking…", "download"], latest: ["Up to date", "check"] };
+function setUpd(state) {
+  const b = $("#update-btn");
+  if (!b) return;
+  const [text, icon] = UPD[state];
+  const t = `${text}${appVersion ? ` · v${appVersion}` : ""}`;
+  b.title = t; b.setAttribute("aria-label", t);
+  b.classList.toggle("checking", state === "checking");
+  b.classList.toggle("latest", state === "latest");
+  b.replaceChildren(ico(icon));
+}
+
 /// The update dialog. `u`: an update already found (opens straight to it);
 /// otherwise it checks first.
 async function updateDialog(u = null) {
@@ -1918,16 +2129,17 @@ async function updateDialog(u = null) {
   const closeBtn = (label = "Close") => el("button", { class: "btn", text: label, onclick: close });
   if (!u) {
     show([el("div", { class: "upd-spin" }), el("p", { text: "Checking GitHub for a newer Archy…" })], [closeBtn("Cancel")]);
+    setUpd("checking");
     try { u = await invoke("check_update", { manual: true }); }
-    catch (e) { show([el("p", { class: "upd-big", text: "Couldn't check right now" }), el("p", { class: "sub", text: `${e}. Are you online?` })], [el("button", { class: "btn", text: "Try again", onclick: () => updateDialog() }), closeBtn()]); return; }
+    catch (e) { setUpd("idle"); show([el("p", { class: "upd-big", text: "Couldn't check right now" }), el("p", { class: "sub", text: `${e}. Are you online?` })], [el("button", { class: "btn", text: "Try again", onclick: () => updateDialog() }), closeBtn()]); return; }
     if (!back.isConnected) return;
     if (!u) {
-      knownUpdate = null; setUpdateDot(false);
+      knownUpdate = null; setUpdateDot(false); setUpd("latest");
       show([el("p", { class: "upd-big", text: "You're up to date" }), el("p", { class: "sub", text: `Archy v${appVersion} is the newest version.` })], [closeBtn()]);
       return;
     }
   }
-  knownUpdate = u; setUpdateDot(true);
+  knownUpdate = u; setUpdateDot(true); setUpd("idle");
   const status = el("p", { class: "sub" });
   const install = el("button", { class: "btn primary", text: "Install now", onclick: async () => {
     install.disabled = true;
@@ -1952,7 +2164,7 @@ async function updateDialog(u = null) {
 async function checkUpdate(openDialog = true) {
   let u = null;
   try { u = await invoke("check_update", { manual: false }); } catch { return; }
-  if (!u) return;
+  if (!u) { if (!knownUpdate) setUpd("latest"); return; }
   const fresh = !knownUpdate || knownUpdate.version !== u.version;
   knownUpdate = u;
   setUpdateDot(true);
@@ -1997,11 +2209,14 @@ const thumbObserver = new IntersectionObserver((entries) => {
   applySettingsLook();
   try { appVersion = await invoke("app_version"); } catch {}
   $("#app-version").textContent = appVersion ? `v${appVersion}` : "";
+  setUpd("idle");
   $("#update-btn").addEventListener("click", () => updateDialog(knownUpdate));
   renderAll();
   refreshStatus();
   clips = await firstClips;
+  clipsSig = clips.map((c) => `${c.path}|${c.bytes}|${c.modified}`).join("\n");
   renderClips();
+  renderHome();
   window.maybeWelcome?.();
   loadDevices();
   checkUpdate();
@@ -2010,7 +2225,7 @@ const thumbObserver = new IntersectionObserver((entries) => {
   const syncIdle = () => document.body.classList.toggle("idle", document.hidden || !document.hasFocus());
   for (const [t, o] of [["visibilitychange", document], ["blur", window], ["focus", window]]) o.addEventListener(t, syncIdle);
   syncIdle();
-  setInterval(() => { if (view === "clips" && !document.hidden) loadClips(); }, 4000);
+  setInterval(() => { if ((view === "clips" || view === "home") && !document.hidden) loadClips().then((changed) => changed && view === "home" && renderHome()); }, 4000);
 })();
 
 
@@ -2104,38 +2319,104 @@ function renderSounds() {
 }
 
 
-// ---------- settings search: Ctrl+K ----------
-// Searches page names and every setting title in the settings pages.
-(function palette() {
-  const box = el("div", { class: "palette", hidden: "" });
-  const input = el("input", { type: "search", placeholder: "Search settings…", "aria-label": "Search settings" });
-  const list = el("div", { class: "palette-list", role: "listbox" });
-  box.append(input, list);
-  document.body.append(box);
-  const close = () => { box.hidden = true; };
-  const items = () => {
-    const out = [];
+// ---------- settings search (sidebar, Ctrl K) ----------
+// Filters the real setting cards in place (handlers stay alive): matching cards
+// show under a per-section heading, the sidebar shows hit counts.
+(function settingsSearch() {
+  const input = $("#settings-search"), nav = $("#settings-nav");
+  if (!input || !nav) return;
+  const TITLES = {};
+  nav.querySelectorAll(".nav").forEach((b) => { TITLES[b.dataset.view] = b.textContent.replace(/\d+$/, "").trim(); });
+  const cardsOf = (v) => [...v.querySelectorAll(".card")].filter((c) => !c.parentElement.closest(".card"));
+  const empty = el("div", { class: "empty", hidden: true });
+  document.querySelector(".main").append(empty);
+  let from = null;
+  function clear() {
+    nav.classList.remove("searching");
+    empty.hidden = true;
+    nav.querySelectorAll(".nav").forEach((b) => { b.classList.remove("zero"); const n = b.querySelector(".n"); if (n) n.textContent = ""; });
     for (const p of SETTINGS_PAGES) {
-      const nav = document.querySelector(`#settings-nav [data-view="${p}"]`);
-      out.push({ page: p, label: nav ? nav.textContent : p, title: null });
-      document.querySelectorAll(`#view-${p} .card h3`).forEach((h) => out.push({ page: p, label: h.textContent, title: h, in: nav ? nav.textContent : p }));
+      const v = $(`#view-${p}`);
+      v?.querySelector(".sres-t")?.remove();
+      v?.classList.remove("sres");
+      v?.querySelector(".head")?.removeAttribute("hidden");
+      if (v) cardsOf(v).forEach((c) => (c.hidden = false));
     }
-    return out;
-  };
-  const draw = () => {
+  }
+  function run() {
     const q = input.value.trim().toLowerCase();
-    const hits = items().filter((i) => !q || i.label.toLowerCase().includes(q) || (i.in || "").toLowerCase().includes(q)).slice(0, 12);
-    list.replaceChildren(...hits.map((i) => el("button", { class: "palette-item", onclick: () => {
-      close(); show(i.page); if (i.title) i.title.scrollIntoView({ block: "center" });
-    } }, el("b", { text: i.label }), i.in ? el("span", { class: "sub", text: i.in }) : null)));
-  };
-  input.addEventListener("input", draw);
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter") list.querySelector("button")?.click(); });
-  box.addEventListener("click", (e) => { if (e.target === box) close(); });
+    if (!q) { const was = from; from = null; if (was !== null) { clear(); show(view === "search" ? was : view); } else clear(); return; }
+    if (from === null) from = SETTINGS_PAGES.includes(view) ? view : "recording";
+    clear();
+    nav.classList.add("searching");
+    let total = 0;
+    for (const p of SETTINGS_PAGES) {
+      const v = $(`#view-${p}`);
+      if (!v) continue;
+      let hits = 0;
+      for (const c of cardsOf(v)) { const ok = c.textContent.toLowerCase().includes(q); c.hidden = !ok; if (ok) hits++; }
+      total += hits;
+      const b = nav.querySelector(`.nav[data-view="${p}"]`);
+      if (b) { b.classList.toggle("zero", !hits); b.querySelector(".n").textContent = hits || ""; }
+      v.classList.add("sres");
+      v.querySelector(".head")?.setAttribute("hidden", "");
+      if (hits) v.prepend(el("div", { class: "t2 sres-t", text: TITLES[p] || p }));
+      v.hidden = !hits;
+    }
+    document.querySelectorAll(".view:not(.sres)").forEach((v) => (v.hidden = true));
+    view = "search";
+    empty.hidden = !!total;
+    if (!total) empty.replaceChildren(ico("search", 30), el("div", { class: "t2", text: `No settings match "${input.value.trim()}"` }), el("div", { class: "sub", text: 'Try a shorter word, like "mic" or "clip".' }));
+  }
+  input.addEventListener("input", run);
+  input.addEventListener("keydown", (e) => { if (e.key === "Escape") { input.value = ""; run(); } });
+  nav.querySelectorAll(".nav").forEach((b) => b.addEventListener("click", () => { if (input.value) { input.value = ""; from = null; clear(); } }));
   document.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); box.hidden = false; input.value = ""; draw(); input.focus(); }
-    else if (e.key === "Escape" && !box.hidden) close();
+    if (!((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k")) return;
+    e.preventDefault();
+    if (!SETTINGS_PAGES.includes(view) && view !== "search") show("recording");
+    input.focus(); input.select();
   });
 })();
 
-$("#settings-search")?.addEventListener("click", () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, cancelable: true })));
+// ---------- drag an .mp4 onto the window to edit it ----------
+(function dragDrop() {
+  let depth = 0;
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+  const set = (on) => { document.body.classList.toggle("dragging", on); document.querySelector(".dz")?.classList.toggle("over", on); };
+  addEventListener("dragenter", (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth++; set(true); });
+  addEventListener("dragleave", (e) => { if (!hasFiles(e)) return; depth = Math.max(0, depth - 1); if (!depth) set(false); });
+  addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
+  addEventListener("drop", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); depth = 0; set(false);
+    const f = [...e.dataTransfer.files].find((x) => /\.mp4$/i.test(x.name));
+    if (!f) return toast("Drop an .mp4 file");
+    // The WebView gives no path, so match a library clip by file name.
+    const c = clips.find((x) => x.path.split(/[\\/]/).pop().toLowerCase() === f.name.toLowerCase());
+    if (c) openEditor(c); else toast("Not in your library. Use Browse files…");
+  });
+})();
+
+// ---------- Home typing banner (random quote, types then erases; paused when Home is not showing) ----------
+(function typer() {
+  const out = document.getElementById("typer-text");
+  if (!out) return;
+  const Q = ["archy clip that", "holy clip", "that was INSANE. clip it.", "clip that. clip that NOW.", "no way that just happened",
+    "your best plays, saved locally", "press the hotkey, thank yourself later", "zero lag, all clips", "ctrl+shift+C and chill",
+    "was that a world record? clipped.", "the replay buffer never blinks", "gg. clipped.", "everything stays on this PC", "one more clip..."];
+  let last = -1, i = 0, text = "", dir = 1, wait = 0;
+  const pick = () => { let n; do n = Math.floor(Math.random() * Q.length); while (n === last); last = n; text = Q[n]; i = 0; dir = 1; };
+  pick();
+  const rm = () => document.documentElement.dataset.motion === "reduce";
+  (function tick() {
+    const home = view === "home" && !document.hidden;
+    if (!home) { setTimeout(tick, 600); return; }
+    if (rm()) { out.textContent = text; setTimeout(() => { pick(); tick(); }, 4000); return; }
+    if (wait > 0) { wait--; setTimeout(tick, 60); return; }
+    i += dir; out.textContent = text.slice(0, i);
+    if (dir === 1 && i >= text.length) { dir = -1; wait = 35; }
+    else if (dir === -1 && i <= 0) { pick(); wait = 6; }
+    setTimeout(tick, dir === 1 ? 55 + Math.random() * 50 : 22);
+  })();
+})();

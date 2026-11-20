@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Archy Design Lab 2</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--acc:#4D8DFF;--bg:#0d0f13;--p1:#14171d;--p2:#1a1e26;--ln:#262b35;--tx:#eef1f6;--mu:#98a1b3;--dim:#667085;--r:14px;--title:"Space Grotesk","Segoe UI",system-ui,sans-serif;--font:Inter,"Segoe UI",system-ui,sans-serif}
+*{box-sizing:border-box;margin:0}
+body{font:14px/1.5 var(--font);background:#07080b;color:var(--tx);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+body[data-mode=light]{--bg:#f4f5f7;--p1:#fff;--p2:#eceef2;--ln:#dde1e8;--tx:#10131a;--mu:#4b5565;--dim:#7a8394}
+body[data-mode=oled]{--bg:#000;--p1:#07080a;--p2:#101216;--ln:#1c1f26}
+body[data-mono=on]{--title:"JetBrains Mono",Consolas,monospace}
+body[data-round=sharp]{--r:4px}body[data-round=soft]{--r:20px}
+select,.in,.seg,.tc,.ac,.snav button,.rb,.rail .logo,.kbd,.pill,.shelf h3 span,.hero .tag,.th em{border-radius:var(--r)!important}
+.seg button{border-radius:calc(var(--r) - 2px)!important}
+.tog,.meter,.meter i{border-radius:calc(var(--r)*3)!important}.tog:after{border-radius:calc(var(--r)*2)!important}
+.step .n,.empty .big{border-radius:var(--r)!important}
+button,input,select{font:inherit;color:inherit}
+svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}svg .f{fill:currentColor;stroke:none}
+.lab{display:flex;gap:10px 18px;align-items:center;flex-wrap:wrap;padding:10px 16px;background:#0b0c10;border-bottom:1px solid #222;color:#cbd1dc;font-size:12px}
+.lab b{color:#fff}.lab .g{display:flex;gap:4px;align-items:center}
+.lab button{background:#171a21;border:1px solid #2a2f3a;color:#cbd1dc;padding:4px 9px;border-radius:7px;cursor:pointer}
+.lab button[aria-pressed=true]{background:var(--acc);border-color:var(--acc);color:#fff}
+.lab .sw{width:18px;height:18px;padding:0;border-radius:50%;border:2px solid transparent}.lab .sw[aria-pressed=true]{border-color:#fff}
+.stage{flex:1;display:flex;min-height:0;background:var(--bg);color:var(--tx)}
+.rail{width:68px;background:var(--p1);border-right:1px solid var(--ln);display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 0}
+.rail .logo{width:40px;height:40px;border-radius:12px;background:var(--acc);color:#fff;font:800 18px var(--title);display:grid;place-items:center;margin-bottom:10px}
+.rb{width:44px;height:44px;border-radius:12px;border:0;background:none;color:var(--mu);display:grid;place-items:center;cursor:pointer;transition:.18s}
+.rb:hover{background:var(--p2);color:var(--tx)}.rb.on{background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc)}
+.rail .sp{flex:1}
+.snav{width:250px;background:var(--p1);border-right:1px solid var(--ln);padding:26px 14px;display:none;flex-direction:column;gap:2px}
+body[data-page=settings] .snav{display:flex}
+.snav h4{font:700 11px var(--font);letter-spacing:.12em;text-transform:uppercase;color:var(--dim);padding:0 12px 10px}
+.snav button{display:flex;gap:12px;align-items:center;border:0;background:none;padding:10px 12px;border-radius:10px;color:var(--mu);cursor:pointer;text-align:left}
+.snav button:hover{background:var(--p2);color:var(--tx)}.snav button.on{background:color-mix(in srgb,var(--acc) 16%,transparent);color:var(--tx)}.snav button.on svg{color:var(--acc)}
+.main{flex:1;overflow:auto;padding:28px 34px 40px;min-width:0}
+.pg{display:none}body[data-page=home] #p-home,body[data-page=clips] #p-clips,body[data-page=editor] #p-editor,body[data-page=games] #p-games,body[data-page=voice] #p-voice,body[data-page=settings] #p-settings{display:block}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px;gap:16px}
+.top h1{font:700 30px var(--title);letter-spacing:-.03em}.top p{color:var(--mu)}
+.btn{background:var(--acc);color:#fff;border:0;border-radius:calc(var(--r) - 4px);padding:10px 16px;font-weight:600;cursor:pointer;white-space:nowrap}
+.ghost{background:var(--p2);color:var(--tx);border:1px solid var(--ln)}
+.status{display:flex;align-items:center;gap:10px;background:var(--p1);border:1px solid var(--ln);border-radius:var(--r);padding:12px 16px;margin-bottom:22px;flex-wrap:wrap}
+.dot{width:9px;height:9px;border-radius:50%;background:#3ddc84;box-shadow:0 0 0 4px rgba(61,220,132,.15)}
+.status .sp{flex:1}.kbd{background:var(--p2);border:1px solid var(--ln);border-radius:6px;padding:2px 8px;font-size:12px}
+.hero{position:relative;border-radius:calc(var(--r) + 4px);overflow:hidden;height:250px;background:linear-gradient(135deg,#5b8cff,#8a4dff 55%,#ff6b9a);margin-bottom:28px;display:flex;align-items:flex-end}
+.hero:after{content:"";position:absolute;inset:0;background:linear-gradient(0deg,rgba(0,0,0,.72),transparent 65%)}
+.hero .hin{position:relative;z-index:1;padding:26px;color:#fff;width:100%;display:flex;justify-content:space-between;align-items:flex-end}
+.hero h2{font:700 34px var(--title);letter-spacing:-.03em}.hero small{opacity:.8}
+.hero .tag{display:inline-block;background:rgba(255,255,255,.18);backdrop-filter:blur(8px);border-radius:99px;padding:3px 12px;font-size:12px;margin-bottom:10px}
+.shelf{margin-bottom:30px}.shelf h3{font:700 24px var(--title);letter-spacing:-.03em;display:flex;align-items:baseline;gap:12px;margin-bottom:14px}
+.shelf h3 span,.pill{font:500 12px var(--font);color:var(--mu);background:var(--p2);padding:2px 10px;border-radius:99px}
+.row{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--cw,230px),1fr));gap:16px}
+body[data-card=wide]{--cw:300px}body[data-card=small]{--cw:180px}
+.card{background:var(--p1);border:1px solid var(--ln);border-radius:var(--r);overflow:hidden;transition:.2s;cursor:pointer}
+.card:hover{transform:translateY(-3px);border-color:var(--acc);box-shadow:0 12px 30px rgba(0,0,0,.35)}
+.th{aspect-ratio:16/9;position:relative}
+.th em{position:absolute;right:8px;bottom:8px;background:rgba(0,0,0,.7);color:#fff;font:600 11px var(--font);padding:2px 7px;border-radius:6px;font-style:normal}
+.th s{position:absolute;left:8px;top:8px;color:#ffd23f;text-decoration:none}
+.card .m{padding:10px 12px}.card .m b{display:block;font-weight:600}.card .m span{color:var(--mu);font-size:12px}
+.games{display:flex;gap:12px;flex-wrap:wrap}
+.game{display:flex;align-items:center;gap:10px;background:var(--p1);border:1px solid var(--ln);border-radius:var(--r);padding:10px 16px 10px 10px;cursor:pointer;transition:.18s}
+.game:hover{border-color:var(--acc)}.game i{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;color:#fff;font:700 15px var(--title);font-style:normal}
+.game small{display:block;color:var(--mu);font-size:11px}
+.empty{border:1.5px dashed var(--ln);border-radius:calc(var(--r) + 4px);padding:40px;text-align:center;display:none}
+body[data-state=empty] .empty{display:block}body[data-state=empty] .full{display:none}
+.empty h2{font:700 26px var(--title);margin:12px 0 6px}.empty p{color:var(--mu);max-width:440px;margin:0 auto 18px}
+.empty .big{width:72px;height:72px;border-radius:20px;background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc);display:grid;place-items:center;margin:auto}.empty .big svg{width:32px;height:32px}
+/* how it works */
+.how{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:26px 0 8px;text-align:left}
+.step{background:var(--p1);border:1px solid var(--ln);border-radius:var(--r);padding:16px}
+.step .n{width:26px;height:26px;border-radius:50%;background:var(--acc);color:#fff;font:700 13px var(--title);display:grid;place-items:center;margin-bottom:10px}
+.step b{display:block;font:700 15px var(--title);margin-bottom:4px}.step span{color:var(--mu);font-size:13px}
+.tip{display:flex;gap:10px;background:color-mix(in srgb,var(--acc) 10%,var(--p1));border:1px solid color-mix(in srgb,var(--acc) 35%,var(--ln));border-radius:var(--r);padding:12px 14px;color:var(--mu);font-size:13px;margin-top:14px;text-align:left}
+.tip svg{color:var(--acc);width:18px;height:18px;margin-top:2px}
+/* settings */
+.sec{background:var(--p1);border:1px solid var(--ln);border-radius:var(--r);margin-bottom:20px}
+.sec>h3{font:700 13px var(--font);letter-spacing:.08em;text-transform:uppercase;color:var(--dim);padding:16px 20px 4px}
+.set{display:flex;justify-content:space-between;align-items:center;gap:24px;padding:14px 20px;border-top:1px solid var(--ln)}.sec>h3+.set{border-top:0}
+.set>div:first-child{min-width:0}.set b{display:block;font-weight:600}.set small{display:block;color:var(--mu);font-size:12.5px;max-width:520px}
+.seg{display:inline-flex;background:var(--p2);border:1px solid var(--ln);border-radius:10px;padding:3px;flex-wrap:wrap}
+.seg button{border:0;background:none;padding:6px 12px;border-radius:7px;color:var(--mu);cursor:pointer}.seg button[aria-pressed=true]{background:var(--acc);color:#fff}
+.tog{width:42px;height:24px;border-radius:99px;background:var(--p2);border:1px solid var(--ln);position:relative;cursor:pointer;flex:none;transition:.2s}
+.tog:after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:var(--mu);transition:.2s}
+.tog[aria-checked=true]{background:var(--acc);border-color:var(--acc)}.tog[aria-checked=true]:after{left:20px;background:#fff}
+select,.in{background:var(--p2);border:1px solid var(--ln);border-radius:10px;padding:8px 12px;min-width:170px}
+input[type=range]{accent-color:var(--acc);width:200px}
+.themes{display:flex;gap:12px;flex-wrap:wrap}
+.tc{width:130px;border:2px solid var(--ln);border-radius:12px;overflow:hidden;cursor:pointer;background:var(--p2)}.tc[aria-pressed=true]{border-color:var(--acc)}
+.tc i{display:block;height:62px;background:linear-gradient(90deg,var(--c1) 0 22%,var(--c2) 22%)}.tc span{display:block;padding:7px 10px;font-size:12.5px;font-weight:600}
+.accents{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:10px;margin-top:12px;width:100%}
+.ac{display:flex;flex-direction:column;align-items:center;gap:6px;border:1.5px solid var(--ln);background:var(--p2);border-radius:12px;padding:10px 4px 8px;cursor:pointer;font-size:11.5px;color:var(--mu)}
+.ac i{width:28px;height:28px;border-radius:50%;box-shadow:inset 0 0 0 1px rgba(255,255,255,.15)}.ac[aria-pressed=true]{border-color:var(--acc);color:var(--tx)}
+.ac:hover{border-color:var(--mu)}
+.gh{font:700 11px var(--font);letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin:16px 0 0;width:100%}
+.stack{width:100%}
+.keys{display:flex;gap:6px}.keys .kbd{font-weight:600}
+.meter{height:8px;background:var(--p2);border-radius:9px;overflow:hidden;width:260px}.meter i{display:block;height:100%;width:42%;background:var(--acc)}
+.prev{display:flex;gap:14px;flex-wrap:wrap}
+.empty-note{color:var(--mu)}
+body[data-card=small]{--cw:160px}body[data-card=mid]{--cw:210px}
+.th .fg{position:absolute;left:var(--x,40%);bottom:42%;width:7%;height:26%;background:rgba(10,12,20,.55);border-radius:2px}
+.card .m{min-width:0}.card .m b,.card .m span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card.sel{border-color:var(--acc);box-shadow:0 0 0 2px color-mix(in srgb,var(--acc) 45%,transparent)}
+.btn.wide{width:100%}.mono{font-family:"JetBrains Mono",Consolas,monospace;font-size:12px;color:var(--mu)}
+/* full-bleed pages: clips + editor */
+body[data-page=clips] .main,body[data-page=editor] .main{padding:0;overflow:hidden;display:flex;flex-direction:column}
+body[data-page=clips] #p-clips,body[data-page=editor] #p-editor{display:flex;flex-direction:column;flex:1;min-height:0}
+.cbar{display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;padding:10px 18px;border-bottom:1px solid var(--ln);background:var(--p1)}
+.cbar .sp{flex:1}.cbar label{display:flex;align-items:center;gap:6px;color:var(--mu);font-size:12px}
+.cbar select{min-width:0;padding:6px 10px}.cbar .btn{padding:6px 12px}
+.hint{display:flex;gap:6px;align-items:center;color:var(--mu);font-size:12px}
+.cbody{flex:1;display:flex;min-height:0}
+.lib{width:200px;flex:none;border-right:1px solid var(--ln);background:var(--p1);padding:16px 10px;overflow:auto}
+.lib h4{font:700 11px var(--font);letter-spacing:.12em;text-transform:uppercase;color:var(--dim);padding:0 10px 8px}
+.li{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;color:var(--mu);padding:7px 10px;border-radius:calc(var(--r) - 2px);cursor:pointer;text-align:left}
+.li:hover{background:var(--p2);color:var(--tx)}.li.on{background:color-mix(in srgb,var(--acc) 16%,transparent);color:var(--tx)}
+.li svg{width:16px;height:16px}.li i{width:9px;height:9px;border-radius:50%;flex:none;margin:0 3.5px}
+.li span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.li em{font-style:normal;font-size:12px;color:var(--dim)}
+.cmid{flex:1;min-width:0;display:flex;flex-direction:column}
+.ctool{display:flex;gap:12px;align-items:center;padding:14px 18px}.ctool .in{flex:1;max-width:340px}
+.cgrid{flex:1;min-height:0;grid-auto-rows:max-content;overflow:auto;padding:0 18px 18px;align-content:start;gap:14px}
+.cgrid.large{--cw:300px}.cgrid.list{grid-template-columns:1fr;gap:8px}
+.cgrid.list .card{display:flex;align-items:center}.cgrid.list .th{width:150px;flex:none}.cgrid.list .m{padding:0 14px}
+.det{width:280px;flex:none;border-left:1px solid var(--ln);background:var(--p1);padding:18px;overflow:auto}
+.det .pv{width:100%;margin-bottom:12px}.dt{font:700 17px var(--title);letter-spacing:-.02em;margin-bottom:10px;word-break:break-word}
+.kv{display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid var(--ln);font-size:13px}.kv span{color:var(--mu)}
+.det .two{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0}.det .btn{padding:9px 10px}
+.cfoot{padding:8px 18px;border-top:1px solid var(--ln);background:var(--p1);color:var(--mu);font-size:12px}
+/* editor */
+body[data-ed=loaded] #edEmpty,body[data-ed=empty] #edLoaded{display:none}
+.edwrap{flex:1;overflow:auto;padding:22px 26px 30px}
+.edgrid{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:18px;align-items:start}
+.pv{position:relative;aspect-ratio:16/9;border-radius:var(--r);overflow:hidden;border:1px solid var(--ln)}
+.edgrid .pv{width:min(100%,620px);margin:0 auto}
+.pv .pb{position:absolute;inset:0;margin:auto;width:60px;height:60px;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;border:0;display:grid;place-items:center;cursor:pointer}
+.pv .pb svg{width:26px;height:26px}.pv .fg{position:absolute;left:var(--x,40%);bottom:42%;width:7%;height:26%;background:rgba(10,12,20,.55);border-radius:2px}
+.tr{display:flex;align-items:center;gap:12px;margin:12px 0}.tr .sp{flex:1}.tr .btn{padding:7px 12px}
+.tl{background:var(--p1);border:1px solid var(--ln);border-radius:var(--r);padding:12px;position:relative}
+.ruler,.lane{display:grid;grid-template-columns:110px 1fr;align-items:center}
+.rl{display:flex;justify-content:space-between;color:var(--dim);font-size:11px;padding-bottom:6px}
+.lane{margin-top:6px}.lane .nm{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mu)}
+.lane .nm button{border:0;background:none;color:var(--mu);cursor:pointer;display:grid;place-items:center;padding:2px}.lane .nm svg{width:16px;height:16px}
+.lane.off .wf{opacity:.25}.lane.off .nm button{color:var(--dim)}
+.wf{height:34px;display:flex;align-items:center;gap:1px;background:var(--p2);border-radius:6px;overflow:hidden;padding:0 2px}
+.wf i{flex:1;min-width:1px;background:var(--lc);border-radius:1px}
+.vt{height:46px;border-radius:6px;overflow:hidden;display:grid;grid-template-columns:repeat(8,1fr)}
+.ov{position:absolute;left:122px;right:12px;top:34px;bottom:12px;pointer-events:none}
+.ov .dm{position:absolute;top:0;bottom:0;background:rgba(0,0,0,.55)}
+.ov .hd{position:absolute;top:-3px;bottom:-3px;width:10px;margin-left:-5px;background:var(--acc);border-radius:4px;cursor:ew-resize;pointer-events:auto;touch-action:none}
+.ov .ph{position:absolute;top:-4px;bottom:-4px;width:2px;background:#fff;margin-left:-1px}
+.edgrid aside .set{flex-direction:column;align-items:flex-start;gap:8px}.edgrid aside select,.edgrid aside input[type=range]{width:100%}
+</style></head>
+<body data-ed="empty" data-mode="dark" data-page="home" data-card="small" data-state="full" data-round="sharp" data-mono="off">
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11 12 3l9 8M5 10v10h14V10"/></symbol>
+<symbol id="i-clips" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path class="f" d="M10 9.5v5l4-2.5z"/></symbol>
+<symbol id="i-edit" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.1 8.1 20 20M8.1 15.9 20 4"/></symbol>
+<symbol id="i-games" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="10" rx="5"/><path d="M8 11v4M6 13h4"/><circle class="f" cx="16" cy="12" r="1"/><circle class="f" cx="18" cy="14" r="1"/></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+<symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+<symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></symbol>
+<symbol id="i-rec" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle class="f" cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="3"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></symbol>
+<symbol id="i-sound" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9zM16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/></symbol>
+<symbol id="i-disk" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></symbol>
+<symbol id="i-pal" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle class="f" cx="8" cy="10" r="1"/><circle class="f" cx="12" cy="7.5" r="1"/><circle class="f" cx="16" cy="10" r="1"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+</defs></svg>
+<div class="lab" id="lab"></div>
+<div class="stage">
+  <nav class="rail" id="rail"></nav>
+  <aside class="snav" id="snav"></aside>
+  <div class="main">
+    <section class="pg" id="p-home">
+      <div class="top"><div><h1>Home</h1><p>Welcome back. Archy is watching your game.</p></div><button class="btn">Save last 30s</button></div>
+      <div class="status"><span class="dot"></span><b>Clipping on</b><span style="color:var(--mu)">Roblox · 1080p · 60 fps</span><span class="sp"></span><span class="kbd">Alt + F10</span><span style="color:var(--mu)">to save a clip</span></div>
+      <div class="empty"><div class="big"><svg><use href="#i-clips"/></svg></div><h2>No clips yet</h2><p>Archy keeps the last moments of your game in memory. Press your hotkey after something great happens and it saves that moment as a clip.</p>
+        <div class="how">
+          <div class="step"><div class="n">1</div><b>Start a game</b><span>Archy spots it automatically. The status bar above turns green when it is recording.</span></div>
+          <div class="step"><div class="n">2</div><b>Press Alt + F10</b><span>Saves the last 30 seconds (change the length in Settings, Recording). The game never pauses.</span></div>
+          <div class="step"><div class="n">3</div><b>Find it here</b><span>Your clip appears on Home and in Clips, sorted by game, ready to play.</span></div>
+          <div class="step"><div class="n">4</div><b>Trim and share</b><span>Open it in the Editor to cut the best part, mix audio, then copy or export it.</span></div>
+        </div>
+        <div class="tip"><svg><use href="#i-info"/></svg><span>Everything stays on this PC. No account, no upload. Clips live in the folder set under Settings, Storage.</span></div>
+      </div>
+      <div class="full">
+        <div class="hero"><div class="hin"><div><span class="tag">Latest clip</span><h2>Clutch win in Arsenal</h2><small>Roblox · 0:28 · 2 hours ago</small></div><button class="btn">Show in Clips</button></div></div>
+        <div class="shelf"><h3>Starred <span>4 clips</span></h3><div class="row" data-n="4"></div></div>
+        <div class="shelf"><h3>Roblox <span>6 clips</span></h3><div class="row" data-n="6"></div></div>
+        <div class="shelf"><h3>Your games <span>3</span></h3><div class="games">
+          <div class="game"><i style="background:linear-gradient(135deg,#ff6b6b,#ff9f43)">R</i><div><b>Roblox</b><small>14 clips</small></div></div>
+          <div class="game"><i style="background:linear-gradient(135deg,#4D8DFF,#8a4dff)">V</i><div><b>Valorant</b><small>6 clips</small></div></div>
+          <div class="game"><i style="background:linear-gradient(135deg,#2EC4A6,#22d3ee)">M</i><div><b>Minecraft</b><small>3 clips</small></div></div></div></div>
+      </div>
+    </section>
+    <section class="pg" id="p-clips">
+      <div class="cbar"><div class="status" style="margin:0;padding:6px 12px"><span class="dot" style="background:var(--dim);box-shadow:none"></span><b>Waiting for a game</b><span class="mono">Recording starts by itself</span><button class="btn ghost">Show in tray</button></div>
+        <label class="dd">Game: <select><option>Automatic</option><option>Roblox</option><option>Discord</option></select></label><label class="dd">Capture: <select><option>Windows</option><option>DXGI</option></select></label>
+        <span class="hint"><span class="kbd">F8</span>last 30 s</span><span class="hint"><span class="kbd">Shift+F8</span>last 60 s</span><span class="hint">or say "Archer clip that"</span></div>
+      <div class="cbody">
+        <aside class="lib" id="lib"></aside>
+        <div class="cmid"><div class="ctool"><input class="in" id="q" placeholder="Search clips"><div class="seg" id="view"><button aria-pressed="true">Grid</button><button aria-pressed="false">Large</button><button aria-pressed="false">List</button></div><button class="btn ghost">Open folder</button></div>
+          <div class="row cgrid" id="cgrid"></div></div>
+        <aside class="det" id="det"></aside>
+      </div>
+      <div class="cfoot">152 clips · 11.8 GB · everything stays on this PC</div></section>
+    <section class="pg" id="p-editor">
+      <div id="edEmpty" class="edwrap" style="padding:28px"><div class="top"><div><h1>Editor</h1><p>Trim a clip, mix its audio tracks, export.</p></div></div>
+      <div class="sec"><h3>How it works</h3>
+        <div class="set"><div><b>1. Pick a clip</b><small>Select one in Clips and press Open in Editor, or drag a video into the import box below.</small></div></div>
+        <div class="set"><div><b>2. Drag the handles</b><small>Move the start and end markers on the timeline to keep only the good part.</small></div></div>
+        <div class="set"><div><b>3. Mix audio</b><small>Game, mic and apps sit on separate lanes. Mute or turn down any of them.</small></div></div>
+        <div class="set"><div><b>4. Export</b><small>Saves a new file. Your original clip is never changed.</small></div></div></div>
+      <div class="empty" style="display:block"><h2>Import media</h2><p>Drop a video here or browse for one. mp4, mkv and webm work.</p><button class="btn" id="browse">Browse files</button></div></div>
+      <div id="edLoaded" class="edwrap"><div class="top"><div><h1 id="edT">Clip</h1><p id="edM"></p></div><div style="display:flex;gap:8px"><button class="btn ghost" id="edClose">Close clip</button><button class="btn" id="edExp">Export</button></div></div>
+        <div class="edgrid"><div>
+          <div class="pv th" id="edPv"><span class="fg"></span></div>
+          <div class="tr"><button class="btn ghost">Play</button><span class="mono" id="edTime">0:00 / 0:30</span><span style="flex:1"></span><span class="mono" id="edKeep">Keeping 0:30</span></div>
+          <div class="tl" id="tl"><div class="ruler"><span></span><div class="rl"><span>0:00</span><span>0:10</span><span>0:20</span><span>0:30</span></div></div>
+            <div class="lane"><div class="nm">Video</div><div class="vt" id="vt"></div></div>
+            <div class="lane"><div class="nm"><button aria-label="Mute"><svg><use href="#i-sound"/></svg></button>Game</div><div class="wf" style="--lc:#4D8DFF"></div></div>
+            <div class="lane"><div class="nm"><button aria-label="Mute"><svg><use href="#i-sound"/></svg></button>Mic</div><div class="wf" style="--lc:#3DDC84"></div></div>
+            <div class="lane"><div class="nm"><button aria-label="Mute"><svg><use href="#i-sound"/></svg></button>Discord</div><div class="wf" style="--lc:#A855F7"></div></div>
+            <div class="ov" id="ov"><div class="dm" id="dmL" style="left:0"></div><div class="dm" id="dmR" style="right:0"></div><div class="hd" id="hL" aria-label="Trim start"></div><div class="hd" id="hR" aria-label="Trim end"></div><div class="ph" style="left:30%"></div></div></div>
+        </div><aside><div class="sec"><h3>Export</h3>
+          <div class="set"><div><b>Resolution</b></div><select><option>Same as clip</option><option>1080p</option><option>720p</option></select></div>
+          <div class="set"><div><b>Quality</b></div><select><option>High</option><option>Balanced</option><option>Small file</option></select></div>
+          <div class="set"><div><b>Game volume</b></div><input type="range" value="80"></div>
+          <div class="set"><div><b>Mic volume</b></div><input type="range" value="100"></div></div></aside></div></div></section>
+    <section class="pg" id="p-games"><div class="top"><div><h1>Games</h1><p>Games Archy has seen. Pick which ones it clips.</p></div></div>
+      <div class="sec"><h3>Detected games</h3>
+        <div class="set"><div><b>Roblox</b><small>14 clips · always clip</small></div><div class="tog" role="switch" aria-checked="true"></div></div>
+        <div class="set"><div><b>Valorant</b><small>6 clips</small></div><div class="tog" role="switch" aria-checked="true"></div></div>
+        <div class="set"><div><b>Minecraft</b><small>3 clips</small></div><div class="tog" role="switch" aria-checked="false"></div></div></div></section>
+    <section class="pg" id="p-voice"><div class="top"><div><h1>Voice</h1><p>Say a phrase to clip, hands free.</p></div></div>
+      <div class="sec"><h3>Voice clipping</h3>
+        <div class="set"><div><b>Say "clip that"</b><small>Archy listens on this PC only. Nothing is sent anywhere.</small></div><div class="tog" role="switch" aria-checked="true"></div></div>
+        <div class="set"><div><b>Calibrate</b><small>Say the phrase 3 times so Archy learns your voice and mic.</small></div><button class="btn ghost">Start</button></div></div></section>
+    <section class="pg" id="p-settings"><div id="sp"></div></section>
+  </div>
+</div>
+<script>
+const $=s=>document.querySelector(s),ic=n=>`<svg><use href="#i-${n}"/></svg>`;
+const B=document.body;
+/* rail */
+const R=[["home","home","Home"],["clips","clips","Clips"],["editor","edit","Editor"],["settings","gear","Settings"]];
+$("#rail").innerHTML=`<div class="logo">A</div>`+R.map(([p,i,t])=>`<button class="rb" data-p="${p}" title="${t}" aria-label="${t}">${ic(i)}</button>`).join("")+`<div class="sp"></div><button class="rb" id="mode" title="Theme" aria-label="Theme">${ic("moon")}</button><button class="rb" title="Update" aria-label="Update">${ic("down")}</button>`;
+function go(p){B.dataset.page=p;document.querySelectorAll(".rb[data-p]").forEach(b=>b.classList.toggle("on",b.dataset.p===p))}
+document.querySelectorAll(".rb[data-p]").forEach(b=>b.onclick=()=>go(b.dataset.p));go("home");
+$("#mode").onclick=()=>{B.dataset.mode=B.dataset.mode==="dark"?"light":"dark"};
+/* cards */
+const G=[["#5b8cff","#8a4dff"],["#ff6b6b","#ff9f43"],["#2EC4A6","#22d3ee"],["#ff6b9a","#8a4dff"],["#4ADE80","#2EC4A6"],["#ffc53d","#ff6b6b"]];
+document.querySelectorAll(".row").forEach(r=>{for(let i=0;i<+r.dataset.n;i++){const g=G[(i+r.dataset.n)%6];r.insertAdjacentHTML("beforeend",`<div class="card"><div class="th" style="background:linear-gradient(135deg,${g[0]},${g[1]})"><em>0:${10+i*7}</em>${i%3==0?"<s>★</s>":""}</div><div class="m"><b>Clip ${i+1}</b><span>Roblox · ${i+1}h ago</span></div></div>`)}});
+/* clips twin + editor */
+const GMS=[["Roblox","#FF8A5B",138],["Discord","#A78BFA",6],["Discord (before restart)","#86D96B",1],["FIX","#F26B6B",1],["eeeee","#F26B6B",1],["RobloxStudioBeta","#5BC8F5",5]];
+const SCN=[["#3a2a22","#1a1210"],["#8d8d86","#3d3d38"],["#1d2438","#0d1018"],["#4a2e20","#1c1410"],["#2e7d32","#8bc34a"],["#3c6e2a","#a5d65a"],["#2f6f46","#7ec86a"],["#2a3f33","#101a14"]];
+const CL=Array.from({length:24},(_,i)=>{const hh=1-Math.floor(i/2),mm=(76-i*7)%60;return{id:i,game:"Roblox",star:[0,5].includes(i),mb:[23,23,20,25,23,25,26,22][i%8],len:30,t:`Roblox 2026-11-20 ${String(Math.max(hh,0)).padStart(2,"0")}-${String(mm).padStart(2,"0")}-04`,when:`Today ${String(Math.max(hh,0)).padStart(2,"0")}:${String(mm).padStart(2,"0")} AM`,bg:SCN[i%8],x:20+(i*13)%55}});
+let cs=null,gf="all";
+$("#lib").innerHTML=`<h4>Library</h4><button class="li on" data-g="all"><i style="background:var(--tx)"></i><span>All clips</span><em>152</em></button><button class="li" data-g="star"><i style="background:var(--tx)"></i><span>Starred</span><em>6</em></button><h4 style="margin-top:22px">Games</h4>`+GMS.map(g=>`<button class="li${g[0]==="Roblox"?" on":""}" data-g="${g[0]}"><i style="background:${g[1]}"></i><span>${g[0]}</span><em>${g[2]}</em></button>`).join("");
+gf="Roblox";document.querySelector('.li[data-g=all]').classList.remove("on");
+const cbg=c=>`background:linear-gradient(135deg,${c.bg[0]},${c.bg[1]})`;
+function drawClips(){const q=$("#q").value.toLowerCase();$("#cgrid").innerHTML=CL.filter(c=>(gf==="all"||(gf==="star"?c.star:c.game===gf))&&c.t.toLowerCase().includes(q)).map(c=>`<div class="card${cs===c.id?" sel":""}" data-i="${c.id}" tabindex="0"><div class="th" style="${cbg(c)}"><span class="fg" style="--x:${c.x}%"></span><span class="star">${c.star?"★":"☆"}</span><em>${c.mb} MB</em></div><div class="m"><b>${c.t}</b><span>${c.game} · ${c.when} · ${c.mb} MB</span></div></div>`).join("");drawDet()}
+function drawDet(){const c=CL[cs];$("#det").innerHTML=c?`<div class="pv th" style="${cbg(c)}"><span class="fg" style="--x:${c.x}%"></span></div><div class="dt">${c.t}</div><div class="kv"><span>Game</span>${c.game}</div><div class="kv"><span>Length</span>0:${c.len}</div><div class="kv"><span>Size</span>${c.mb} MB</div><div class="kv"><span>Saved</span>${c.when}</div><div class="two"><button class="btn" id="oe">Open in Editor</button><button class="btn ghost">Play</button></div><div class="two"><button class="btn ghost">${c.star?"Unstar":"Star"}</button><button class="btn ghost">Delete</button></div>`:`<p class="none">Select a clip to see its details.</p>`;const o=$("#oe");if(o)o.onclick=()=>openEd(c)}
+$("#cgrid").onclick=e=>{const k=e.target.closest(".card");if(k){cs=+k.dataset.i;drawClips()}};
+$("#cgrid").ondblclick=e=>{const k=e.target.closest(".card");if(k)openEd(CL[+k.dataset.i])};
+$("#lib").onclick=e=>{const b=e.target.closest(".li");if(b){gf=b.dataset.g;document.querySelectorAll(".li").forEach(x=>x.classList.toggle("on",x===b));drawClips()}};
+$("#q").oninput=drawClips;
+$("#view").onclick=e=>{const b=e.target.closest("button");if(!b)return;document.querySelectorAll("#view button").forEach(x=>x.setAttribute("aria-pressed",x===b));$("#cgrid").className="row cgrid "+b.textContent.toLowerCase()};
+function openEd(c){B.dataset.ed="loaded";$("#edT").textContent=c.t;$("#edM").textContent=`${c.game} · 0:30 · ${c.mb} MB`;$("#edPv").style.cssText=cbg(c);go("editor")}
+$("#browse").onclick=()=>openEd(CL[0]);$("#edClose").onclick=()=>{B.dataset.ed="empty"};
+document.querySelectorAll(".lane .nm button").forEach(b=>b.onclick=()=>b.closest(".lane").classList.toggle("off"));
+document.querySelectorAll(".wf").forEach((w,k)=>{w.innerHTML=Array.from({length:90},(_,i)=>`<i style="height:${15+Math.abs(Math.sin(i*.7+k*2)*Math.cos(i*.23+k))*80}%"></i>`).join("")});
+$("#vt").innerHTML=Array.from({length:8},(_,i)=>`<div style="background:linear-gradient(135deg,${SCN[i][0]},${SCN[i][1]})"></div>`).join("");
+let tr=[0,100];function trim(){$("#dmL").style.width=tr[0]+"%";$("#dmR").style.width=(100-tr[1])+"%";$("#hL").style.left=tr[0]+"%";$("#hR").style.left=tr[1]+"%";$("#edKeep").textContent="Keeping 0:"+String(Math.round((tr[1]-tr[0])*.3)).padStart(2,"0")}
+[["hL",0],["hR",1]].forEach(([id,k])=>{$("#"+id).onpointerdown=e=>{const r=$("#ov").getBoundingClientRect();const mv=ev=>{let v=Math.max(0,Math.min(100,(ev.clientX-r.left)/r.width*100));v=k===0?Math.min(v,tr[1]-5):Math.max(v,tr[0]+5);tr[k]=v;trim()};const up=()=>{removeEventListener("pointermove",mv);removeEventListener("pointerup",up)};addEventListener("pointermove",mv);addEventListener("pointerup",up);e.preventDefault()}});
+trim();drawClips();
+/* accents */
+const AC=[["Core",[["Blue","#4D8DFF"],["Sky","#38BDF8"],["Cyan","#22D3EE"],["Teal","#2EC4A6"],["Green","#3DDC84"],["Lime","#A3E635"]]],
+["Warm",[["Yellow","#FACC15"],["Amber","#FFB020"],["Orange","#FF9F43"],["Red","#F25555"],["Rose","#FF6B8A"],["Pink","#F472B6"]]],
+["Cool",[["Violet","#8B7CFF"],["Purple","#A855F7"],["Fuchsia","#D946EF"],["Indigo","#6366F1"],["Navy","#3B6FE0"],["Ice","#9CC9FF"]]],
+["Soft",[["Mint","#7EE7C4"],["Peach","#FFB48A"],["Coral","#FF7F6B"],["Lilac","#C4B5FD"],["Sand","#D9C7A3"],["Silver","#C3CAD6"]]]];
+let curAcc="#4D8DFF";
+function setAcc(c){curAcc=c;B.style.setProperty("--acc",c);const n=parseInt(c.slice(1),16),l=((n>>16)*299+((n>>8&255)*587)+(n&255)*114)/1000;B.style.setProperty("--onacc",l>150?"#0A0C11":"#fff");
+ document.querySelectorAll("[data-ac]").forEach(b=>b.setAttribute("aria-pressed",b.dataset.ac.toLowerCase()===c.toLowerCase()));const ci=$("#cust");if(ci)ci.value=c}
+const st=document.createElement("style");st.textContent=".btn,.seg button[aria-pressed=true],.step .n,.rail .logo,.tog[aria-checked=true]:after,.lab button[aria-pressed=true]{color:var(--onacc,#fff)!important}";document.head.append(st);
+const acHTML=AC.map(([g,l])=>`<div class="gh">${g}</div><div class="accents">`+l.map(([n,c])=>`<button class="ac" data-ac="${c}" aria-pressed="${c===curAcc}"><i style="background:${c}"></i>${n}</button>`).join("")+`</div>`).join("");
+/* settings pages */
+const seg=(opts,cur)=>`<div class="seg">${opts.map(o=>`<button aria-pressed="${o===cur}">${o}</button>`).join("")}</div>`;
+const tog=on=>`<div class="tog" role="switch" aria-checked="${on}"></div>`;
+const set=(t,d,c)=>`<div class="set"><div><b>${t}</b><small>${d}</small></div>${c}</div>`;
+const sel=(o,c)=>`<select>${o.map(x=>`<option${x===c?" selected":""}>${x}</option>`).join("")}</select>`;
+const sec=(t,r)=>`<div class="sec"><h3>${t}</h3>${r}</div>`;
+const PG={
+recording:["Recording","How Archy captures your game. Better quality costs more GPU.","rec",
+ sec("Clip",set("Clip length","How far back a clip reaches when you press the hotkey. Longer uses more memory.",sel(["15 s","30 s","60 s","2 min"],"30 s"))+set("Resolution","Higher is sharper but heavier. Pick what your GPU can hold without dropping game FPS.",seg(["720p","1080p","1440p","Native"],"1080p"))+set("Frame rate","60 is smooth for most games. 120 and 144 suit fast shooters on strong GPUs.",seg(["30","60","120","144"],"60"))+set("Quality","Higher bitrate looks better and makes bigger files.",seg(["Light","Balanced","High"],"Balanced")))+
+ sec("Capture",set("Capture method","DXGI grabs the whole monitor and works in fullscreen. Windows Capture grabs just the game window and is lighter when windowed.",sel(["DXGI (monitor)","Windows Capture (window)"],"Windows Capture (window)"))+set("Game","Which game Archy records. Auto picks whatever you are playing.",sel(["Auto-detect","Roblox","Valorant","Minecraft"],"Auto-detect"))+set("Graphics card","Use the integrated GPU to leave your main GPU free for the game.",sel(["Auto","Integrated GPU","Dedicated GPU"],"Auto")))+
+ sec("Check this PC",set("Run a recording test","Records a test window at 60, 120 and 144 fps and checks for tearing and dropped frames.",`<button class="btn ghost">Run test</button>`))],
+games:["Games","Which games Archy clips and how each one is saved.","games",
+ sec("Detection",set("Detect games automatically","Archy watches for known games and starts clipping on its own.",tog(true))+set("Only clip detected games","Off means Archy clips any fullscreen app.",tog(true)))+
+ sec("Your games",set("Roblox","14 clips",tog(true))+set("Valorant","6 clips",tog(true))+set("Minecraft","3 clips",tog(false)))],
+audio:["Audio","What goes into your clips besides the game sound.","sound",
+ sec("Tracks",set("Game sound","Always recorded on its own track so you can mix it later.",tog(true))+set("Microphone","Adds your mic as a separate track.",tog(true))+set("Per-app tracks","Discord, music and other apps get their own lane in the editor.",tog(true)))+
+ sec("Devices",set("Microphone","The mic used for your voice track.",sel(["Default mic","USB Microphone","Headset"],"Default mic"))+set("Mic level","Input volume baked into new clips.",`<input type="range" value="70">`))],
+hotkeys:["Hotkeys","Keys that work while a game is in focus.","key",
+ sec("Shortcuts",set("Save a clip","Saves the last moments of your game.",`<div class="keys"><span class="kbd">Alt</span><span class="kbd">F10</span></div>`)+set("Start / stop clipping","Pause Archy without closing it.",`<div class="keys"><span class="kbd">Alt</span><span class="kbd">F9</span></div>`)+set("Mark a moment","Drops a marker you can jump to in the editor.",`<div class="keys"><span class="kbd">Alt</span><span class="kbd">F8</span></div>`))],
+sounds:["Sounds","Little audio cues so you know a clip saved without looking.","sound",
+ sec("Cues",set("Play a sound on save","A short chime when a clip is saved.",tog(true))+set("Volume","How loud the cue plays.",`<input type="range" value="55">`)+set("Chime","Pick the sound.",sel(["Soft","Pop","Ping","Off"],"Soft")))],
+storage:["Storage","Where clips live and how much space they may use.","disk",
+ sec("Location",set("Clips folder","C:\\Users\\you\\Videos\\Archy",`<button class="btn ghost">Change</button>`)+set("Space used","42 GB of 100 GB limit",`<div class="meter"><i></i></div>`))+
+ sec("Cleanup",set("Auto-delete old clips","Removes the oldest unstarred clips when the limit is hit. Starred clips are kept.",tog(true))+set("Size limit","Maximum space for clips.",sel(["50 GB","100 GB","250 GB","No limit"],"100 GB")))],
+appearance:["Appearance","How Archy looks. Changes apply instantly and stay on this PC.","pal",
+ sec("Theme",`<div class="set" style="flex-direction:column;align-items:flex-start"><div class="themes">${[["Dark","#0d0f13","#14171d"],["OLED","#000","#08090b"],["Light","#f4f5f7","#fff"],["System","#0d0f13","#f4f5f7"]].map(([n,a,b],i)=>`<div class="tc" aria-pressed="${i==0}" style="--c1:${b};--c2:${a}"><i></i><span>${n}</span></div>`).join("")}</div></div>`)+
+ sec("Accent colour",`<div class="set" style="flex-direction:column;align-items:flex-start"><div><b>Pick a colour</b><small>Used for buttons, selected items and highlights. ${AC.reduce((a,g)=>a+g[1].length,0)} presets, or make your own.</small></div><div class="stack">${acHTML}</div><div class="gh">Custom</div><div style="display:flex;gap:12px;align-items:center;margin-top:8px"><input id="cust" type="color" value="#4D8DFF" style="width:56px;height:36px;border:1px solid var(--ln);border-radius:10px;background:var(--p2);padding:2px"><span class="pill" id="hex">#4D8DFF</span></div></div>`)+
+ sec("Layout",set("Clip library layout","How Clips lists your videos.",seg(["Grid","List","Table","Latest"],"Grid"))+set("Thumbnail size","Bigger thumbnails show more detail.",`<input type="range" value="50">`)+set("Clip details","Show game, length and time under each clip.",tog(true))+set("Clip buttons","Show action buttons as icons or words.",seg(["Icons","Words"],"Icons")))+
+ sec("Style",set("Corner radius","How round cards and buttons are.",`<input type="range" value="60">`)+set("Density","Roomy has more space. Compact fits more on screen.",seg(["Roomy","Compact"],"Roomy"))+set("Icon weight","Thin or bold line icons.",`<input type="range" value="40">`)+set("Font","Inter is clean. Grotesk and Mono suit titles.",seg(["Inter","Grotesk","Mono"],"Inter"))+set("UI size","Scales the whole window.",seg(["90%","100%","110%","125%"],"100%"))+set("Motion","Animations. Turn off if you get motion sick.",seg(["Full","Subtle","Off"],"Subtle")))],
+general:["General","Startup, updates and housekeeping.","gear",
+ sec("App",set("Start with Windows","Archy launches in the tray at sign-in.",tog(true))+set("Discord status","Show 'clipping' only while a game is being recorded.",tog(false))+set("Tray icon","Keep Archy in the tray when you close the window.",tog(true)))+
+ sec("Updates",set("Check for updates","Archy asks once a day. Nothing is installed without you.",tog(true))+set("Version","0.8.0",`<button class="btn ghost">Check now</button>`))]};
+const NAV=["recording","games","audio","hotkeys","sounds","storage","appearance","general"];
+let cur="appearance";
+function sp(){const [t,d]=PG[cur];$("#sp").innerHTML=`<div class="top"><div><h1>${t}</h1><p>${d}</p></div></div>`+PG[cur][3];
+ $("#sp").querySelectorAll(".seg").forEach(s=>s.onclick=e=>{const b=e.target.closest("button");if(b){[...s.children].forEach(x=>x.setAttribute("aria-pressed",x===b))}});
+ $("#sp").querySelectorAll(".tog").forEach(t=>t.onclick=()=>t.setAttribute("aria-checked",t.getAttribute("aria-checked")!=="true"));
+ $("#sp").querySelectorAll(".tc").forEach(t=>t.onclick=()=>{$("#sp").querySelectorAll(".tc").forEach(x=>x.setAttribute("aria-pressed",x===t));B.dataset.mode=t.textContent==="Light"?"light":t.textContent==="OLED"?"oled":"dark"});
+ $("#sp").querySelectorAll("[data-ac]").forEach(b=>b.onclick=()=>setAcc(b.dataset.ac));
+ const c=$("#cust");if(c)c.oninput=()=>{setAcc(c.value);$("#hex").textContent=c.value.toUpperCase()};setAcc(curAcc);
+ $("#snav").querySelectorAll("button").forEach(b=>b.classList.toggle("on",b.dataset.k===cur))}
+$("#snav").innerHTML=`<h4>Settings</h4>`+NAV.map(k=>`<button data-k="${k}">${ic(PG[k][2])}${PG[k][0]}</button>`).join("");
+$("#snav").onclick=e=>{const b=e.target.closest("button");if(b){cur=b.dataset.k;sp()}};
+sp();
+/* toolbar */
+const O=[["Page","page",[["home","Home"],["clips","Clips"],["editor","Editor"],["settings","Settings"]]],["Mode","mode",[["dark","Dark"],["oled","OLED"],["light","Light"]]],["Cards","card",[["small","Small"],["mid","Medium"],["wide","Wide"]]],["Corners","round",[["sharp","Sharp"],["mid","Medium"],["soft","Soft"]]],["Titles","mono",[["off","Grotesk"],["on","Mono"]]],["Home state","state",[["full","With clips"],["empty","First run + How it works"]]]];
+const lab=$("#lab");lab.innerHTML="<b>Design Lab 2</b>";
+O.forEach(([t,k,v])=>{const g=document.createElement("div");g.className="g";g.append(t+":");v.forEach(([val,name])=>{const b=document.createElement("button");b.textContent=name;b.dataset.k=k;b.dataset.v=val;b.onclick=()=>{k==="page"?go(val):B.dataset[k]=val;sync()};g.append(b)});lab.append(g)});
+function sync(){lab.querySelectorAll("button[data-k]").forEach(b=>b.setAttribute("aria-pressed",B.dataset[b.dataset.k]===b.dataset.v))}sync();
+new MutationObserver(sync).observe(B,{attributes:true});
+const ag=document.createElement("div");ag.className="g";ag.append("Accent:");AC.flatMap(g=>g[1]).forEach(([n,c])=>{const b=document.createElement("button");b.className="sw";b.title=n;b.dataset.ac=c;b.style.background=c;b.onclick=()=>setAcc(c);ag.append(b)});lab.append(ag);
+setAcc(curAcc);
+</script></body></html>

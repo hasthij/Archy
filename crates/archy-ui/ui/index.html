@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Archy</title>
 <link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="hybrid.css">
 <script src="theme.js"></script>
 <script src="app.js" defer></script>
 <script src="editor.js" defer></script>
@@ -16,17 +17,17 @@
     <div class="logo" aria-hidden="true">
       <svg viewBox="0 0 24 24"><path d="M12 3 L21 20 H3 Z" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round"/></svg>
     </div>
-    <button class="nav rail-btn" data-view="clips" aria-current="page" aria-label="Clips" title="Clips">
+    <button class="nav rail-btn" data-view="home" aria-current="page" aria-label="Home" title="Home">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11 12 3l9 8M5 10v10h14V10"/></svg>
+      <span>Home</span>
+    </button>
+    <button class="nav rail-btn" data-view="clips" aria-label="Clips" title="Clips">
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4-2.5z" class="fill"/></svg>
       <span>Clips</span>
     </button>
-    <button class="nav rail-btn" data-view="games" aria-label="Games" title="Games">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="18" height="10" rx="5"/><path d="M8 11v4M6 13h4"/><circle cx="16" cy="12" r="1" class="fill"/><circle cx="18" cy="14" r="1" class="fill"/></svg>
-      <span>Games</span>
-    </button>
-    <button class="nav rail-btn" data-view="audio" aria-label="Audio and voice" title="Audio &amp; voice">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
-      <span>Voice</span>
+    <button class="nav rail-btn" data-view="editor" aria-label="Editor" title="Editor">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.1 15.9M14.5 14.5 20 20M8.1 8.1 12 12"/></svg>
+      <span>Editor</span>
     </button>
     <button class="nav rail-btn" data-view="recording" data-group="settings" aria-label="Settings" title="Settings">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>
@@ -40,21 +41,23 @@
       <button class="rail-icon" id="update-btn" aria-label="Check for updates" title="Check for updates">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
       </button>
-      <div class="version" id="app-version"></div>
+      <div class="version ver" id="app-version"></div>
     </div>
+    <div class="devtag" title="Hybrid Rail dev build">0.8 DEV</div>
   </nav>
 
   <nav class="settings-nav" id="settings-nav" aria-label="Settings" hidden>
     <h1>Settings</h1>
-    <button class="nav-search" id="settings-search" type="button" aria-label="Search settings"><span>Search settings…</span><kbd>Ctrl K</kbd></button>
-    <button class="nav" data-view="recording">Recording</button>
-    <button class="nav" data-view="games">Games</button>
-    <button class="nav" data-view="audio">Audio &amp; voice</button>
-    <button class="nav" data-view="hotkeys">Hotkeys</button>
-    <button class="nav" data-view="sounds">Sounds &amp; notifications</button>
-    <button class="nav" data-view="storage">Storage &amp; sharing</button>
-    <button class="nav" data-view="appearance">Appearance</button>
-    <button class="nav" data-view="general">General</button>
+    <label class="nav-search" id="settings-search-box"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="settings-search" type="search" placeholder="Search settings" aria-label="Search settings" autocomplete="off"><kbd>Ctrl K</kbd></label>
+    <div class="spacer10"></div>
+    <button class="nav" data-view="recording"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4-2.5z"/></svg>Recording<span class="n"></span></button>
+    <button class="nav" data-view="games"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="8" width="18" height="10" rx="5"/><path d="M8 11v4M6 13h4"/></svg>Games<span class="n"></span></button>
+    <button class="nav" data-view="audio"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>Audio &amp; voice<span class="n"></span></button>
+    <button class="nav" data-view="hotkeys"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="3"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></svg>Hotkeys<span class="n"></span></button>
+    <button class="nav" data-view="sounds"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 0 0 4 0"/></svg>Sounds &amp; notifications<span class="n"></span></button>
+    <button class="nav" data-view="storage"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="12" width="18" height="7" rx="2"/><path d="M3 12l3-7h12l3 7M7 15.5h.01"/></svg>Storage &amp; sharing<span class="n"></span></button>
+    <button class="nav" data-view="appearance"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="8" cy="10" r="1"/><circle cx="12" cy="7.5" r="1"/><circle cx="16" cy="10" r="1"/></svg>Appearance<span class="n"></span></button>
+    <button class="nav" data-view="general"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>General<span class="n"></span></button>
     <div class="settings-foot">
       <div class="local">Everything stays on this PC.<br>No account, no uploads.</div>
     </div>
@@ -75,23 +78,46 @@
     </header>
 
     <main class="main">
-      <section class="view" id="view-clips">
-        <header class="head">
-          <div>
-            <h1>Clips</h1>
-            <p class="sub" id="clips-meta">Everything stays on this PC</p>
-          </div>
-          <div class="tools">
+      <section class="view" id="view-home">
+        <div class="typer" id="home-typer" aria-live="off"><span id="typer-text"></span><i class="caret"></i></div>
+        <div id="home-body"></div>
+      </section>
+
+      <section class="view cv" id="view-clips" hidden>
+        <aside class="tree" id="clip-filters" role="group" aria-label="Filter clips"></aside>
+        <div class="cv-main">
+          <div class="tb">
             <label class="search">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
               <input id="clip-search" type="search" placeholder="Search clips" aria-label="Search clips">
             </label>
+            <div class="seg" id="clip-view" role="group" aria-label="Clip layout"></div>
             <button class="btn" id="open-folder">Open folder</button>
           </div>
-        </header>
-        <div class="filters" id="clip-filters" role="group" aria-label="Filter clips"></div>
-        <div class="grid" id="clips"></div>
-        <p class="empty" id="clips-empty" hidden>No clips yet. While a game is open, press your save hotkey and the last seconds land here.</p>
+          <div class="filmstrip" id="clips"></div>
+          <div class="empty" id="clips-empty" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4-2.5z"/></svg><div class="t1">No clips yet</div><div class="sub">While a game is open, press your save hotkey and the last seconds land here.</div></div>
+        </div>
+        <aside class="insp" id="clip-inspector" aria-label="Clip details"></aside>
+        <footer class="ft" id="clips-ft"></footer>
+      </section>
+
+      <section class="view" id="view-editor" hidden>
+        <div class="edempty" id="ed-empty">
+          <div class="dz" id="ed-dz">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.1 15.9M14.5 14.5 20 20M8.1 8.1 12 12"/></svg>
+            <div class="t1">Edit a clip</div>
+            <div class="sub">Choose one from your library, or drag an .mp4 from any folder, like your game's recordings, onto this window.</div>
+            <div class="btns">
+              <button class="btn primary" id="ed-pick-lib"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9.5v5l4-2.5z"/></svg>Choose from library</button>
+              <button class="btn" id="ed-browse"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Browse files…</button>
+            </div>
+            <div class="sm">Edited on this PC. Nothing is uploaded.</div>
+          </div>
+          <div class="recent" id="ed-recent" hidden>
+            <div class="t2">Recent clips</div>
+            <div class="row2" id="ed-recent-row"></div>
+          </div>
+        </div>
       </section>
 
       <section class="view" id="view-recording" hidden>
@@ -151,8 +177,10 @@
 </div>
 
 <div class="editor" id="editor" hidden></div>
+<div class="picker" id="picker" hidden></div>
 
 <div class="layout-switch" id="layout-switch" role="group" aria-label="Clip layout"></div>
+<div class="dropov" aria-hidden="true"><div><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.1 15.9M14.5 14.5 20 20M8.1 8.1 12 12"/></svg>Drop an .mp4 to edit it</div></div>
 <div class="toast" id="toast" role="status" hidden></div>
 </body>
 </html>

@@ -129,6 +129,7 @@ fn thumb_path(clip: &Path) -> Option<PathBuf> {
     clip.hash(&mut h);
     meta.len().hash(&mut h);
     meta.modified().ok().hash(&mut h);
+    960u32.hash(&mut h); // thumbnail width: bump to regenerate old small ones
     Some(thumbs_dir().join(format!("{:016x}.jpg", h.finish())))
 }
 
@@ -261,7 +262,7 @@ pub fn thumbs_dir() -> PathBuf {
     temp_dir("thumbs")
 }
 
-/// A small JPEG of a clip for the library: one frame half a second in, 480 px
+/// A small JPEG of a clip for the library: one frame half a second in, 960 px
 /// wide. Cached by the clip's name, size and date, so it's only made once (an
 /// edited or replaced clip gets a new one).
 pub fn thumbnail(clip: &Path) -> Result<PathBuf, String> {
@@ -275,7 +276,7 @@ pub fn thumbnail(clip: &Path) -> Result<PathBuf, String> {
     let r = tool("ffmpeg.exe")?
         .args(["-y", "-v", "error", "-ss", "0.5", "-i"])
         .arg(clip)
-        .args(["-frames:v", "1", "-an", "-vf", "scale='min(480,iw)':-2", "-q:v", "5"])
+        .args(["-frames:v", "1", "-an", "-vf", "scale='min(960,iw)':-2", "-q:v", "4"])
         .arg(&tmp)
         .output()
         .map_err(|e| format!("couldn't run ffmpeg: {e}"))?;
