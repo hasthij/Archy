@@ -47,6 +47,8 @@ struct RecognizerConfig {
 #[repr(C)] struct DiarConfig { segmentation: Segmentation, embedding: Embedding, clustering: Clustering, min_on: f32, min_off: f32 }
 #[repr(C)] struct DiarSeg { start: f32, end: f32, speaker: i32, confidence: f32 }
 
+#[repr(C)] struct EmbCfg { model: P, num_threads: i32, debug: i32, provider: P }
+
 type DiarCallback = unsafe extern "C" fn(i32, i32, *mut c_void) -> i32;
 
 struct Api {
@@ -66,6 +68,16 @@ struct Api {
     diar_sorted: unsafe extern "C" fn(H) -> *const DiarSeg,
     diar_free_segments: unsafe extern "C" fn(*const DiarSeg),
     diar_free_result: unsafe extern "C" fn(H),
+    ext_create: unsafe extern "C" fn(*const EmbCfg) -> H,
+    ext_destroy: unsafe extern "C" fn(H),
+    ext_dim: unsafe extern "C" fn(H) -> i32,
+    ext_stream: unsafe extern "C" fn(H) -> H,
+    ext_ready: unsafe extern "C" fn(H, H) -> i32,
+    ext_compute: unsafe extern "C" fn(H, H) -> *const f32,
+    ext_free: unsafe extern "C" fn(*const f32),
+    on_accept: unsafe extern "C" fn(H, i32, *const f32, i32),
+    on_finish: unsafe extern "C" fn(H),
+    on_destroy: unsafe extern "C" fn(H),
 }
 
 impl Api {
@@ -99,6 +111,16 @@ impl Api {
             diar_sorted: sym!("SherpaOnnxOfflineSpeakerDiarizationResultSortByStartTime"),
             diar_free_segments: sym!("SherpaOnnxOfflineSpeakerDiarizationDestroySegment"),
             diar_free_result: sym!("SherpaOnnxOfflineSpeakerDiarizationDestroyResult"),
+            ext_create: sym!("SherpaOnnxCreateSpeakerEmbeddingExtractor"),
+            ext_destroy: sym!("SherpaOnnxDestroySpeakerEmbeddingExtractor"),
+            ext_dim: sym!("SherpaOnnxSpeakerEmbeddingExtractorDim"),
+            ext_stream: sym!("SherpaOnnxSpeakerEmbeddingExtractorCreateStream"),
+            ext_ready: sym!("SherpaOnnxSpeakerEmbeddingExtractorIsReady"),
+            ext_compute: sym!("SherpaOnnxSpeakerEmbeddingExtractorComputeEmbedding"),
+            ext_free: sym!("SherpaOnnxSpeakerEmbeddingExtractorDestroyEmbedding"),
+            on_accept: sym!("SherpaOnnxOnlineStreamAcceptWaveform"),
+            on_finish: sym!("SherpaOnnxOnlineStreamInputFinished"),
+            on_destroy: sym!("SherpaOnnxDestroyOnlineStream"),
         })
     }
 }
@@ -163,7 +185,7 @@ pub fn generate(dll_dir: &Path, m: &Models, samples: &[f32], threads: i32, progr
         let cfg = DiarConfig {
             segmentation: Segmentation { pyannote: Pyannote { model: seg_c.as_ptr(), window_shift_ratio: 0.0 }, num_threads: threads, debug: 0, provider: cpu.as_ptr() },
             embedding: Embedding { model: emb_c.as_ptr(), num_threads: threads, debug: 0, provider: cpu.as_ptr() },
-            clustering: Clustering { num_clusters: if m.people > 0 { m.people } else { -1 }, threshold: std::env::var("ARCHY_SPK_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0), compute_confidence: 0 },
+            clustering: Clustering { num_clusters: if m.people > 0 { m.people } else { -1 }, threshold: std::env::var("ARCHY_SPK_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(0.7), compute_confidence: 0 },
             min_on: 0.3,
             min_off: 0.5,
         };
@@ -283,6 +305,12 @@ pub fn generate(dll_dir: &Path, m: &Models, samples: &[f32], threads: i32, progr
         progress(0.3 + 0.7 * (done / all).min(1.0));
     }
     unsafe { (api.destroy_rec)(rec) };
+    // Second opinion on who speaks: a voice fingerprint per caption line, clustered (exact count when the user gave one).
+    if m.segmentation.is_some() {
+        if let Some(emb) = m.embedding {
+            relabel(&api, emb, samples, &mut lines, m.people, threads);
+        }
+    }
     // Order by time, then number the voices by who is heard first (User 1, 2, 3 with no gaps).
     lines.sort_by(|a, b| a.start.total_cmp(&b.start));
     let mut order: Vec<i32> = Vec::new();
@@ -296,6 +324,173 @@ pub fn generate(dll_dir: &Path, m: &Models, samples: &[f32], threads: i32, progr
         };
     }
     Ok(lines)
+}
+
+fn unit(mut v: Vec<f32>) -> Vec<f32> {
+    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+    v.iter_mut().for_each(|x| *x /= n);
+    v
+}
+
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+struct Cluster {
+    members: Vec<usize>,
+    cen: Vec<f32>,
+    dur: f32,
+}
+
+/// Replaces the diarizer's speaker numbers with ones from clustering each line's voice fingerprint.
+/// `people` > 0 forces exactly that many voices (when there are enough usable lines).
+fn relabel(api: &Api, model: &Path, samples: &[f32], lines: &mut [Line], people: i32, threads: i32) {
+    const MIN_SECS: f32 = 0.8;
+    let debug = std::env::var("ARCHY_DEBUG").is_ok();
+    let (model_c, cpu) = (cstr(model), CString::new("cpu").unwrap());
+    let cfg = EmbCfg { model: model_c.as_ptr(), num_threads: threads, debug: 0, provider: cpu.as_ptr() };
+    let ex = unsafe { (api.ext_create)(&cfg) };
+    if ex.is_null() {
+        return;
+    }
+    let dim = unsafe { (api.ext_dim)(ex) } as usize;
+    let rate = 16_000.0_f32;
+    let mut embs: Vec<Option<Vec<f32>>> = Vec::with_capacity(lines.len());
+    for l in lines.iter() {
+        let a = ((l.start * rate) as usize).min(samples.len());
+        let b = ((l.end * rate) as usize).min(samples.len());
+        if l.end - l.start < MIN_SECS || b <= a {
+            embs.push(None);
+            continue;
+        }
+        let st = unsafe { (api.ext_stream)(ex) };
+        let mut out = None;
+        unsafe {
+            (api.on_accept)(st, 16_000, samples[a..b].as_ptr(), (b - a) as i32);
+            (api.on_finish)(st);
+            if (api.ext_ready)(ex, st) != 0 {
+                let p = (api.ext_compute)(ex, st);
+                if !p.is_null() {
+                    out = Some(unit(std::slice::from_raw_parts(p, dim).to_vec()));
+                    (api.ext_free)(p);
+                }
+            }
+            (api.on_destroy)(st);
+        }
+        embs.push(out);
+    }
+    unsafe { (api.ext_destroy)(ex) };
+
+    // Everything in the clip shares the same game sound and recording channel, which makes every voice look alike.
+    // Subtracting the average fingerprint cancels that and leaves what differs between people.
+    let have: Vec<usize> = (0..embs.len()).filter(|&i| embs[i].is_some()).collect();
+    if have.len() >= 3 {
+        let mut mean = vec![0.0_f32; dim];
+        for &i in &have {
+            for (m, x) in mean.iter_mut().zip(embs[i].as_ref().unwrap()) {
+                *m += x / have.len() as f32;
+            }
+        }
+        for &i in &have {
+            let e = embs[i].as_mut().unwrap();
+            for (x, m) in e.iter_mut().zip(&mean) {
+                *x -= m;
+            }
+            *e = unit(std::mem::take(e));
+        }
+    }
+
+    let mut cl: Vec<Cluster> = (0..lines.len())
+        .filter_map(|i| embs[i].as_ref().map(|e| Cluster { members: vec![i], cen: e.clone(), dur: lines[i].end - lines[i].start }))
+        .collect();
+    if cl.len() < 2 {
+        return;
+    }
+    // Two voices are the same person when their fingerprints are this close (cosine distance).
+    let t: f32 = std::env::var("ARCHY_SPK_T").ok().and_then(|v| v.parse().ok()).unwrap_or(0.65);
+    let closest = |cl: &[Cluster]| {
+        let mut best = (-2.0_f32, 0, 1);
+        for i in 0..cl.len() {
+            for j in i + 1..cl.len() {
+                let s = dot(&cl[i].cen, &cl[j].cen);
+                if s > best.0 {
+                    best = (s, i, j);
+                }
+            }
+        }
+        best
+    };
+    let merge = |cl: &mut Vec<Cluster>, i: usize, j: usize| {
+        let b = cl.remove(j);
+        let a = &mut cl[i];
+        let cen: Vec<f32> = a.cen.iter().zip(&b.cen).map(|(x, y)| x * a.dur + y * b.dur).collect();
+        a.cen = unit(cen);
+        a.dur += b.dur;
+        a.members.extend(b.members);
+    };
+    loop {
+        if cl.len() <= 1 || (people > 0 && cl.len() as i32 <= people) {
+            break;
+        }
+        let (s, i, j) = closest(&cl);
+        if debug {
+            eprintln!("merge sim {s:.3} ({} clusters)", cl.len());
+        }
+        if people <= 0 && 1.0 - s > t {
+            break;
+        }
+        merge(&mut cl, i, j);
+    }
+    if people <= 0 {
+        // One short line on its own is noise more often than a person.
+        while cl.len() > 1 {
+            let Some(k) = (0..cl.len()).filter(|&k| cl[k].members.len() < 2 && cl[k].dur < 2.0).min_by(|&a, &b| cl[a].dur.total_cmp(&cl[b].dur)) else { break };
+            let best = (0..cl.len()).filter(|&o| o != k).max_by(|&a, &b| dot(&cl[k].cen, &cl[a].cen).total_cmp(&dot(&cl[k].cen, &cl[b].cen))).unwrap();
+            let (lo, hi) = (k.min(best), k.max(best));
+            merge(&mut cl, lo, hi);
+        }
+        // At most six voices.
+        while cl.len() > 6 {
+            let (_, i, j) = closest(&cl);
+            merge(&mut cl, i, j);
+        }
+    }
+    let mut label = vec![-1_i32; lines.len()];
+    for (c, k) in cl.iter().enumerate() {
+        for &i in &k.members {
+            label[i] = c as i32;
+        }
+    }
+    // Lines too short to fingerprint take the voice of the nearest fingerprinted line in time.
+    let known: Vec<usize> = (0..lines.len()).filter(|&i| label[i] >= 0).collect();
+    // The diarizer's own label says which cluster a short line most likely belongs to (when its other lines agree).
+    let mut votes: std::collections::HashMap<i32, Vec<u32>> = std::collections::HashMap::new();
+    for &i in &known {
+        votes.entry(lines[i].speaker).or_insert_with(|| vec![0; cl.len()])[label[i] as usize] += 1;
+    }
+    for i in 0..lines.len() {
+        if label[i] < 0 {
+            if let Some(v) = votes.get(&lines[i].speaker) {
+                let total: u32 = v.iter().sum();
+                let (best, n) = v.iter().enumerate().max_by_key(|(_, n)| **n).map(|(k, n)| (k, *n)).unwrap_or((0, 0));
+                if total >= 2 && n as f32 >= 0.6 * total as f32 {
+                    label[i] = best as i32;
+                    continue;
+                }
+            }
+            if let Some(&n) = known.iter().min_by(|&&a, &&b| (lines[a].start - lines[i].start).abs().total_cmp(&(lines[b].start - lines[i].start).abs())) {
+                label[i] = label[n];
+            }
+        }
+    }
+    if debug {
+        eprintln!("relabel: {} clusters (threshold {t}), {} of {} lines fingerprinted", cl.len(), known.len(), lines.len());
+    }
+    for (l, s) in lines.iter_mut().zip(label) {
+        if s >= 0 {
+            l.speaker = s;
+        }
+    }
 }
 
 /// Whisper marks silence and noise as "[BLANK_AUDIO]", "(music)" and the like: not captions.
@@ -340,6 +535,22 @@ fn lines_from_words(mut words: Vec<(f32, f32, String)>, limit: f32, speaker: i32
     out
 }
 
+/// Small models can get stuck repeating ("I said I said I said..."): keep a repeated word or short phrase at most twice in a row.
+fn collapse_loops(w: Vec<&str>) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    for x in w {
+        out.push(x);
+        for n in 1..=3 {
+            let len = out.len();
+            if len >= n * 3 && out[len - n..] == out[len - 2 * n..len - n] && out[len - n..] == out[len - 3 * n..len - 2 * n] {
+                out.truncate(len - n);
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Cuts one spoken stretch into readable lines (about 7 words), timed in proportion to their length.
 fn split_lines(text: &str, start: f32, end: f32, speaker: i32) -> Vec<Line> {
     if is_noise(text) {
@@ -349,7 +560,7 @@ fn split_lines(text: &str, start: f32, end: f32, speaker: i32) -> Vec<Line> {
     if words.is_empty() {
         return Vec::new();
     }
-    let words: Vec<&str> = words.into_iter().filter(|w| w.chars().any(|c| c.is_alphanumeric())).collect();
+    let words = collapse_loops(words.into_iter().filter(|w| w.chars().any(|c| c.is_alphanumeric())).collect());
     if words.is_empty() {
         return Vec::new();
     }

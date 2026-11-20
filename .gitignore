@@ -14,3 +14,6 @@ promo/audio/models/
 # Build/dev scripts: local only
 /scripts
 assets/make_*.py
+
+# Local helper scripts are never committed
+*.ps1

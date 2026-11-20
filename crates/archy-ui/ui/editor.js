@@ -553,7 +553,7 @@ function renderCaptions() {
         el("p", { class: "ed-note", text: model[2] + ". Stronger models read more words correctly but take longer on this PC." }));
       else kids.push(el("button", { class: "btn", text: "Try a stronger model", onclick: () => { c.more = true; renderCaptions(); } }));
       if (!have) {
-        const mb = (st[c.model] ? 0 : model[3]) + (c.detect && !st.speakers ? 45 : 0);
+        const mb = (st[c.model] ? 0 : model[3]) + (c.detect && !st.speakers ? 34 : 0);
         kids.push(el("button", { class: "btn primary full", text: `Get captions ready (about ${mb} MB, once)`, onclick: downloadCaptionModels }),
           el("p", { class: "ed-note", text: "Downloaded once from GitHub and kept on this PC. Nothing from your clips is sent." }));
       } else {

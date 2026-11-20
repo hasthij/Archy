@@ -420,7 +420,7 @@ html:root[data-theme="dark"][data-oled="1"] {
 /* ---------- Clips sidebar icons: outline icons + game monogram tiles ---------- */
 .tree .nav svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .tree .nav[aria-pressed="true"] svg { stroke: var(--acc); }
-.tree .nav i.gmono { width: 22px; height: 22px; border-radius: var(--radius, 0); flex: none; display: grid; place-items: center; font: 700 11px var(--font); color: #fff; text-shadow: 0 1px 2px #0006; font-style: normal; }
+.tree .nav i.gmono { width: 22px; height: 22px; box-sizing: border-box; border: 1.5px solid var(--acc); border-radius: var(--radius, 0); background: transparent; flex: none; display: grid; place-items: center; font: 700 11px var(--font); color: var(--acc); font-style: normal; }
 
 /* hover preview works on list rows too */
 .lrow .th { position: relative; overflow: hidden; }

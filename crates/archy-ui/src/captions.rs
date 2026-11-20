@@ -27,7 +27,7 @@ pub const ITEMS: [Item; 6] = [
     Item { id: "small", dir: "sherpa-onnx-whisper-small.en", url: "asr-models/sherpa-onnx-whisper-small.en.tar.bz2", single_file: false, mb: 600 },
     Item { id: "parakeet", dir: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8", url: "asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2", single_file: false, mb: 482 },
     Item { id: "speaker_seg", dir: "sherpa-onnx-pyannote-segmentation-3-0", url: "speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2", single_file: false, mb: 7 },
-    Item { id: "speaker_emb", dir: "speakers", url: "speaker-recongition-models/nemo_en_titanet_small.onnx", single_file: true, mb: 40 },
+    Item { id: "speaker_emb", dir: "speakers2", url: "speaker-recongition-models/wespeaker_en_voxceleb_resnet34.onnx", single_file: true, mb: 27 },
 ];
 
 pub fn url_of(item: &Item) -> String {
@@ -74,7 +74,7 @@ pub fn whisper_dir(model: &str) -> Option<PathBuf> {
 pub fn speaker_models() -> Option<(PathBuf, PathBuf)> {
     let seg_dir = root().join(item("speaker_seg")?.dir);
     let seg = ["model.onnx", "model.int8.onnx"].iter().map(|n| seg_dir.join(n)).find(|p| p.is_file())?;
-    let emb = root().join("speakers").join("nemo_en_titanet_small.onnx");
+    let emb = root().join("speakers2").join("wespeaker_en_voxceleb_resnet34.onnx");
     emb.is_file().then_some((seg, emb))
 }
 

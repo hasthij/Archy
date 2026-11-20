@@ -324,15 +324,9 @@ function renderFilters() {
     ...games.map(([v, l, n]) => nav(v, l, n, gameIco(l))));
 }
 
-// Game's real app icon when Archy has one saved; otherwise a gradient monogram tile.
-const gameIcons = new Map(); // name -> icon url, or null when there is none
+// A letter in an accent-coloured outline (transparent inside).
 function gameIco(name) {
-  const g = GR[gIdx(name)];
-  const tile = el("i", { class: "gmono", style: `background:linear-gradient(135deg,${g[0]},${g[1]})`, text: (name.trim()[0] || "?").toUpperCase() });
-  const show = (u) => { tile.textContent = ""; tile.style.background = "none"; tile.append(el("img", { src: u, alt: "", draggable: "false" })); };
-  if (gameIcons.get(name)) show(gameIcons.get(name));
-  else if (!gameIcons.has(name)) invoke("game_icon", { name }).then((u) => { gameIcons.set(name, u || null); if (u) show(u); }).catch(() => gameIcons.set(name, null));
-  return tile;
+  return el("i", { class: "gmono", text: (name.trim()[0] || "?").toUpperCase(), "aria-hidden": "true" });
 }
 
 /// Clip cards by clip + size + featured, reused across renders.
