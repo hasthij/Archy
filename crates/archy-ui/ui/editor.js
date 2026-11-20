@@ -1983,7 +1983,7 @@ function renderExport() {
   const srtOpt = capCount && ed.format !== "mp3" ? el("label", { class: "ed-check" },
     (() => { const b = el("input", { type: "checkbox" }); b.checked = ed.cap.srt; b.addEventListener("change", () => { ed.cap.srt = b.checked; }); return b; })(),
     "Also save the captions as a .srt subtitle file") : null;
-  ed.dom.export.replaceChildren(fmtSeg, shape, gifOpts, srtOpt, el("div", { class: "ed-row" }, ed.dom.save, ed.dom.copy), ed.dom.progress);
+  ed.dom.export.replaceChildren(...[fmtSeg, shape, gifOpts, srtOpt].filter(Boolean), el("div", { class: "ed-row" }, ed.dom.save, ed.dom.copy), ed.dom.progress);
 }
 
 function untouched() {

@@ -557,8 +557,9 @@ textarea { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid
 .welcome-card { width: min(520px, 100%); padding: 32px; border-radius: 20px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 14px; animation: rise 0.35s cubic-bezier(.2,.7,.2,1); }
 .welcome-card h1 { font-size: 30px; }
 .welcome-card h2 { margin: 0; font: 700 24px var(--display); }
-.welcome-logo { width: 56px; height: 56px; border-radius: 16px; background: var(--accent); -webkit-mask: none; position: relative; }
-.welcome-logo::after { content: ""; position: absolute; inset: 14px; border: 3px solid var(--on-accent); border-bottom: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+.welcome-logo { width: 64px; height: 64px; border-radius: 16px; box-shadow: 0 0 0 0 var(--accent-soft); animation: logo-pop 0.6s cubic-bezier(.2,.9,.3,1.2) both, logo-glow 2.4s 0.6s ease-out 1; }
+.welcome-card.swap { animation: swap 0.28s cubic-bezier(.2,.7,.2,1); }
+.welcome-card .btn.primary:focus-visible { outline-offset: 2px; }
 .welcome-keys { display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 14px; background: var(--bg); border: 1px solid var(--line-soft); }
 .welcome-keys div { display: flex; align-items: center; gap: 12px; }
 .welcome-keys kbd { min-width: 96px; text-align: center; }
@@ -567,9 +568,14 @@ textarea { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid
 .welcome-dots { display: flex; gap: 6px; justify-content: center; }
 .welcome-dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); }
 .welcome-dots i.on { width: 22px; border-radius: 4px; background: var(--accent); }
-.spot-shade { position: fixed; inset: 0; z-index: 70; background: color-mix(in srgb, #000 45%, transparent); pointer-events: auto; }
-.spot-ring { position: fixed; z-index: 71; border-radius: 14px; border: 2px solid var(--accent); box-shadow: 0 0 0 6px var(--accent-soft); pointer-events: none; animation: rise 0.25s ease-out; }
-.spot-tip { position: fixed; z-index: 72; width: 320px; padding: 18px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); animation: rise 0.25s ease-out; }
+.spot-shade { position: fixed; inset: 0; z-index: 70; background: transparent; pointer-events: auto; }
+/* The ring's huge shadow darkens everything except the target: a real spotlight that glides between stops. */
+.spot-ring { position: fixed; z-index: 71; border-radius: 14px; border: 2px solid var(--accent); box-shadow: 0 0 0 9999px color-mix(in srgb, #000 55%, transparent); pointer-events: none; transition: left 0.38s cubic-bezier(.2,.7,.2,1), top 0.38s cubic-bezier(.2,.7,.2,1), width 0.38s cubic-bezier(.2,.7,.2,1), height 0.38s cubic-bezier(.2,.7,.2,1); }
+.spot-ring.pulse::after { content: ""; position: absolute; inset: -2px; border-radius: inherit; border: 2px solid var(--accent); animation: spot-pulse 1.1s 0.3s ease-out 2 both; }
+.spot-tip { position: fixed; z-index: 72; width: 320px; padding: 18px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); transition: left 0.38s cubic-bezier(.2,.7,.2,1), top 0.38s cubic-bezier(.2,.7,.2,1); }
+.spot-body { animation: swap 0.3s 0.12s cubic-bezier(.2,.7,.2,1) both; }
+.spot-prog { height: 3px; border-radius: 2px; background: var(--line-soft); margin-bottom: 12px; overflow: hidden; }
+.spot-prog i { display: block; height: 100%; border-radius: 2px; background: var(--accent); transition: width 0.4s cubic-bezier(.2,.7,.2,1); }
 .spot-tip h3 { margin: 4px 0 6px; }
 .spot-step { font: 600 11px var(--mono); color: var(--accent); letter-spacing: 0.06em; text-transform: uppercase; }
 @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
@@ -879,3 +885,32 @@ select:focus-visible { border-color: var(--accent); outline: 2px solid var(--acc
 .picker-item { display: flex; flex-direction: column; gap: 6px; padding: 8px; text-align: left; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2); color: var(--text); cursor: pointer; }
 .picker-item:hover { border-color: var(--accent); }
 .picker-item .thumb { border-radius: 6px; overflow: hidden; }
+
+/* Welcome demos: one 6 s loop so the key press, the clip and the chip line up */
+.demo { position: relative; height: 92px; border-radius: 14px; background: var(--bg); border: 1px solid var(--line-soft); overflow: hidden; }
+.demo-bars { position: absolute; inset: 0; width: 200%; display: flex; align-items: center; gap: 6px; padding: 0 3px; animation: demo-scroll 7s linear infinite; }
+.demo-bars i { flex: 0 0 6px; border-radius: 3px; background: var(--line-strong); }
+.demo-rec { position: absolute; left: 12px; top: 10px; display: flex; align-items: center; gap: 6px; font: 600 11px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.demo-rec i { width: 8px; height: 8px; border-radius: 50%; background: #ff4d4f; animation: demo-blink 1.4s ease-in-out infinite; }
+.demo-len { position: absolute; right: 12px; bottom: 9px; font: 500 12px var(--sans, inherit); color: var(--muted); }
+.demo-clip { position: absolute; right: 10px; top: 8px; bottom: 8px; width: 40%; border: 2px solid var(--accent); border-radius: 10px; background: var(--accent-soft); animation: demo-clip 6s ease-in-out infinite; }
+.demo-chip { position: absolute; right: 18px; bottom: 14px; padding: 4px 11px; border-radius: 999px; background: var(--accent); color: var(--on-accent); font: 600 12px var(--sans, inherit); animation: demo-chip 6s ease-in-out infinite; }
+.demo-voice { display: grid; place-items: center; }
+.demo-wave { display: flex; align-items: center; gap: 4px; height: 44px; }
+.demo-wave i { width: 4px; height: 100%; border-radius: 2px; background: var(--accent); transform-origin: center; animation: demo-wave 1.2s ease-in-out infinite; }
+.demo-say { position: absolute; left: 12px; bottom: 8px; font: 500 12px var(--sans, inherit); color: var(--muted); }
+.welcome-keys kbd.press { animation: demo-press 6s ease-in-out infinite; }
+@keyframes swap { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+@keyframes logo-pop { from { opacity: 0; transform: scale(0.6) rotate(-8deg); } to { opacity: 1; transform: none; } }
+@keyframes logo-glow { 0% { box-shadow: 0 0 0 0 var(--accent-soft); } 100% { box-shadow: 0 0 0 26px transparent; } }
+@keyframes spot-pulse { from { opacity: 0.9; transform: scale(1); } to { opacity: 0; transform: scale(1.18); } }
+@keyframes demo-scroll { to { transform: translateX(-50%); } }
+@keyframes demo-blink { 50% { opacity: 0.25; } }
+@keyframes demo-clip { 0%, 36% { opacity: 0; transform: scale(0.92); } 44%, 86% { opacity: 1; transform: none; } 96%, 100% { opacity: 0; } }
+@keyframes demo-chip { 0%, 42% { opacity: 0; transform: translateY(8px) scale(0.9); } 50%, 86% { opacity: 1; transform: none; } 96%, 100% { opacity: 0; } }
+@keyframes demo-press { 0%, 32%, 44%, 100% { transform: none; box-shadow: none; } 36%, 40% { transform: translateY(2px) scale(0.95); box-shadow: 0 0 0 4px var(--accent-soft); background: var(--accent); color: var(--on-accent); } }
+@keyframes demo-wave { 0%, 100% { transform: scaleY(0.18); } 50% { transform: scaleY(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .demo *, .welcome-logo, .welcome-card, .spot-body, .spot-ring, .spot-ring::after, .spot-tip, .welcome-keys kbd.press { animation: none !important; transition: none !important; }
+  .demo-clip, .demo-chip { opacity: 1; }
+}
