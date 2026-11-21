@@ -107,7 +107,7 @@ fn set_activity(p: &mut File, text: Option<(&str, &str, u64)>) -> std::io::Resul
         "details": format!("Clipping {d}"),
         "state": st,
         "timestamps": { "start": since },
-        "assets": { "large_image": "archy", "large_text": "Archy: instant replay clipper" },
+        "assets": { "large_image": "https://raw.githubusercontent.com/hasthij/Archy/main/assets/promo/archy-icon-512.png?v=083", "large_text": "Archy: instant replay clipper" },
     }));
     let msg = serde_json::json!({
         "cmd": "SET_ACTIVITY",
