@@ -472,4 +472,8 @@ html:root[data-theme="dark"][data-oled="1"] {
 .cap-del svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; }
 .cap-del:hover { background: #e5484d33; color: #ff6b6b; }
 .ctx-item.danger, .ctx-item.danger svg { color: #ff6b6b; }
+/* Clip inspector: red Delete at the bottom (Recycle Bin, no confirm) */
+#clip-inspector .btn.del { color: #ff6b6b; border-color: #e5484d88; background: #e5484d14; }
+#clip-inspector .btn.del svg { stroke: currentColor; }
+#clip-inspector .btn.del:hover { background: #e5484d33; border-color: #e5484d; color: #ff8585; }
 .tree .nav i.gmono img { width: 100%; height: 100%; object-fit: contain; display: block; border-radius: inherit; }

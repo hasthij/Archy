@@ -47,7 +47,7 @@ function toast(msg) {
 
 // ---------- navigation ----------
 // Pages under Settings (the rail's gear); Games and Voice also have rail buttons.
-const SETTINGS_PAGES = ["recording", "games", "audio", "hotkeys", "sounds", "storage", "appearance", "general"];
+const SETTINGS_PAGES = ["recording", "games", "audio", "hotkeys", "sounds", "storage", "explorer", "appearance", "general"];
 
 /// In-app confirm window (replaces the browser's native confirm box).
 function askConfirm(title, text, okLabel, onOk) {
@@ -388,10 +388,16 @@ function thumbBox(c, dur) {
     dur ? el("span", { class: "dur", text: c.kind === "shot" ? "Screenshot" : MB(c.bytes) }) : null);
 }
 /// One design-lab card. `pick(c)` runs on click; default = select, double-click plays.
-function thCard(c, pick, preview) {
+/// Optional "One-click play" (Settings > Clip Explorer, off by default): a single click plays videos.
+const oneClick = (c, e) => uiPrefs.one_click_play === "on" && c.kind !== "shot" && !e.target.closest("input,button");
+function thCard(c, pick, preview, home) {
   const act = () => (c.kind === "shot" ? viewShot(c) : play(c));
   const card = el("div", { class: "tc", tabindex: "0", "data-path": c.path,
-    onclick: () => (pick ? pick(c) : select(c)),
+    onclick: (e) => {
+      if (home && oneClick(c, e)) return play(c);
+      if (pick) return pick(c);
+      select(c); if (oneClick(c, e)) play(c);
+    },
     ondblclick: () => { if (!pick) act(); },
     onkeydown: (e) => { if (e.key === "Enter" && !e.target.closest("input,button")) (pick ? pick(c) : act()); },
     oncontextmenu: (e) => clipMenu(e, e.currentTarget, c) },
@@ -429,7 +435,7 @@ function hoverPreview(card, c) {
 function listRow(c) {
   const s = starBtn(c); s.classList.add("inl");
   const row = el("div", { class: "lrow", tabindex: "0", "data-path": c.path,
-    onclick: () => select(c), ondblclick: () => (c.kind === "shot" ? viewShot(c) : play(c)),
+    onclick: (e) => { select(c); if (oneClick(c, e)) play(c); }, ondblclick: () => (c.kind === "shot" ? viewShot(c) : play(c)),
     oncontextmenu: (e) => clipMenu(e, e.currentTarget, c) },
     s, thumbBox(c, false), renameable(el("b", { class: "clip-name", text: c.name }), c),
     el("span", { class: "mono", text: c.kind === "shot" ? "Shot" : "Clip" }),
@@ -477,7 +483,8 @@ function renderInspector() {
     starB,
     fb("Copy to clipboard", "share", async () => { try { await invoke("copy_clip", { path: c.path }); toast("Copied. Paste it into Discord or any chat"); } catch (e) { toast(String(e)); } }),
     isShot ? null : compress,
-    fb("Show in folder", "folder", () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e)))));
+    fb("Show in folder", "folder", () => invoke("reveal_clip", { path: c.path }).catch((e) => toast(String(e)))),
+    fb("Delete", "trash", () => deleteClip(c), "btn del"));
 }
 
 const openFolder = () => invoke("open_clips_folder").catch((e) => toast(String(e)));
@@ -538,7 +545,7 @@ function renderHome() {
     for (const c of list) { const k = gameOf(c); if (!by.has(k)) by.set(k, []); by.get(k).push(c); }
     const shelves = [...by].map(([k, cs]) => el("div", { class: "shelf" },
       el("h3", {}, el("span", { text: k }), el("span", { class: "sm", text: `${cs.length} starred` })),
-      el("div", { class: "row2" }, ...cs.map((c) => { const card = thCard(c, () => revealInClips(c, card), true); return card; }))));
+      el("div", { class: "row2" }, ...cs.map((c) => { const card = thCard(c, () => revealInClips(c, card), true, true); return card; }))));
     body = el("div", {}, hero, ...shelves);
   }
   box.replaceChildren(...[el("div", { class: "HM" }, head, body)]);
@@ -2086,7 +2093,20 @@ function renderAppearance() {
   $("#appearance-settings").replaceChildren(...panel);
 }
 
+function renderExplorer() {
+  const on = uiPrefs.one_click_play === "on";
+  const btn = el("div", { class: "seg", role: "group", "aria-label": "One-click play" },
+    ...[["off", "Off"], ["on", "On"]].map(([v, text]) => el("button", { "aria-pressed": String(uiPrefs.one_click_play === v), text,
+      onclick: () => { setUi({ one_click_play: v }); renderExplorer(); toast(`One-click play ${text.toLowerCase()}`); } })));
+  $("#explorer-settings").replaceChildren(el("div", { class: "lsec" }, el("h3", { text: "Playing clips" }),
+    el("div", { class: "lset" },
+      el("div", {}, el("b", { text: "One-click play" }),
+        el("small", { text: on ? "One click on a clip plays it, on Home and Clips. Right-click or the buttons on the right still work." : "Off: one click selects a clip and double-click plays it. Turn on to play with a single click, on Home and Clips." })),
+      btn)));
+}
+
 function renderAll() {
+  renderExplorer();
   renderSounds();
   renderAppearance();
   renderRecording();

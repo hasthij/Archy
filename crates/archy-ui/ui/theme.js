@@ -15,7 +15,7 @@ function resolveTheme(theme) {
 const ARCHY_UI_KEY = "archy-ui-prefs";
 const UI_DEFAULTS = {
   oled: true, surface: "raised", selected: "tint", accent_hex: "", radius: 0, density: "roomy",
-  icons: 1.6, motion: "subtle", font: "grotesk", library: "grid", nav: "rail", tone: "neutral", actions: "icons", scale: 100, thumb: 240, meta: "on", hover_preview: "on",
+  icons: 1.6, motion: "subtle", font: "grotesk", library: "grid", nav: "rail", tone: "neutral", actions: "icons", scale: 100, thumb: 240, meta: "on", hover_preview: "on", one_click_play: "off",
 };
 let uiPrefs = (() => {
   try {

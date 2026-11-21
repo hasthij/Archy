@@ -101,6 +101,7 @@ html[data-motion="reduce"] #splash .name span,html[data-motion="reduce"] #splash
     <button class="nav" data-view="hotkeys"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="3"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></svg>Hotkeys<span class="n"></span></button>
     <button class="nav" data-view="sounds"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 0 0 4 0"/></svg>Sounds &amp; notifications<span class="n"></span></button>
     <button class="nav" data-view="storage"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="12" width="18" height="7" rx="2"/><path d="M3 12l3-7h12l3 7M7 15.5h.01"/></svg>Storage &amp; sharing<span class="n"></span></button>
+    <button class="nav" data-view="explorer"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></svg>Clip Explorer<span class="n"></span></button>
     <button class="nav" data-view="appearance"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="8" cy="10" r="1"/><circle cx="12" cy="7.5" r="1"/><circle cx="16" cy="10" r="1"/></svg>Appearance<span class="n"></span></button>
     <button class="nav" data-view="general"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>General<span class="n"></span></button>
     <div class="settings-foot">
@@ -183,6 +184,11 @@ html[data-motion="reduce"] #splash .name span,html[data-motion="reduce"] #splash
       <section class="view" id="view-hotkeys" hidden>
         <header class="head"><div><h1>Hotkeys</h1><p class="sub">Click a box, then press the keys you want. Esc cancels.</p></div></header>
         <div id="hotkey-settings"></div>
+      </section>
+
+      <section class="view" id="view-explorer" hidden>
+        <header class="head"><div><h1>Clip Explorer</h1><p class="sub">How the Home and Clips pages behave when you click a clip. Window only; recording is never affected.</p></div></header>
+        <div id="explorer-settings"></div>
       </section>
 
       <section class="view" id="view-appearance" hidden>
