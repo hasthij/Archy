@@ -19,7 +19,7 @@
 
 - **Always ready.** While a game is open, Archy keeps the last moments in memory. Press **F8**, or say **"Archer, clip that"**, and those seconds are saved as an MP4.
 - **Barely touches your FPS.** It uses your graphics chip's video encoder (Intel Quick Sync, NVIDIA or AMD), stays off the cores your game uses, and records nothing when no game is running.
-- **Separate audio tracks.** You get everything you heard with your mic mixed in, plus the game alone, Discord alone and your mic alone, so you can edit later.
+- **Separate audio tracks.** You get everything you heard with your mic mixed in, plus the game alone, Discord alone (Discord, Canary, PTB, Vesktop, Equibop or Legcord, shown with its real icon) and your mic alone. Any other app playing sound, like Spotify or your browser, gets its own track too, found automatically. Each track has its own slider in the editor.
 - **Discord-ready.** Each new clip is copied, so you can paste it straight into Discord. Clips over 10 MB get a one-click **Discord copy** that fits the free upload limit.
 - **Yours only.** Clips, settings and voice listening all stay on your PC. There is no account and no server, and nothing is ever uploaded.
 
