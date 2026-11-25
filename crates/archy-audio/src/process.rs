@@ -43,6 +43,38 @@ pub fn find_root_process(exe: &str) -> Option<u32> {
         .map(|p| p.0)
 }
 
+/// Voice-chat apps: Discord's channels and the clients built on it. They all get the
+/// one "Discord" track, whatever the exe is called.
+const CHAT_APPS: &[&str] = &[
+    "discord", "discordcanary", "discordptb", "discorddevelopment",
+    "vesktop", "equibop", "legcord", "armcord", "webcord", "vencorddesktop",
+];
+
+/// True for Discord and its variants (Canary, PTB, Vesktop...). Accepts "Vesktop.exe" or "vesktop".
+pub fn is_chat_app(exe: &str) -> bool {
+    let norm: String = exe.to_lowercase().trim_end_matches(".exe").chars().filter(|c| c.is_alphanumeric()).collect();
+    CHAT_APPS.contains(&norm.as_str())
+}
+
+/// The running voice-chat app to record: (root pid, exe name). If several are open, the one
+/// that has an audio session (the one you're talking in) wins, else the first in `CHAT_APPS` order.
+pub fn find_chat_app() -> Option<(u32, String)> {
+    let running: Vec<String> = snapshot().into_iter().map(|p| p.2).filter(|n| is_chat_app(n)).collect();
+    let playing = playing_apps(true);
+    let mut found: Vec<(u32, String)> = Vec::new();
+    for name in running {
+        if found.iter().any(|f| f.1.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        if let Some(pid) = find_root_process(&name) {
+            found.push((pid, name));
+        }
+    }
+    let rank = |n: &str| CHAT_APPS.iter().position(|c| *c == n.to_lowercase().trim_end_matches(".exe")).unwrap_or(usize::MAX);
+    found.sort_by_key(|f| (!playing.iter().any(|p| p.1.eq_ignore_ascii_case(&f.1)), rank(&f.1)));
+    found.into_iter().next()
+}
+
 /// Apps playing sound right now on the default output: (root pid, exe name).
 /// One cheap COM query (no capture, no polling threads); ~1 ms.
 /// `idle`: also list apps that have an audio session but are silent right now
@@ -230,7 +262,43 @@ pub fn cache_icon(dir: &std::path::Path, name: &str, pid: u32) -> Option<Vec<u8>
     Some(png)
 }
 
+/// Like `cache_icon` but always re-saves, so a shared name ("Discord") shows the icon of the
+/// variant (Vesktop, Canary...) that was actually recorded.
+pub fn save_icon(dir: &std::path::Path, name: &str, pid: u32) {
+    if let Some(png) = app_icon_png(pid) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(icon_file(dir, name), png);
+    }
+}
+
 /// An icon saved earlier by `cache_icon`.
 pub fn cached_icon(dir: &std::path::Path, name: &str) -> Option<Vec<u8>> {
     std::fs::read(icon_file(dir, name)).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_apps_are_recognised_by_any_variant_name() {
+        for n in ["Discord.exe", "DiscordCanary.exe", "DiscordPTB.exe", "Vesktop.exe", "vesktop", "Equibop.exe", "legcord.exe"] {
+            assert!(is_chat_app(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn other_apps_are_not_chat_apps() {
+        for n in ["Spotify.exe", "chrome.exe", "Update.exe", "discord-rpc-helper.exe", "", "RobloxPlayerBeta.exe"] {
+            assert!(!is_chat_app(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn finds_running_chat_app_if_open() {
+        // Real-process smoke: must not panic, and any hit must be a chat app.
+        if let Some((pid, exe)) = find_chat_app() {
+            assert!(pid != 0 && is_chat_app(&exe));
+        }
+    }
 }

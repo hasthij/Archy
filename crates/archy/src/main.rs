@@ -396,7 +396,7 @@ fn extra_apps(s: &Settings, game_pid: u32) -> Vec<(u32, String)> {
         .filter(|(pid, stem)| {
             *pid != game_pid
                 && *pid != me
-                && !stem.eq_ignore_ascii_case("discord")
+                && !archy_audio::is_chat_app(stem)
                 && !stem.eq_ignore_ascii_case("archy")
                 && !s.app_blocked(stem)
         })
@@ -439,7 +439,8 @@ fn recorder_config(s: &Settings, target: Target, game_pid: u32, vols: &TrackVolu
         });
     }
     if with_discord {
-        if let Some(pid) = archy_audio::find_root_process("Discord.exe") {
+        if let Some((pid, _)) = archy_audio::find_chat_app() {
+            archy_audio::save_icon(&archy_core::settings::app_dir().join("icons"), "Discord", pid);
             audio.push(AudioSource {
                 name: "Discord".into(),
                 source: Source::Process { pid },
@@ -809,7 +810,7 @@ impl App {
             let discord = !ended
                 && check_discord
                 && !s.recorder.audio_tracks().iter().any(|t| t == "Discord")
-                && archy_audio::find_root_process("Discord.exe").is_some();
+                && archy_audio::find_chat_app().is_some();
             // An allowed app started playing after recording began: restart once to
             // add its track (once per app per recording, so it never loops).
             let mut new_app = None;

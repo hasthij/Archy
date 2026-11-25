@@ -163,9 +163,6 @@ function closeEditor() {
 /// Any source changed or muted: mix the sources instead (master scales them all).
 /// A real mixer: with any source strips, Master scales the sources together and the
 /// Everything track is not played. Everything alone only when it is the clip's only track.
-function mixEdited() {
-  return ed.ev < 0 || ed.info.tracks.length > 1;
-}
 function sourcesTouched() {
   return ed.info.tracks.some((_, i) => i !== ed.ev && (ed.sep[i] !== 100 || ed.mute[i]));
 }
@@ -173,7 +170,8 @@ function volumes() {
   // Untouched sources: play Everything alone. Any source moved or muted: Everything goes
   // quiet and the sources are mixed instead (subtracting one from Everything never cancels:
   // both are separately compressed).
-  const mixing = mixEdited();
+  // Everything holds sound no source track has (e.g. a WhatsApp call), so it plays until a source is touched.
+  const mixing = ed.ev < 0 || sourcesTouched();
   return ed.info.tracks.map((_, i) => {
     if (ed.mmute) return 0;
     if (i === ed.ev) return mixing ? 0 : ed.main;
@@ -1075,6 +1073,10 @@ function stripIcon(name) {
   const box = el("span", { class: "mx-icon", "aria-hidden": "true" });
   if (d) {
     box.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
+    // The Discord track shows the icon of the app actually recorded (Discord, Canary, Vesktop...).
+    if (name === "Discord") invoke("app_icon", { name }).then((u) => {
+      if (u) { box.replaceChildren(el("img", { src: u, alt: "" })); box.classList.add("img"); }
+    }).catch(() => {});
   } else {
     // An app's own icon if Archy saved one; else a generic app glyph.
     box.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18"/></svg>`;

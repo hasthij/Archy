@@ -9,7 +9,7 @@
 !README.md
 
 # big local-only promo models
-promo/audio/models/
+/promo
 
 # Build/dev scripts: local only
 /scripts
@@ -17,3 +17,5 @@ assets/make_*.py
 
 # Local helper scripts are never committed
 *.ps1
+# Claude context (local only)
+/CLAUDECONTEXT/

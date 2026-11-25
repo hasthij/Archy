@@ -146,6 +146,7 @@ impl Foreground {
         }
         self.fullscreen
             && !NOT_GAMES.iter().any(|n| n.eq_ignore_ascii_case(&self.exe))
+            && !archy_audio::is_chat_app(&self.exe)
     }
 }
 

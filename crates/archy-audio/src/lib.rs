@@ -22,7 +22,7 @@ use std::thread::JoinHandle;
 pub use aac::AacInfo;
 pub use denoise::{Filter, MicFilter, GATE_OFF};
 pub use pcm::{listen_microphone, monitor_microphone};
-pub use process::{app_icon_png, cache_icon, cached_icon, find_process_matching, find_root_process, playing_apps};
+pub use process::{app_icon_png, cache_icon, cached_icon, find_chat_app, find_process_matching, find_root_process, is_chat_app, playing_apps, save_icon};
 use windows::core::{Error, Result};
 use windows::Win32::Foundation::E_FAIL;
 

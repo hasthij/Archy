@@ -888,6 +888,7 @@ async fn playing_apps() -> Vec<serde_json::Value> {
         let dir = archy_core::settings::app_dir().join("icons");
         archy_audio::playing_apps(true)
             .into_iter()
+            .filter(|(_, exe)| !archy_audio::is_chat_app(exe)) // chat apps have their own Discord slider
             .map(|(pid, exe)| {
                 let name = exe.trim_end_matches(".exe").to_string();
                 let icon = icon_url(archy_audio::cache_icon(&dir, &name, pid));
