@@ -127,7 +127,7 @@ async function openEditor(clip, opts = {}) {
     items: [], lanes: { text: 1, image: 1, video: 1, audio: 1 }, audioLanes: [], media: [], selected: null,
     format: opts.format || "mp4", gifWidth: 480, gifFps: 15,
     // Shape of the result: "original" or a crop like "9:16"; where the frame sits.
-    aspect: "original", cropX: 0.5, cropY: 0.5,
+    aspect: "original", cropX: 0.5, cropY: 0.5, free: { x: 0.1, y: 0.1, w: 0.8, h: 0.8 },
     // Sections made by splitting: each kept or removed, with its own speed and zoom.
     secs: [{ from: 0, to: info.duration, speed: 1, zoom: 1, keep: true }],
     secIndex: -1, quietSpeed: false, undo: [], redo: [],
@@ -286,6 +286,7 @@ function buildEditor() {
   d.crop = el("div", { class: "ed-crop", hidden: true }, d.cropGrip);
   d.stage = el("div", { class: "ed-stage" }, d.video, d.canvas, d.crop);
   cropDrag(d.cropGrip);
+  cropHandles(d.crop);
   stagePointer(d.canvas);
   dropTarget(d.stage, (m, e) => {
     const r = d.canvas.getBoundingClientRect();
@@ -293,6 +294,8 @@ function buildEditor() {
   });
 
   d.play = el("button", { class: "btn", text: "Play", onclick: togglePlay });
+  d.cropBtn = el("button", { class: "btn", text: "Crop", "aria-pressed": "false", title: "Crop the picture to any shape",
+    onclick: () => { setShape(ed.aspect === "original" ? "free" : "original"); } });
   d.time = el("span", { class: "ed-time" });
   d.range = el("div", { class: "ed-range" });
   d.hStart = el("div", { class: "ed-handle", "aria-label": "Trim start", role: "slider", tabindex: "0" });
@@ -312,6 +315,7 @@ function buildEditor() {
   const side = el("div", { class: "ed-side" },
     section("Trim", trimPanel()),
     section("Split, speed and zoom", (d.secPanel = el("div"))),
+    section("Crop", (d.cropBox = el("div"))),
     section("Captions", (d.capBox = el("div", { class: "cap-opt" }))),
     section("Selected", d.props));
   d.audioSec = section("Audio", d.audio);
@@ -336,7 +340,7 @@ function buildEditor() {
       d.bay,
       el("div", { class: "ed-main" },
         d.stage,
-        el("div", { class: "ed-transport" }, d.play, d.time),
+        el("div", { class: "ed-transport" }, d.play, d.cropBtn, d.time),
         el("div", { class: "ed-tl" }, el("span", { class: "ed-lane-name", text: "Clip" }), d.timeline),
         (d.arrRow = el("div", { class: "ed-tl", hidden: true }, el("span", { class: "ed-lane-name", text: "Order", title: "The order the parts play in the saved video" }), (d.arr = el("div", { class: "ed-arr" })))),
         d.lanes, d.laneButtons),
@@ -386,7 +390,7 @@ function buildEditor() {
   ed.resize.observe(d.canvas);
 
   ed.raf = requestAnimationFrame(tick);
-  renderBay(); renderAudio(); renderLanes(); renderProps(); renderExport(); updateTrim(); renderSections();
+  renderBay(); renderAudio(); renderLanes(); renderProps(); renderExport(); renderCrop(); updateTrim(); renderSections();
 }
 
 // ---------- auto captions ----------
@@ -1892,12 +1896,13 @@ function renderProps() {
 
 // ---------- export ----------
 // ---------- crop (9:16, 1:1, ...) ----------
-const ASPECTS = [["original", "Original"], ["9:16", "9:16 TikTok / Shorts"], ["1:1", "1:1 Square"], ["4:5", "4:5 Instagram"], ["16:9", "16:9"]];
+const ASPECTS = [["original", "Original"], ["9:16", "9:16 TikTok / Shorts"], ["1:1", "1:1 Square"], ["4:5", "4:5 Instagram"], ["16:9", "16:9"], ["free", "Free: any size"]];
 
 /// The crop frame as fractions of the clip: the biggest box of the chosen shape,
 /// centred on (cropX, cropY) and kept inside the picture. `null` = no crop.
 function cropRect() {
   if (ed.aspect === "original") return null;
+  if (ed.aspect === "free") return ed.free;
   const [a, b] = ed.aspect.split(":").map(Number);
   const want = a / b;
   const clip = ed.info.width / ed.info.height;
@@ -1911,6 +1916,7 @@ function showCrop() {
   const r = cropRect();
   const box = ed.dom.crop;
   box.hidden = !r;
+  box.classList.toggle("free", ed.aspect === "free");
   if (!r) return;
   Object.assign(box.style, { left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` });
 }
@@ -1923,6 +1929,19 @@ function cropDrag(grip) {
     const stage = ed.dom.stage.getBoundingClientRect();
     const start = { x: e.clientX, y: e.clientY, cx: ed.cropX, cy: ed.cropY };
     const r0 = cropRect();
+    if (ed.aspect === "free") {
+      const f0 = { ...ed.free };
+      const moveFree = (ev) => {
+        const x = f0.x + (ev.clientX - start.x) / stage.width, y = f0.y + (ev.clientY - start.y) / stage.height;
+        ed.free = { ...f0, x: Math.min(Math.max(x, 0), 1 - f0.w), y: Math.min(Math.max(y, 0), 1 - f0.h) };
+        showCrop();
+      };
+      const upFree = () => { grip.removeEventListener("pointermove", moveFree); grip.removeEventListener("pointerup", upFree); grip.removeEventListener("lostpointercapture", upFree); };
+      grip.addEventListener("pointermove", moveFree);
+      grip.addEventListener("pointerup", upFree);
+      grip.addEventListener("lostpointercapture", upFree);
+      return;
+    }
     // Start from where the frame really is (it may sit against an edge).
     start.cx = r0.x + r0.w / 2;
     start.cy = r0.y + r0.h / 2;
@@ -1934,9 +1953,10 @@ function cropDrag(grip) {
       ed.cropY = r.y + r.h / 2;
       showCrop();
     };
-    const up = () => { grip.removeEventListener("pointermove", move); grip.removeEventListener("pointerup", up); };
+    const up = () => { grip.removeEventListener("pointermove", move); grip.removeEventListener("pointerup", up); grip.removeEventListener("lostpointercapture", up); };
     grip.addEventListener("pointermove", move);
     grip.addEventListener("pointerup", up);
+    grip.addEventListener("lostpointercapture", up);
   });
   grip.addEventListener("keydown", (e) => {
     const step = e.shiftKey ? 0.1 : 0.02;
@@ -1945,10 +1965,60 @@ function cropDrag(grip) {
     if (!dx && !dy) return;
     e.preventDefault();
     const r = cropRect();
+    if (ed.aspect === "free") {
+      ed.free = { ...r, x: Math.min(Math.max(r.x + dx, 0), 1 - r.w), y: Math.min(Math.max(r.y + dy, 0), 1 - r.h) };
+      showCrop();
+      return;
+    }
     ed.cropX = r.x + r.w / 2 + dx;
     ed.cropY = r.y + r.h / 2 + dy;
     showCrop();
   });
+}
+
+/// Free crop: eight handles (edges and corners) resize the frame to any shape.
+const CROP_MIN = 0.05;
+function cropHandles(box) {
+  for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
+    const h = el("div", { class: `ed-crop-h ed-crop-${dir}` });
+    h.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      h.setPointerCapture(e.pointerId);
+      const st = ed.dom.stage.getBoundingClientRect();
+      const r0 = { ...ed.free }, sx = e.clientX, sy = e.clientY;
+      const move = (ev) => {
+        const dx = (ev.clientX - sx) / st.width, dy = (ev.clientY - sy) / st.height;
+        let l = r0.x, t = r0.y, r = r0.x + r0.w, b = r0.y + r0.h;
+        if (dir.includes("w")) l = Math.min(Math.max(l + dx, 0), r - CROP_MIN);
+        if (dir.includes("e")) r = Math.max(Math.min(r + dx, 1), l + CROP_MIN);
+        if (dir.includes("n")) t = Math.min(Math.max(t + dy, 0), b - CROP_MIN);
+        if (dir.includes("s")) b = Math.max(Math.min(b + dy, 1), t + CROP_MIN);
+        ed.free = { x: l, y: t, w: r - l, h: b - t };
+        showCrop();
+      };
+      const up = () => { h.removeEventListener("pointermove", move); h.removeEventListener("pointerup", up); h.removeEventListener("lostpointercapture", up); };
+      h.addEventListener("pointermove", move);
+      h.addEventListener("pointerup", up);
+      h.addEventListener("lostpointercapture", up);
+    });
+    box.append(h);
+  }
+}
+
+function setShape(v) {
+  ed.aspect = v; ed.cropX = 0.5; ed.cropY = 0.5; ed.free = { x: 0.1, y: 0.1, w: 0.8, h: 0.8 };
+  renderCrop(); renderExport();
+}
+
+/// The Crop panel: shape chips (Original = no crop) plus a short how-to.
+function renderCrop() {
+  ed.dom.cropBtn.setAttribute("aria-pressed", String(ed.aspect !== "original"));
+  ed.dom.cropBox.replaceChildren(
+    el("div", { class: "chips ed-chips", role: "group", "aria-label": "Shape" },
+      ASPECTS.map(([v, label]) => el("button", { class: "chip", "aria-pressed": String(ed.aspect === v), onclick: () => setShape(v) }, label))),
+    ed.aspect === "original" ? el("p", { class: "ed-note", text: "Pick a shape, or Free to crop to anything you like. The original clip is never changed." })
+      : el("p", { class: "ed-note", text: (ed.aspect === "free" ? "Drag the corners or edges to crop to any size, and the top tab to move it. " : "Drag the frame on the video to choose what's in shot. ") + "Put text inside the frame; anything outside is cut off." }));
+  showCrop();
 }
 
 function renderExport() {
@@ -1974,18 +2044,11 @@ function renderExport() {
     el("p", { class: "ed-note", text: "Keep the editor open until it's done. Your original clip is never changed." }));
   ed.dom.save = el("button", { class: "btn primary full", text: "Export clip", onclick: () => runExport(false) });
   ed.dom.copy = el("button", { class: "btn", text: "Copy to clipboard", onclick: () => runExport(true) });
-  const shape = el("div", {},
-    el("div", { class: "chips ed-chips", role: "group", "aria-label": "Shape" },
-      ASPECTS.map(([v, label]) => el("button", { class: "chip", "aria-pressed": String(ed.aspect === v),
-        onclick: () => { ed.aspect = v; ed.cropX = 0.5; ed.cropY = 0.5; renderExport(); } }, label))),
-    ed.aspect === "original" ? null
-      : el("p", { class: "ed-note", text: "Drag the frame on the video to choose what's in shot. Put text inside the frame; anything outside is cut off." }));
-  showCrop();
   const capCount = ed.items.filter((i) => i.cap).length;
   const srtOpt = capCount && ed.format !== "mp3" ? el("label", { class: "ed-check" },
     (() => { const b = el("input", { type: "checkbox" }); b.checked = ed.cap.srt; b.addEventListener("change", () => { ed.cap.srt = b.checked; }); return b; })(),
     "Also save the captions as a .srt subtitle file") : null;
-  ed.dom.export.replaceChildren(...[fmtSeg, shape, gifOpts, srtOpt].filter(Boolean), el("div", { class: "ed-row" }, ed.dom.save, ed.dom.copy), ed.dom.progress);
+  ed.dom.export.replaceChildren(...[fmtSeg, gifOpts, srtOpt].filter(Boolean), el("div", { class: "ed-row" }, ed.dom.save, ed.dom.copy), ed.dom.progress);
 }
 
 function untouched() {

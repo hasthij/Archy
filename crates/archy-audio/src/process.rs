@@ -119,6 +119,24 @@ pub fn playing_apps(idle: bool) -> Vec<(u32, String)> {
     for pid in pids {
         // Walk up to the root of the same-named chain (Brave's audio child -> brave.exe).
         let Some((mut parent, exe)) = name(pid) else { continue };
+        // Archy's own editor (WebView2 under archy-ui.exe) is not an app to record: its preview
+        // sound would add a track and restart the recorder every time.
+        let (mut up, mut hops) = (parent, 0);
+        let mut ours = false;
+        while let Some((pp, pn)) = name(up) {
+            if pn.eq_ignore_ascii_case("archy-ui.exe") || pn.eq_ignore_ascii_case("archy-ui") {
+                ours = true;
+                break;
+            }
+            hops += 1;
+            if hops > 8 {
+                break;
+            }
+            up = pp;
+        }
+        if ours {
+            continue;
+        }
         let mut root = pid;
         while let Some((pp, pn)) = name(parent) {
             if !pn.eq_ignore_ascii_case(&exe) {

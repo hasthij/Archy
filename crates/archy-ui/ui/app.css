@@ -594,7 +594,7 @@ textarea { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid
 /* Editor crop frame: everything outside it is dimmed; only the grip takes the mouse,
    so text and images inside can still be picked and moved. */
 .ed-crop { position: absolute; box-shadow: 0 0 0 9999px color-mix(in srgb, #000 60%, transparent); outline: 2px solid var(--accent); pointer-events: none; }
-.ed-crop-grip { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); padding: 4px 10px; border-radius: 999px; background: var(--accent); color: var(--on-accent); font: 600 11px var(--mono); cursor: grab; pointer-events: auto; white-space: nowrap; touch-action: none; }
+.ed-crop-grip { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 4px 10px; border-radius: 999px; background: var(--accent); color: var(--on-accent); font: 600 11px var(--mono); cursor: grab; pointer-events: auto; white-space: nowrap; touch-action: none; }
 .ed-crop-grip:active { cursor: grabbing; }
 
 /* Editor sections on the Clip track */
@@ -917,3 +917,25 @@ select:focus-visible { border-color: var(--accent); outline: 2px solid var(--acc
 
 /* While the window is being resized or maximised, freeze motion so the page only has to lay out once */
 html.resizing *, html.resizing *::before, html.resizing *::after { transition: none !important; animation-play-state: paused !important; }
+
+/* Crop frame like a photo editor: thin white border, rule-of-thirds 3x3 grid,
+   thick corner brackets and edge bars to resize (Free shape). */
+.ed-crop { outline: 1px solid rgba(255,255,255,.9); }
+.ed-crop::before { content: ""; position: absolute; inset: 0; pointer-events: none;
+  background-image: linear-gradient(rgba(255,255,255,.55), rgba(255,255,255,.55)), linear-gradient(rgba(255,255,255,.55), rgba(255,255,255,.55)), linear-gradient(rgba(255,255,255,.55), rgba(255,255,255,.55)), linear-gradient(rgba(255,255,255,.55), rgba(255,255,255,.55));
+  background-repeat: no-repeat;
+  background-size: 1px 100%, 1px 100%, 100% 1px, 100% 1px;
+  background-position: 33.333% 0, 66.666% 0, 0 33.333%, 0 66.666%; }
+.ed-crop-h { position: absolute; width: 28px; height: 28px; pointer-events: auto; touch-action: none; display: none; }
+.ed-crop.free .ed-crop-h { display: block; }
+.ed-crop-h::after { content: ""; position: absolute; box-sizing: border-box; border: 0 solid #fff; filter: drop-shadow(0 0 2px rgba(0,0,0,.6)); }
+.ed-crop-nw { left: 0; top: 0; cursor: nwse-resize; } .ed-crop-nw::after { left: 4px; top: 4px; width: 20px; height: 20px; border-width: 3px 0 0 3px; }
+.ed-crop-ne { right: 0; top: 0; cursor: nesw-resize; } .ed-crop-ne::after { right: 4px; top: 4px; width: 20px; height: 20px; border-width: 3px 3px 0 0; }
+.ed-crop-sw { left: 0; bottom: 0; cursor: nesw-resize; } .ed-crop-sw::after { left: 4px; bottom: 4px; width: 20px; height: 20px; border-width: 0 0 3px 3px; }
+.ed-crop-se { right: 0; bottom: 0; cursor: nwse-resize; } .ed-crop-se::after { right: 4px; bottom: 4px; width: 20px; height: 20px; border-width: 0 3px 3px 0; }
+.ed-crop-n, .ed-crop-s { left: calc(50% - 20px); width: 40px; height: 20px; cursor: ns-resize; }
+.ed-crop-e, .ed-crop-w { top: calc(50% - 20px); width: 20px; height: 40px; cursor: ew-resize; }
+/* Handles sit INSIDE the frame: the stage clips anything outside it, so a frame at the picture edge could not be grabbed. */
+.ed-crop-n { top: 0; } .ed-crop-s { bottom: 0; } .ed-crop-e { right: 0; } .ed-crop-w { left: 0; }
+.ed-crop-n::after { left: 8px; width: 24px; height: 0; border-top-width: 3px; top: 4px; } .ed-crop-s::after { left: 8px; width: 24px; height: 0; border-top-width: 3px; bottom: 4px; }
+.ed-crop-w::after { top: 8px; height: 24px; width: 0; border-left-width: 3px; left: 4px; } .ed-crop-e::after { top: 8px; height: 24px; width: 0; border-left-width: 3px; right: 4px; }
