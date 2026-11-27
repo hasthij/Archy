@@ -314,6 +314,25 @@ fn notify(_window: isize, title: &str, text: &str, warning: bool) {
     toast::show(title, text, warning);
 }
 
+/// The voice engine can't load because Windows' Visual C++ runtime is missing or
+/// old: ask the user, and if they agree download and start Microsoft's installer.
+/// Runs on its own thread so the dialog doesn't freeze the tray.
+fn offer_cpp_runtime() {
+    std::thread::spawn(|| {
+        let answer = unsafe {
+            MessageBoxW(
+                None,
+                w!("Saying your clip phrase (and calibrating it) needs a newer Microsoft Visual C++ runtime than this PC has.\n\nInstall it now? Archy downloads it from Microsoft (about 25 MB) and Windows asks you to approve it."),
+                w!("Archy: voice clipping"),
+                MB_YESNO | MB_ICONQUESTION,
+            )
+        };
+        if answer == IDYES {
+            archy_core::permissions::open_cpp_runtime_download();
+        }
+    });
+}
+
 /// The old Windows balloon, kept for reference and as a fallback.
 #[allow(dead_code)]
 fn notify_balloon(window: isize, title: &str, text: &str, warning: bool) {
@@ -682,6 +701,10 @@ impl App {
             let recent = self.voice_warned.get().is_some_and(|t| t.elapsed().as_secs() < 300);
             if !recent {
                 self.voice_warned.set(Some(std::time::Instant::now()));
+                if code == voice::FAIL_ENGINE && !archy_core::permissions::cpp_runtime_installed() {
+                    offer_cpp_runtime();
+                    return;
+                }
                 notify(self.window.0 as isize, "Saying your clip phrase will not work right now", &format!("{why} Archy keeps trying. The hotkey still works."), true);
             }
             return;

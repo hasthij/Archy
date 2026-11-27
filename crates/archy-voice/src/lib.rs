@@ -365,7 +365,14 @@ pub fn transcribe(dir: &Path, segments: &[&[f32]]) -> Result<Vec<Vec<String>>, S
     let model = dir.join(MODEL_DIR);
     let path = dir.join("sherpa-onnx-c-api.dll");
     let lib = unsafe { LoadLibraryExW(&HSTRING::from(path.as_os_str()), None, LOAD_WITH_ALTERED_SEARCH_PATH) }
-        .map_err(|e| format!("can't load {}: {}", path.display(), e.message()))?;
+        .map_err(|e| {
+            // 1114 = DLL initialization failed: an outdated Visual C++ runtime.
+            if e.code() == windows::core::HRESULT::from_win32(1114) {
+                "Windows needs a newer Microsoft Visual C++ runtime for voice. Archy offers to install it when it starts (or get it from aka.ms/vs/17/release/vc_redist.x64.exe).".to_string()
+            } else {
+                format!("can't load {}: {}", path.display(), e.message())
+            }
+        })?;
     type H = *const c_void;
     macro_rules! sym {
         ($name:literal, $t:ty) => {

@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{IsWindow, PostMessageW};
 /// `FAIL_*` codes below.
 pub const VOICE_ERROR: usize = usize::MAX;
 const FAIL_FILES: isize = 1;
-const FAIL_ENGINE: isize = 2;
+pub const FAIL_ENGINE: isize = 2;
 const FAIL_MIC: isize = 3;
 
 /// The voice helper process. The keyword engine (onnxruntime) aborts the whole
@@ -212,6 +212,9 @@ fn normal_priority() {
 pub fn explain_code(code: isize) -> String {
     match code {
         FAIL_FILES => "The voice files are missing. Reinstall Archy to download them.".into(),
+        FAIL_ENGINE if !archy_core::permissions::cpp_runtime_installed() => {
+            "The voice engine needs a newer Microsoft Visual C++ runtime. Archy can install it for you.".into()
+        }
         FAIL_ENGINE => "The voice engine couldn't start (see archy.log).".into(),
         FAIL_MIC => "Archy couldn't open your microphone. Check Settings > Privacy & security > Microphone > Let desktop apps access your microphone.".into(),
         _ => "Voice clipping couldn't start.".into(),

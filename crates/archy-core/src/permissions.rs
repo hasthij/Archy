@@ -3,7 +3,7 @@
 
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::System::Registry::{
-    RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+    RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -80,19 +80,72 @@ pub fn open_webview2_download() {
     open("https://go.microsoft.com/fwlink/p/?LinkId=2124703");
 }
 
-/// Microsoft's Visual C++ runtime, which the voice engine's DLLs need. Most PCs
-/// already have it (games and drivers install it).
+/// Oldest Visual C++ runtime (14.<this>) the voice engine loads on. An older one
+/// has the same DLL names but the engine fails with "DLL initialization routine
+/// failed" (seen on Windows 10 PCs that only had a games-era runtime).
+const MIN_CPP_RUNTIME_MINOR: u32 = 38;
+
+fn read_dword(root: HKEY, key: &str, value: PCWSTR) -> Option<u32> {
+    let key = HSTRING::from(key);
+    let mut out = 0u32;
+    let mut size = 4u32;
+    let r = unsafe {
+        RegGetValueW(root, &key, value, RRF_RT_REG_DWORD, None, Some(&mut out as *mut u32 as *mut _), Some(&mut size))
+    };
+    r.is_ok().then_some(out)
+}
+
+/// Microsoft's Visual C++ runtime, which the voice engine's DLLs need: present
+/// and new enough. Most PCs already have it (games and drivers install it), but
+/// often an old one.
 pub fn cpp_runtime_installed() -> bool {
     let system = std::env::var_os("SystemRoot")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| r"C:\Windows".into())
         .join("System32");
-    ["msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll"]
+    let files = ["msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll"]
         .iter()
-        .all(|f| system.join(f).exists())
+        .all(|f| system.join(f).exists());
+    let minor = read_dword(
+        HKEY_LOCAL_MACHINE,
+        r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64",
+        w!("Minor"),
+    );
+    files && minor.is_some_and(|m| m >= MIN_CPP_RUNTIME_MINOR)
 }
 
-/// Microsoft's official Visual C++ runtime installer (x64).
+const CPP_RUNTIME_URL: &str = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
+
+/// Downloads Microsoft's official Visual C++ runtime installer (x64) and runs it
+/// (Windows asks the user to approve it; it shows its own progress). Falls back to
+/// opening the download link in the browser if the download fails. Returns at once.
 pub fn open_cpp_runtime_download() {
-    open("https://aka.ms/vs/17/release/vc_redist.x64.exe");
+    use std::os::windows::process::CommandExt;
+    std::thread::spawn(|| {
+        let file = std::env::temp_dir().join("Archy-vc_redist.x64.exe");
+        let curl = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap_or(r"C:\Windows".into()))
+            .join("System32")
+            .join("curl.exe");
+        let downloaded = std::process::Command::new(curl)
+            .args(["-fsSL", "--retry", "2", "--connect-timeout", "20", "-o"])
+            .arg(&file)
+            .arg(CPP_RUNTIME_URL)
+            .creation_flags(0x0800_0000) // no console window
+            .status()
+            .is_ok_and(|s| s.success());
+        if !downloaded {
+            open(CPP_RUNTIME_URL);
+            return;
+        }
+        unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                &HSTRING::from(file.as_os_str()),
+                w!("/install /passive /norestart"),
+                None,
+                SW_SHOWNORMAL,
+            );
+        }
+    });
 }

@@ -405,7 +405,7 @@ pub fn perform(o: &Opts, step: &dyn Fn(f32, &str)) -> Result<Vec<Note>, String> 
     // Things Archy needs that only the user can change; Archy never changes them itself.
     if !permissions::cpp_runtime_installed() {
         notes.push(Note {
-            text: "Voice clipping needs Microsoft's Visual C++ runtime, which isn't on this PC.".into(),
+            text: "Voice clipping needs Microsoft's Visual C++ runtime, which is missing or too old on this PC.".into(),
             fix: Some(permissions::open_cpp_runtime_download),
         });
     }
